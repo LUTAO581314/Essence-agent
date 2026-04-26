@@ -91,6 +91,8 @@ small on purpose:
   their user decisions.
 - `start_tool_call`, `complete_tool_call`, and `fail_tool_call` record tool
   execution boundaries.
+- `create_task`, `update_task`, `complete_task`, and `create_artifact` connect
+  work tracking and artifacts to the WAL.
 - `append_event` is the escape hatch for typed protocol work that has not earned
   a dedicated helper yet.
 - `projection` replays a session WAL into the current `LedgerProjection`.

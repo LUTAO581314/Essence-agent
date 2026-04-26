@@ -7,10 +7,11 @@ use uuid::Uuid;
 
 use crate::projection::{LedgerProjection, ProjectionError};
 use crate::protocol::{
-    ApprovalDecision, ApprovalId, ApprovalRequest, ContentBlock, EventEnvelope, EventSource,
-    EventType, EventVisibility, LifecycleStatus, MessagePayload, MessageRole, PermissionMode,
-    RunId, RunMeta, SessionId, SessionMeta, SessionMode, ToolCallId, ToolCallRecord, TriggerKind,
-    TurnId,
+    AgentId, ApprovalDecision, ApprovalId, ApprovalRequest, ArtifactId, ArtifactRecord,
+    ContentBlock, EventEnvelope, EventSource, EventType, EventVisibility, JsonObject, LaneId,
+    LifecycleStatus, MessagePayload, MessageRole, PermissionMode, RunId, RunMeta, SessionId,
+    SessionMeta, SessionMode, TaskId, TaskPatch, TaskRecord, ToolCallId, ToolCallRecord,
+    TriggerKind, TurnId,
 };
 use crate::wal::{JsonlWal, WalError};
 
@@ -261,6 +262,92 @@ impl ControlPlane {
         error: impl Into<String>,
     ) -> ControlResult<ToolCallRecord> {
         self.finish_tool_call(tool_call, LifecycleStatus::Failed, None, Some(error.into()))
+    }
+
+    pub fn create_task(&self, request: CreateTaskRequest) -> ControlResult<TaskRecord> {
+        let now = OffsetDateTime::now_utc();
+        let task = TaskRecord {
+            task_id: TaskId(Uuid::new_v4()),
+            session_id: request.session_id.clone(),
+            title: request.title,
+            status: request.status,
+            created_at: now,
+            updated_at: now,
+            parent_task_id: request.parent_task_id,
+            lane_id: request.lane_id,
+            assignee: request.assignee,
+            metadata: request.metadata,
+        };
+
+        self.append_typed_event(
+            &request.session_id,
+            EventType::TaskCreated,
+            EventSource::System,
+            EventVisibility::Audit,
+            &task,
+        )?;
+
+        Ok(task)
+    }
+
+    pub fn update_task(
+        &self,
+        session_id: &SessionId,
+        patch: TaskPatch,
+    ) -> ControlResult<TaskPatch> {
+        self.append_typed_event(
+            session_id,
+            EventType::TaskStateChanged,
+            EventSource::System,
+            EventVisibility::Audit,
+            &patch,
+        )?;
+
+        Ok(patch)
+    }
+
+    pub fn complete_task(&self, task: &TaskRecord) -> ControlResult<TaskPatch> {
+        let patch = TaskPatch {
+            task_id: task.task_id.clone(),
+            title: None,
+            status: Some(LifecycleStatus::Completed),
+            updated_at: Some(OffsetDateTime::now_utc()),
+            assignee: None,
+            metadata: Default::default(),
+        };
+
+        self.append_typed_event(
+            &task.session_id,
+            EventType::TaskCompleted,
+            EventSource::System,
+            EventVisibility::Audit,
+            &patch,
+        )?;
+
+        Ok(patch)
+    }
+
+    pub fn create_artifact(&self, request: CreateArtifactRequest) -> ControlResult<ArtifactRecord> {
+        let artifact = ArtifactRecord {
+            artifact_id: ArtifactId(Uuid::new_v4()),
+            session_id: request.session_id.clone(),
+            uri: request.uri,
+            kind: request.kind,
+            created_at: OffsetDateTime::now_utc(),
+            task_id: request.task_id,
+            run_id: request.run_id,
+            metadata: request.metadata,
+        };
+
+        self.append_typed_event(
+            &request.session_id,
+            EventType::ArtifactCreated,
+            EventSource::System,
+            EventVisibility::Audit,
+            &artifact,
+        )?;
+
+        Ok(artifact)
     }
 
     pub fn append_event(
@@ -588,15 +675,95 @@ impl StartToolCallRequest {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct CreateTaskRequest {
+    pub session_id: SessionId,
+    pub title: String,
+    pub status: LifecycleStatus,
+    pub parent_task_id: Option<TaskId>,
+    pub lane_id: Option<LaneId>,
+    pub assignee: Option<AgentId>,
+    pub metadata: JsonObject,
+}
+
+impl CreateTaskRequest {
+    pub fn new(session_id: SessionId, title: impl Into<String>) -> Self {
+        Self {
+            session_id,
+            title: title.into(),
+            status: LifecycleStatus::Queued,
+            parent_task_id: None,
+            lane_id: None,
+            assignee: None,
+            metadata: Default::default(),
+        }
+    }
+
+    pub fn with_status(mut self, status: LifecycleStatus) -> Self {
+        self.status = status;
+        self
+    }
+
+    pub fn with_parent(mut self, parent_task_id: TaskId) -> Self {
+        self.parent_task_id = Some(parent_task_id);
+        self
+    }
+
+    pub fn with_lane(mut self, lane_id: impl Into<String>) -> Self {
+        self.lane_id = Some(LaneId(lane_id.into()));
+        self
+    }
+
+    pub fn with_assignee(mut self, agent_id: impl Into<String>) -> Self {
+        self.assignee = Some(AgentId(agent_id.into()));
+        self
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateArtifactRequest {
+    pub session_id: SessionId,
+    pub uri: String,
+    pub kind: String,
+    pub task_id: Option<TaskId>,
+    pub run_id: Option<RunId>,
+    pub metadata: JsonObject,
+}
+
+impl CreateArtifactRequest {
+    pub fn new(session_id: SessionId, uri: impl Into<String>, kind: impl Into<String>) -> Self {
+        Self {
+            session_id,
+            uri: uri.into(),
+            kind: kind.into(),
+            task_id: None,
+            run_id: None,
+            metadata: Default::default(),
+        }
+    }
+
+    pub fn for_task(mut self, task_id: TaskId) -> Self {
+        self.task_id = Some(task_id);
+        self
+    }
+
+    pub fn for_run(mut self, run_id: RunId) -> Self {
+        self.run_id = Some(run_id);
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use time::OffsetDateTime;
     use uuid::Uuid;
 
     use crate::control::{
-        ControlPlane, CreateSessionRequest, RequestApprovalRequest, StartToolCallRequest,
+        ControlPlane, CreateArtifactRequest, CreateSessionRequest, CreateTaskRequest,
+        RequestApprovalRequest, StartToolCallRequest,
     };
-    use crate::protocol::{ApprovalDecision, ContentBlock, EventType, LifecycleStatus};
+    use crate::protocol::{ApprovalDecision, ContentBlock, EventType, LifecycleStatus, TaskPatch};
 
     #[test]
     fn creates_session_and_projects_user_messages() {
@@ -746,6 +913,65 @@ mod tests {
         assert_eq!(projected.status, LifecycleStatus::Completed);
         assert_eq!(projected.output, Some(json!({"exit_code": 0})));
         assert_eq!(projected.run_id, Some(run.run_id));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn records_tasks_and_artifacts() {
+        let root = std::env::temp_dir().join(format!("essence-control-{}", Uuid::new_v4()));
+        let control = ControlPlane::new(&root);
+        let session = control
+            .create_session(CreateSessionRequest::interactive("."))
+            .unwrap();
+        let run = control
+            .start_run(crate::control::StartRunRequest::user(
+                session.session_id.clone(),
+            ))
+            .unwrap();
+
+        let task = control
+            .create_task(
+                CreateTaskRequest::new(session.session_id.clone(), "Wire task projection")
+                    .with_status(LifecycleStatus::Running)
+                    .with_lane("main")
+                    .with_assignee("essence"),
+            )
+            .unwrap();
+        control
+            .update_task(
+                &session.session_id,
+                TaskPatch {
+                    task_id: task.task_id.clone(),
+                    title: Some("Wire task and artifact projection".to_string()),
+                    status: Some(LifecycleStatus::Running),
+                    updated_at: Some(OffsetDateTime::now_utc()),
+                    assignee: None,
+                    metadata: Default::default(),
+                },
+            )
+            .unwrap();
+        control.complete_task(&task).unwrap();
+        let artifact = control
+            .create_artifact(
+                CreateArtifactRequest::new(
+                    session.session_id.clone(),
+                    "artifact://notes/task.md",
+                    "markdown",
+                )
+                .for_task(task.task_id.clone())
+                .for_run(run.run_id.clone()),
+            )
+            .unwrap();
+
+        let projection = control.projection(&session.session_id).unwrap();
+        let projected_task = projection.tasks.get(&task.task_id).unwrap();
+        let projected_artifact = projection.artifacts.get(&artifact.artifact_id).unwrap();
+
+        assert_eq!(projected_task.status, LifecycleStatus::Completed);
+        assert_eq!(projected_task.title, "Wire task and artifact projection");
+        assert_eq!(projected_artifact.task_id, Some(task.task_id));
+        assert_eq!(projected_artifact.run_id, Some(run.run_id));
 
         let _ = std::fs::remove_dir_all(root);
     }

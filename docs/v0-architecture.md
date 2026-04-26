@@ -62,7 +62,9 @@ Plugins own external sources and fast-changing integrations:
 10. Task store and UI event stream. Done for the first projection layer:
     `TaskStore` exposes task queries and `UiEventStream` exposes cursor-based
     UI refresh events.
-11. Plugin host and one CLI harness plugin.
+11. Plugin host and one CLI harness plugin. In progress:
+    `PluginHost` registers plugin manifests and exposes their tools through the
+    deterministic tool registry.
 
 ## Permission Policy Contract
 

@@ -33,6 +33,8 @@ Current Rust crate status:
 - `essence-core::task_store`: task projection queries by status, lane, and
   assignee
 - `essence-core::stream`: cursor-based UI event stream over ledger events
+- `essence-core::plugin`: minimal plugin manifest host that registers plugin
+  tools into the core tool registry
 
 The long-term shape is:
 

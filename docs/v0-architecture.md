@@ -83,10 +83,12 @@ small on purpose:
 
 - `create_session` creates a session id, writes the first `session_meta` event,
   and returns the durable `SessionMeta`.
+- `update_session_state`, `cancel_session`, and `events_after` support lifecycle
+  state changes and cursor-based UI refresh.
 - `submit_user_message` and `append_assistant_message` append user-visible
   message events.
-- `start_run`, `complete_run`, and `fail_run` append auditable run lifecycle
-  events.
+- `start_run`, `complete_run`, `fail_run`, and `cancel_run` append auditable run
+  lifecycle events.
 - `request_approval` and `resolve_approval` record permission boundaries and
   their user decisions.
 - `start_tool_call`, `complete_tool_call`, and `fail_tool_call` record tool

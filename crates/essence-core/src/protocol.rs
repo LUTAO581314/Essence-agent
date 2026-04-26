@@ -265,6 +265,14 @@ pub struct SessionMeta {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SessionStatePatch {
+    pub status: LifecycleStatus,
+    pub updated_at: OffsetDateTime,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RunMeta {
     pub run_id: RunId,
     pub turn_id: TurnId,

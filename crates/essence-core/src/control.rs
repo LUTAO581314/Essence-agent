@@ -10,8 +10,8 @@ use crate::protocol::{
     AgentId, ApprovalDecision, ApprovalId, ApprovalRequest, ArtifactId, ArtifactRecord,
     ContentBlock, EventEnvelope, EventSource, EventType, EventVisibility, IsolationMode,
     JsonObject, LaneId, LifecycleStatus, MessagePayload, MessageRole, PermissionMode, RunId,
-    RunMeta, SessionId, SessionMeta, SessionMode, SubagentMeta, SubagentRuntime, TaskId, TaskPatch,
-    TaskRecord, ToolCallId, ToolCallRecord, TriggerKind, TurnId,
+    RunMeta, SessionId, SessionMeta, SessionMode, SessionStatePatch, SubagentMeta, SubagentRuntime,
+    TaskId, TaskPatch, TaskRecord, ToolCallId, ToolCallRecord, TriggerKind, TurnId,
 };
 use crate::wal::{JsonlWal, WalError};
 
@@ -69,6 +69,33 @@ impl ControlPlane {
         )?;
 
         Ok(session)
+    }
+
+    pub fn update_session_state(
+        &self,
+        session_id: &SessionId,
+        status: LifecycleStatus,
+        title: Option<String>,
+    ) -> ControlResult<SessionStatePatch> {
+        let patch = SessionStatePatch {
+            status,
+            updated_at: OffsetDateTime::now_utc(),
+            title,
+        };
+
+        self.append_typed_event(
+            session_id,
+            EventType::SessionStateChanged,
+            EventSource::System,
+            EventVisibility::Audit,
+            &patch,
+        )?;
+
+        Ok(patch)
+    }
+
+    pub fn cancel_session(&self, session_id: &SessionId) -> ControlResult<SessionStatePatch> {
+        self.update_session_state(session_id, LifecycleStatus::Cancelled, None)
     }
 
     pub fn submit_user_message(
@@ -159,6 +186,19 @@ impl ControlPlane {
         stop_reason: impl Into<String>,
     ) -> ControlResult<RunMeta> {
         self.finish_run(run, LifecycleStatus::Failed, None, Some(stop_reason.into()))
+    }
+
+    pub fn cancel_run(
+        &self,
+        run: &RunMeta,
+        stop_reason: impl Into<String>,
+    ) -> ControlResult<RunMeta> {
+        self.finish_run(
+            run,
+            LifecycleStatus::Cancelled,
+            None,
+            Some(stop_reason.into()),
+        )
     }
 
     pub fn request_approval(
@@ -429,6 +469,18 @@ impl ControlPlane {
 
     pub fn events(&self, session_id: &SessionId) -> ControlResult<Vec<EventEnvelope>> {
         self.wal(session_id).replay().map_err(ControlError::from)
+    }
+
+    pub fn events_after(
+        &self,
+        session_id: &SessionId,
+        after_seq: u64,
+    ) -> ControlResult<Vec<EventEnvelope>> {
+        Ok(self
+            .events(session_id)?
+            .into_iter()
+            .filter(|event| event.seq > after_seq)
+            .collect())
     }
 
     pub fn wal_path(&self, session_id: &SessionId) -> PathBuf {
@@ -973,6 +1025,61 @@ mod tests {
             LifecycleStatus::Completed
         );
         assert_eq!(projection.messages.len(), 1);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn records_session_cancel_and_event_cursor() {
+        let root = std::env::temp_dir().join(format!("essence-control-{}", Uuid::new_v4()));
+        let control = ControlPlane::new(&root);
+        let session = control
+            .create_session(CreateSessionRequest::interactive("."))
+            .unwrap();
+        control
+            .submit_user_message(&session.session_id, "hello")
+            .unwrap();
+        control.cancel_session(&session.session_id).unwrap();
+
+        let projection = control.projection(&session.session_id).unwrap();
+        let events_after_first = control.events_after(&session.session_id, 1).unwrap();
+
+        assert_eq!(
+            projection.session.unwrap().status,
+            LifecycleStatus::Cancelled
+        );
+        assert_eq!(events_after_first.len(), 2);
+        assert_eq!(events_after_first[0].seq, 2);
+        assert_eq!(
+            events_after_first[1].event_type,
+            EventType::SessionStateChanged
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn records_run_cancellation() {
+        let root = std::env::temp_dir().join(format!("essence-control-{}", Uuid::new_v4()));
+        let control = ControlPlane::new(&root);
+        let session = control
+            .create_session(CreateSessionRequest::interactive("."))
+            .unwrap();
+        let run = control
+            .start_run(crate::control::StartRunRequest::user(
+                session.session_id.clone(),
+            ))
+            .unwrap();
+
+        let cancelled = control.cancel_run(&run, "user interrupted").unwrap();
+        let projection = control.projection(&session.session_id).unwrap();
+
+        assert_eq!(cancelled.status, LifecycleStatus::Cancelled);
+        assert_eq!(cancelled.stop_reason, Some("user interrupted".to_string()));
+        assert_eq!(
+            projection.runs.get(&run.run_id).unwrap().status,
+            LifecycleStatus::Cancelled
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }

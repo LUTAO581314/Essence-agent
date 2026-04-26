@@ -4,8 +4,8 @@ use serde::de::DeserializeOwned;
 
 use crate::protocol::{
     ApprovalId, ApprovalRequest, ArtifactId, ArtifactRecord, EventEnvelope, EventType,
-    LifecycleStatus, MessagePayload, RunId, RunMeta, SessionMeta, SubagentMeta, TaskId, TaskPatch,
-    TaskRecord, ToolCallId, ToolCallRecord,
+    LifecycleStatus, MessagePayload, RunId, RunMeta, SessionMeta, SessionStatePatch, SubagentMeta,
+    TaskId, TaskPatch, TaskRecord, ToolCallId, ToolCallRecord,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -129,14 +129,6 @@ impl LedgerProjection {
 
         Ok(())
     }
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-struct SessionStatePatch {
-    status: LifecycleStatus,
-    updated_at: time::OffsetDateTime,
-    #[serde(default)]
-    title: Option<String>,
 }
 
 fn decode_payload<T: DeserializeOwned>(event: &EventEnvelope) -> ProjectionResult<T> {

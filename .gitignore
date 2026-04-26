@@ -1,0 +1,11 @@
+target/
+Cargo.lock
+.env
+.env.*
+
+# Local research corpus. These are reference projects, not Essence source.
+学习项目/
+
+# Codex app scratch/cache.
+.omx/
+.omx/remote-inspect/

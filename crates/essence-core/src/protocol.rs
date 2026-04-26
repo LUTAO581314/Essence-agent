@@ -236,6 +236,12 @@ impl EventEnvelope {
             hash: None,
         }
     }
+
+    pub fn with_run(mut self, run_id: RunId, turn_id: TurnId) -> Self {
+        self.run_id = Some(run_id);
+        self.turn_id = Some(turn_id);
+        self
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

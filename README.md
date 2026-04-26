@@ -20,7 +20,8 @@ Current Rust crate status:
 - `essence-core::projection`: in-memory replay views for sessions, runs, tasks,
   artifacts, approvals, subagents, and messages
 - `essence-core::control`: minimal file-backed control plane for creating
-  sessions, appending events, submitting user messages, and reading projections
+  sessions, appending events, submitting messages, tracking run lifecycle, and
+  reading projections
 
 The long-term shape is:
 

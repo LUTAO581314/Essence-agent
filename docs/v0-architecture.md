@@ -83,7 +83,10 @@ small on purpose:
 
 - `create_session` creates a session id, writes the first `session_meta` event,
   and returns the durable `SessionMeta`.
-- `submit_user_message` appends a user-visible `message_user` event.
+- `submit_user_message` and `append_assistant_message` append user-visible
+  message events.
+- `start_run`, `complete_run`, and `fail_run` append auditable run lifecycle
+  events.
 - `append_event` is the escape hatch for typed protocol work that has not earned
   a dedicated helper yet.
 - `projection` replays a session WAL into the current `LedgerProjection`.

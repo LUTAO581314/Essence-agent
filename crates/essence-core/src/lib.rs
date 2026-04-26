@@ -4,6 +4,8 @@
 //! Databases, UI streams, memory indexes, and task views are projections.
 
 pub mod control;
+pub mod gitnexus;
+pub mod harness;
 pub mod plugin;
 pub mod policy;
 pub mod projection;
@@ -15,6 +17,8 @@ pub mod task_store;
 pub mod wal;
 
 pub use control::*;
+pub use gitnexus::*;
+pub use harness::*;
 pub use plugin::*;
 pub use policy::*;
 pub use projection::*;

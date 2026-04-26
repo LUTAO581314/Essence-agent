@@ -64,7 +64,26 @@ Plugins own external sources and fast-changing integrations:
     UI refresh events.
 11. Plugin host and one CLI harness plugin. In progress:
     `PluginHost` registers plugin manifests and exposes their tools through the
-    deterministic tool registry.
+    deterministic tool registry. `essence-core::gitnexus` is the first CLI
+    harness manifest for external code-intelligence tools.
+
+## GitNexus Integration
+
+GitNexus is integrated at the plugin boundary, not copied into the kernel. The
+first bridge is a CLI harness manifest that registers graph-aware tools:
+
+- `gitnexus.query`
+- `gitnexus.context`
+- `gitnexus.impact`
+- `gitnexus.detect_changes`
+- `gitnexus.api_impact`
+- `gitnexus.tool_map`
+- `gitnexus.analyze`
+
+Read-only graph queries are allow-listed tool specs. Repository indexing writes
+`.gitnexus/` state and therefore requires approval. Future runners can execute
+the harness commands while the control plane records tool calls, memory
+candidates, artifacts, and approvals in the WAL.
 
 ## Permission Policy Contract
 

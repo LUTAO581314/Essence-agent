@@ -35,6 +35,9 @@ Current Rust crate status:
 - `essence-core::stream`: cursor-based UI event stream over ledger events
 - `essence-core::plugin`: minimal plugin manifest host that registers plugin
   tools into the core tool registry
+- `essence-core::harness`: CLI harness metadata for external tool adapters
+- `essence-core::gitnexus`: first code-intelligence harness plugin for
+  GitNexus graph search, context, impact, diff detection, and indexing
 
 The long-term shape is:
 

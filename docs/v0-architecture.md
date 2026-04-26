@@ -93,6 +93,8 @@ small on purpose:
   execution boundaries.
 - `create_task`, `update_task`, `complete_task`, and `create_artifact` connect
   work tracking and artifacts to the WAL.
+- `spawn_subagent`, `update_subagent_progress`, `complete_subagent`, and
+  `fail_subagent` record parallel actor lifecycle metadata.
 - `append_event` is the escape hatch for typed protocol work that has not earned
   a dedicated helper yet.
 - `projection` replays a session WAL into the current `LedgerProjection`.

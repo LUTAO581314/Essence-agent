@@ -8,10 +8,10 @@ use uuid::Uuid;
 use crate::projection::{LedgerProjection, ProjectionError};
 use crate::protocol::{
     AgentId, ApprovalDecision, ApprovalId, ApprovalRequest, ArtifactId, ArtifactRecord,
-    ContentBlock, EventEnvelope, EventSource, EventType, EventVisibility, JsonObject, LaneId,
-    LifecycleStatus, MessagePayload, MessageRole, PermissionMode, RunId, RunMeta, SessionId,
-    SessionMeta, SessionMode, TaskId, TaskPatch, TaskRecord, ToolCallId, ToolCallRecord,
-    TriggerKind, TurnId,
+    ContentBlock, EventEnvelope, EventSource, EventType, EventVisibility, IsolationMode,
+    JsonObject, LaneId, LifecycleStatus, MessagePayload, MessageRole, PermissionMode, RunId,
+    RunMeta, SessionId, SessionMeta, SessionMode, SubagentMeta, SubagentRuntime, TaskId, TaskPatch,
+    TaskRecord, ToolCallId, ToolCallRecord, TriggerKind, TurnId,
 };
 use crate::wal::{JsonlWal, WalError};
 
@@ -350,6 +350,55 @@ impl ControlPlane {
         Ok(artifact)
     }
 
+    pub fn spawn_subagent(&self, request: SpawnSubagentRequest) -> ControlResult<SubagentMeta> {
+        let subagent = SubagentMeta {
+            subagent_id: request.subagent_id,
+            session_id: request.session_id.clone(),
+            parent_session_id: request.parent_session_id,
+            parent_run_id: request.parent_run_id,
+            lane_id: request.lane_id,
+            goal: request.goal,
+            runtime: request.runtime,
+            isolation: request.isolation,
+            spawn_depth: request.spawn_depth,
+            status: LifecycleStatus::Running,
+            context_refs: request.context_refs,
+            toolsets: request.toolsets,
+            transcript_ref: request.transcript_ref,
+        };
+
+        self.append_typed_event_with_run(
+            &request.session_id,
+            RunContext::from_run_only(Some(&subagent.parent_run_id)),
+            EventType::SubagentSpawned,
+            EventSource::MainAgent,
+            EventVisibility::Audit,
+            &subagent,
+        )?;
+
+        Ok(subagent)
+    }
+
+    pub fn update_subagent_progress(
+        &self,
+        subagent: &SubagentMeta,
+        status: LifecycleStatus,
+    ) -> ControlResult<SubagentMeta> {
+        self.record_subagent(subagent, status, EventType::SubagentProgress)
+    }
+
+    pub fn complete_subagent(&self, subagent: &SubagentMeta) -> ControlResult<SubagentMeta> {
+        self.record_subagent(
+            subagent,
+            LifecycleStatus::Completed,
+            EventType::SubagentCompleted,
+        )
+    }
+
+    pub fn fail_subagent(&self, subagent: &SubagentMeta) -> ControlResult<SubagentMeta> {
+        self.record_subagent(subagent, LifecycleStatus::Failed, EventType::SubagentFailed)
+    }
+
     pub fn append_event(
         &self,
         session_id: &SessionId,
@@ -480,6 +529,27 @@ impl ControlPlane {
             RunContext::from_options(updated.run_id.as_ref(), updated.turn_id.as_ref()),
             event_type,
             EventSource::Tool(updated.name.clone()),
+            EventVisibility::Audit,
+            &updated,
+        )?;
+
+        Ok(updated)
+    }
+
+    fn record_subagent(
+        &self,
+        subagent: &SubagentMeta,
+        status: LifecycleStatus,
+        event_type: EventType,
+    ) -> ControlResult<SubagentMeta> {
+        let mut updated = subagent.clone();
+        updated.status = status;
+
+        self.append_typed_event_with_run(
+            &updated.session_id,
+            RunContext::from_run_only(Some(&updated.parent_run_id)),
+            event_type,
+            EventSource::Subagent(updated.subagent_id.0.clone()),
             EventVisibility::Audit,
             &updated,
         )?;
@@ -753,6 +823,71 @@ impl CreateArtifactRequest {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct SpawnSubagentRequest {
+    pub subagent_id: AgentId,
+    pub session_id: SessionId,
+    pub parent_session_id: SessionId,
+    pub parent_run_id: RunId,
+    pub lane_id: LaneId,
+    pub goal: String,
+    pub runtime: SubagentRuntime,
+    pub isolation: IsolationMode,
+    pub spawn_depth: u32,
+    pub context_refs: Vec<String>,
+    pub toolsets: Vec<String>,
+    pub transcript_ref: Option<String>,
+}
+
+impl SpawnSubagentRequest {
+    pub fn native(
+        session_id: SessionId,
+        parent_run: &RunMeta,
+        lane_id: impl Into<String>,
+        goal: impl Into<String>,
+    ) -> Self {
+        let lane_id = LaneId(lane_id.into());
+        let subagent_id = AgentId(format!("subagent-{}", Uuid::new_v4()));
+        Self {
+            subagent_id,
+            session_id: session_id.clone(),
+            parent_session_id: parent_run.session_id.clone(),
+            parent_run_id: parent_run.run_id.clone(),
+            transcript_ref: Some(format!(
+                "sessions/{}/sidechains/{}.jsonl",
+                session_id.0, lane_id.0
+            )),
+            lane_id,
+            goal: goal.into(),
+            runtime: SubagentRuntime::Native,
+            isolation: IsolationMode::Worktree,
+            spawn_depth: 1,
+            context_refs: Vec::new(),
+            toolsets: Vec::new(),
+        }
+    }
+
+    pub fn with_subagent_id(mut self, subagent_id: impl Into<String>) -> Self {
+        self.subagent_id = AgentId(subagent_id.into());
+        self
+    }
+
+    pub fn with_isolation(mut self, isolation: IsolationMode) -> Self {
+        self.isolation = isolation;
+        self
+    }
+
+    pub fn with_context_ref(mut self, context_ref: impl Into<String>) -> Self {
+        self.context_refs.push(context_ref.into());
+        self
+    }
+
+    pub fn with_toolset(mut self, toolset: impl Into<String>) -> Self {
+        self.toolsets.push(toolset.into());
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -761,9 +896,11 @@ mod tests {
 
     use crate::control::{
         ControlPlane, CreateArtifactRequest, CreateSessionRequest, CreateTaskRequest,
-        RequestApprovalRequest, StartToolCallRequest,
+        RequestApprovalRequest, SpawnSubagentRequest, StartToolCallRequest,
     };
-    use crate::protocol::{ApprovalDecision, ContentBlock, EventType, LifecycleStatus, TaskPatch};
+    use crate::protocol::{
+        ApprovalDecision, ContentBlock, EventType, IsolationMode, LifecycleStatus, TaskPatch,
+    };
 
     #[test]
     fn creates_session_and_projects_user_messages() {
@@ -972,6 +1109,50 @@ mod tests {
         assert_eq!(projected_task.title, "Wire task and artifact projection");
         assert_eq!(projected_artifact.task_id, Some(task.task_id));
         assert_eq!(projected_artifact.run_id, Some(run.run_id));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn records_subagent_lifecycle() {
+        let root = std::env::temp_dir().join(format!("essence-control-{}", Uuid::new_v4()));
+        let control = ControlPlane::new(&root);
+        let session = control
+            .create_session(CreateSessionRequest::interactive("."))
+            .unwrap();
+        let run = control
+            .start_run(crate::control::StartRunRequest::user(
+                session.session_id.clone(),
+            ))
+            .unwrap();
+
+        let subagent = control
+            .spawn_subagent(
+                SpawnSubagentRequest::native(
+                    session.session_id.clone(),
+                    &run,
+                    "research",
+                    "Collect references",
+                )
+                .with_subagent_id("researcher-1")
+                .with_isolation(IsolationMode::Worktree)
+                .with_context_ref("event://1")
+                .with_toolset("web"),
+            )
+            .unwrap();
+        let progressed = control
+            .update_subagent_progress(&subagent, LifecycleStatus::WaitingTool)
+            .unwrap();
+        let completed = control.complete_subagent(&progressed).unwrap();
+
+        let projection = control.projection(&session.session_id).unwrap();
+        let projected = projection.subagents.get("researcher-1").unwrap();
+
+        assert_eq!(completed.status, LifecycleStatus::Completed);
+        assert_eq!(projected.status, LifecycleStatus::Completed);
+        assert_eq!(projected.lane_id.0, "research");
+        assert_eq!(projected.context_refs, vec!["event://1".to_string()]);
+        assert_eq!(projected.toolsets, vec!["web".to_string()]);
 
         let _ = std::fs::remove_dir_all(root);
     }

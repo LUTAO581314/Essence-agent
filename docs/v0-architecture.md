@@ -53,11 +53,26 @@ Plugins own external sources and fast-changing integrations:
 3. Replayable in-memory ledger projections. Done in `essence-core::projection`.
 4. Minimal file-backed control plane. Done in `essence-core::control`.
 5. Control plane API for submit prompt, stream events, cancel, approve.
-6. Tool registry and permission policy.
-7. Native subagent runtime with sidechain transcripts.
-8. Memory hooks.
-9. Task store and UI event stream.
-10. Plugin host and one CLI harness plugin.
+6. Minimal permission policy. Done in `essence-core::policy`.
+7. Tool registry.
+8. Native subagent runtime with sidechain transcripts.
+9. Memory hooks.
+10. Task store and UI event stream.
+11. Plugin host and one CLI harness plugin.
+
+## Permission Policy Contract
+
+The first policy layer is deliberately deterministic and local. It receives a
+tool name, tool input, optional cwd, and the active `PermissionMode`, then
+returns one of three decisions:
+
+- allow
+- require approval
+- deny
+
+Explicit deny rules win over every mode. `Readonly` denies tool execution,
+`Plan` requires approval, `Auto` allows unless a tool is configured for
+approval, and `Default` requires an allow rule or approval rule.
 
 ## Projection Contract
 

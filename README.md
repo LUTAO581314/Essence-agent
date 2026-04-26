@@ -23,6 +23,8 @@ Current Rust crate status:
   sessions, appending events, submitting messages, tracking session/run
   lifecycle, and recording approvals, tool calls, tasks, artifacts, and
   subagents
+- `essence-core::policy`: minimal tool permission policy decisions for allow,
+  approval, and deny flows
 
 The long-term shape is:
 

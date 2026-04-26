@@ -4,8 +4,8 @@ use serde::de::DeserializeOwned;
 
 use crate::protocol::{
     ApprovalId, ApprovalRequest, ArtifactId, ArtifactRecord, EventEnvelope, EventType,
-    LifecycleStatus, MessagePayload, RunId, RunMeta, SessionMeta, SessionStatePatch, SubagentMeta,
-    TaskId, TaskPatch, TaskRecord, ToolCallId, ToolCallRecord,
+    LifecycleStatus, MemoryId, MemoryRecord, MessagePayload, RunId, RunMeta, SessionMeta,
+    SessionStatePatch, SubagentMeta, TaskId, TaskPatch, TaskRecord, ToolCallId, ToolCallRecord,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -31,6 +31,7 @@ pub struct LedgerProjection {
     pub tool_calls: BTreeMap<ToolCallId, ToolCallRecord>,
     pub tasks: BTreeMap<TaskId, TaskRecord>,
     pub artifacts: BTreeMap<ArtifactId, ArtifactRecord>,
+    pub memories: BTreeMap<MemoryId, MemoryRecord>,
     pub messages: Vec<MessagePayload>,
 }
 
@@ -119,6 +120,10 @@ impl LedgerProjection {
                 self.artifacts
                     .insert(artifact.artifact_id.clone(), artifact);
             }
+            EventType::MemoryCandidate | EventType::MemorySaved => {
+                let memory = decode_payload::<MemoryRecord>(event)?;
+                self.memories.insert(memory.memory_id.clone(), memory);
+            }
             EventType::MessageUser
             | EventType::MessageAssistantDelta
             | EventType::MessageAssistantFinal => {
@@ -147,9 +152,9 @@ mod tests {
 
     use crate::protocol::{
         ArtifactId, ArtifactRecord, ContentBlock, EventEnvelope, EventSource, EventType,
-        EventVisibility, LifecycleStatus, MessagePayload, MessageRole, PermissionMode, RunId,
-        RunMeta, SessionId, SessionMeta, SessionMode, TaskId, TaskPatch, TaskRecord, TriggerKind,
-        TurnId,
+        EventVisibility, LifecycleStatus, MemoryId, MemoryRecord, MessagePayload, MessageRole,
+        PermissionMode, RunId, RunMeta, SessionId, SessionMeta, SessionMode, TaskId, TaskPatch,
+        TaskRecord, TriggerKind, TurnId,
     };
 
     use super::LedgerProjection;
@@ -162,6 +167,7 @@ mod tests {
         let turn_id = TurnId(Uuid::new_v4());
         let task_id = TaskId(Uuid::new_v4());
         let artifact_id = ArtifactId(Uuid::new_v4());
+        let memory_id = MemoryId(Uuid::new_v4());
 
         let session = SessionMeta {
             session_id: session_id.clone(),
@@ -215,6 +221,19 @@ mod tests {
             run_id: Some(run_id),
             metadata: Default::default(),
         };
+        let memory = MemoryRecord {
+            memory_id: memory_id.clone(),
+            session_id: session_id.clone(),
+            kind: "decision".to_string(),
+            text: "Use JSONL as the source of truth.".to_string(),
+            status: LifecycleStatus::Completed,
+            created_at: now,
+            updated_at: now,
+            source_event_ids: Vec::new(),
+            run_id: None,
+            confidence: Some(0.9),
+            metadata: Default::default(),
+        };
 
         let events = vec![
             envelope(
@@ -257,6 +276,12 @@ mod tests {
             ),
             envelope(
                 6,
+                session_id.clone(),
+                EventType::MemorySaved,
+                to_value(memory).unwrap(),
+            ),
+            envelope(
+                7,
                 session_id,
                 EventType::MessageAssistantFinal,
                 to_value(MessagePayload {
@@ -273,7 +298,7 @@ mod tests {
 
         let projection = LedgerProjection::replay(&events).unwrap();
 
-        assert_eq!(projection.latest_seq, 6);
+        assert_eq!(projection.latest_seq, 7);
         assert_eq!(projection.session.unwrap().status, LifecycleStatus::Active);
         assert_eq!(
             projection.tasks.get(&task_id).unwrap().status,
@@ -282,6 +307,10 @@ mod tests {
         assert_eq!(
             projection.artifacts.get(&artifact_id).unwrap().kind,
             "markdown"
+        );
+        assert_eq!(
+            projection.memories.get(&memory_id).unwrap().text,
+            "Use JSONL as the source of truth."
         );
         assert_eq!(projection.messages.len(), 1);
     }

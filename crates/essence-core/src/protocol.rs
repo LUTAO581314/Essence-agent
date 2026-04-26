@@ -30,6 +30,9 @@ pub struct TaskId(pub Uuid);
 pub struct ArtifactId(pub Uuid);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct MemoryId(pub Uuid);
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AgentId(pub String);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -433,6 +436,25 @@ pub struct ArtifactRecord {
     pub task_id: Option<TaskId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_id: Option<RunId>,
+    #[serde(default)]
+    pub metadata: JsonObject,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MemoryRecord {
+    pub memory_id: MemoryId,
+    pub session_id: SessionId,
+    pub kind: String,
+    pub text: String,
+    pub status: LifecycleStatus,
+    pub created_at: OffsetDateTime,
+    pub updated_at: OffsetDateTime,
+    #[serde(default)]
+    pub source_event_ids: Vec<EventId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<RunId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f32>,
     #[serde(default)]
     pub metadata: JsonObject,
 }

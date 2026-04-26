@@ -57,7 +57,8 @@ Plugins own external sources and fast-changing integrations:
 7. Tool registry. Done in `essence-core::registry`.
 8. Native subagent runtime with sidechain transcripts. In progress:
    `essence-core::subagent` now provides sidechain WAL append/replay helpers.
-9. Memory hooks.
+9. Memory hooks. Done for the first WAL layer: memory candidates and saved
+   memories are durable events and projection entries.
 10. Task store and UI event stream.
 11. Plugin host and one CLI harness plugin.
 
@@ -128,6 +129,8 @@ small on purpose:
   work tracking and artifacts to the WAL.
 - `spawn_subagent`, `update_subagent_progress`, `complete_subagent`, and
   `fail_subagent` record parallel actor lifecycle metadata.
+- `propose_memory` and `save_memory` record memory extraction boundaries before
+  a future `MemoryStore` indexes the saved records.
 - `append_event` is the escape hatch for typed protocol work that has not earned
   a dedicated helper yet.
 - `projection` replays a session WAL into the current `LedgerProjection`.

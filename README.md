@@ -29,6 +29,7 @@ Current Rust crate status:
   filtering and policy generation
 - `essence-core::subagent`: native subagent sidechain transcript helper for
   append/replay of per-lane WAL files
+- memory hooks: candidate and saved memory events projected from the WAL
 
 The long-term shape is:
 

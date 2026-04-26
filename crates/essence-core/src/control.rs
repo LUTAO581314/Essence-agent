@@ -9,9 +9,10 @@ use crate::projection::{LedgerProjection, ProjectionError};
 use crate::protocol::{
     AgentId, ApprovalDecision, ApprovalId, ApprovalRequest, ArtifactId, ArtifactRecord,
     ContentBlock, EventEnvelope, EventSource, EventType, EventVisibility, IsolationMode,
-    JsonObject, LaneId, LifecycleStatus, MessagePayload, MessageRole, PermissionMode, RunId,
-    RunMeta, SessionId, SessionMeta, SessionMode, SessionStatePatch, SubagentMeta, SubagentRuntime,
-    TaskId, TaskPatch, TaskRecord, ToolCallId, ToolCallRecord, TriggerKind, TurnId,
+    JsonObject, LaneId, LifecycleStatus, MemoryId, MemoryRecord, MessagePayload, MessageRole,
+    PermissionMode, RunId, RunMeta, SessionId, SessionMeta, SessionMode, SessionStatePatch,
+    SubagentMeta, SubagentRuntime, TaskId, TaskPatch, TaskRecord, ToolCallId, ToolCallRecord,
+    TriggerKind, TurnId,
 };
 use crate::subagent::{SidechainError, SidechainTranscript};
 use crate::wal::{JsonlWal, WalError};
@@ -391,6 +392,51 @@ impl ControlPlane {
         )?;
 
         Ok(artifact)
+    }
+
+    pub fn propose_memory(&self, request: ProposeMemoryRequest) -> ControlResult<MemoryRecord> {
+        let now = OffsetDateTime::now_utc();
+        let memory = MemoryRecord {
+            memory_id: MemoryId(Uuid::new_v4()),
+            session_id: request.session_id.clone(),
+            kind: request.kind,
+            text: request.text,
+            status: LifecycleStatus::Queued,
+            created_at: now,
+            updated_at: now,
+            source_event_ids: request.source_event_ids,
+            run_id: request.run_id.clone(),
+            confidence: request.confidence,
+            metadata: request.metadata,
+        };
+
+        self.append_typed_event_with_run(
+            &request.session_id,
+            RunContext::from_run_only(request.run_id.as_ref()),
+            EventType::MemoryCandidate,
+            EventSource::System,
+            EventVisibility::MemoryCandidate,
+            &memory,
+        )?;
+
+        Ok(memory)
+    }
+
+    pub fn save_memory(&self, memory: &MemoryRecord) -> ControlResult<MemoryRecord> {
+        let mut saved = memory.clone();
+        saved.status = LifecycleStatus::Completed;
+        saved.updated_at = OffsetDateTime::now_utc();
+
+        self.append_typed_event_with_run(
+            &saved.session_id,
+            RunContext::from_run_only(saved.run_id.as_ref()),
+            EventType::MemorySaved,
+            EventSource::System,
+            EventVisibility::Audit,
+            &saved,
+        )?;
+
+        Ok(saved)
     }
 
     pub fn spawn_subagent(&self, request: SpawnSubagentRequest) -> ControlResult<SubagentMeta> {
@@ -883,6 +929,46 @@ impl CreateArtifactRequest {
 }
 
 #[derive(Debug, Clone)]
+pub struct ProposeMemoryRequest {
+    pub session_id: SessionId,
+    pub kind: String,
+    pub text: String,
+    pub source_event_ids: Vec<crate::protocol::EventId>,
+    pub run_id: Option<RunId>,
+    pub confidence: Option<f32>,
+    pub metadata: JsonObject,
+}
+
+impl ProposeMemoryRequest {
+    pub fn new(session_id: SessionId, kind: impl Into<String>, text: impl Into<String>) -> Self {
+        Self {
+            session_id,
+            kind: kind.into(),
+            text: text.into(),
+            source_event_ids: Vec::new(),
+            run_id: None,
+            confidence: None,
+            metadata: Default::default(),
+        }
+    }
+
+    pub fn for_run(mut self, run_id: RunId) -> Self {
+        self.run_id = Some(run_id);
+        self
+    }
+
+    pub fn with_source_event(mut self, event_id: crate::protocol::EventId) -> Self {
+        self.source_event_ids.push(event_id);
+        self
+    }
+
+    pub fn with_confidence(mut self, confidence: f32) -> Self {
+        self.confidence = Some(confidence);
+        self
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct SpawnSubagentRequest {
     pub subagent_id: AgentId,
     pub session_id: SessionId,
@@ -955,7 +1041,7 @@ mod tests {
 
     use crate::control::{
         ControlPlane, CreateArtifactRequest, CreateSessionRequest, CreateTaskRequest,
-        RequestApprovalRequest, SpawnSubagentRequest, StartToolCallRequest,
+        ProposeMemoryRequest, RequestApprovalRequest, SpawnSubagentRequest, StartToolCallRequest,
     };
     use crate::protocol::{
         ApprovalDecision, ContentBlock, EventType, IsolationMode, LifecycleStatus, TaskPatch,
@@ -1267,6 +1353,48 @@ mod tests {
         assert_eq!(projected.lane_id.0, "research");
         assert_eq!(projected.context_refs, vec!["event://1".to_string()]);
         assert_eq!(projected.toolsets, vec!["web".to_string()]);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn records_memory_candidate_and_saved_memory() {
+        let root = std::env::temp_dir().join(format!("essence-control-{}", Uuid::new_v4()));
+        let control = ControlPlane::new(&root);
+        let session = control
+            .create_session(CreateSessionRequest::interactive("."))
+            .unwrap();
+        let user_message = control
+            .submit_user_message(&session.session_id, "Remember that JSONL is canonical.")
+            .unwrap();
+        let run = control
+            .start_run(crate::control::StartRunRequest::user(
+                session.session_id.clone(),
+            ))
+            .unwrap();
+
+        let candidate = control
+            .propose_memory(
+                ProposeMemoryRequest::new(
+                    session.session_id.clone(),
+                    "decision",
+                    "JSONL is the canonical source of truth.",
+                )
+                .for_run(run.run_id.clone())
+                .with_source_event(user_message.event_id.clone())
+                .with_confidence(0.95),
+            )
+            .unwrap();
+        let saved = control.save_memory(&candidate).unwrap();
+
+        let projection = control.projection(&session.session_id).unwrap();
+        let projected = projection.memories.get(&candidate.memory_id).unwrap();
+
+        assert_eq!(candidate.status, LifecycleStatus::Queued);
+        assert_eq!(saved.status, LifecycleStatus::Completed);
+        assert_eq!(projected.status, LifecycleStatus::Completed);
+        assert_eq!(projected.source_event_ids, vec![user_message.event_id]);
+        assert_eq!(projected.confidence, Some(0.95));
 
         let _ = std::fs::remove_dir_all(root);
     }

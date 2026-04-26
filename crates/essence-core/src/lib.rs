@@ -4,8 +4,9 @@
 //! Databases, UI streams, memory indexes, and task views are projections.
 
 pub mod protocol;
+pub mod projection;
 pub mod wal;
 
 pub use protocol::*;
+pub use projection::*;
 pub use wal::*;
-

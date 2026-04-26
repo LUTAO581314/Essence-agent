@@ -13,6 +13,13 @@ Rust core that defines the stable protocol:
 - subagents and lanes
 - replayable projections for memory, tasks, artifacts, and UI streams
 
+Current Rust crate status:
+
+- `essence-core::protocol`: durable event and metadata types
+- `essence-core::wal`: append/replay JSONL WAL primitives
+- `essence-core::projection`: in-memory replay views for sessions, runs, tasks,
+  artifacts, approvals, subagents, and messages
+
 The long-term shape is:
 
 - Rust core for the durable kernel
@@ -21,4 +28,3 @@ The long-term shape is:
 
 See [docs/v0-architecture.md](docs/v0-architecture.md) for the current v0
 architecture draft.
-

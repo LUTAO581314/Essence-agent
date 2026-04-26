@@ -48,12 +48,29 @@ Plugins own external sources and fast-changing integrations:
 
 ## First Build Order
 
-1. Core Rust protocol types.
-2. JSONL WAL append/replay.
-3. Control plane API for create session, submit prompt, stream events, cancel, approve.
-4. Tool registry and permission policy.
-5. Native subagent runtime with sidechain transcripts.
-6. Memory hooks.
-7. Task store and UI event stream.
-8. Plugin host and one CLI harness plugin.
+1. Core Rust protocol types. Done in `essence-core::protocol`.
+2. JSONL WAL append/replay. Done in `essence-core::wal`.
+3. Replayable in-memory ledger projections. Done in `essence-core::projection`.
+4. Control plane API for create session, submit prompt, stream events, cancel, approve.
+5. Tool registry and permission policy.
+6. Native subagent runtime with sidechain transcripts.
+7. Memory hooks.
+8. Task store and UI event stream.
+9. Plugin host and one CLI harness plugin.
 
+## Projection Contract
+
+The first projection layer is intentionally in-memory. It consumes ordered
+`EventEnvelope` records and folds them into the views that later stores and UIs
+will index:
+
+- latest session metadata
+- run metadata by run id
+- subagent metadata by agent id
+- approvals by approval id
+- tasks by task id
+- artifacts by artifact id
+- user-facing message payloads
+
+Projection errors include the source sequence number and event type so corrupt
+or incompatible WAL lines can be diagnosed without losing the rest of the design.

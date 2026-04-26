@@ -5,28 +5,34 @@ use uuid::Uuid;
 
 pub type JsonObject = serde_json::Map<String, Value>;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SessionId(pub Uuid);
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RunId(pub Uuid);
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TurnId(pub Uuid);
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct EventId(pub Uuid);
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ToolCallId(pub Uuid);
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ApprovalId(pub Uuid);
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TaskId(pub Uuid);
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ArtifactId(pub Uuid);
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AgentId(pub String);
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LaneId(pub String);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -88,6 +94,9 @@ pub enum EventVisibility {
 #[serde(rename_all = "snake_case")]
 pub enum EventType {
     SessionMeta,
+    SessionStateChanged,
+    RunStarted,
+    RunStateChanged,
     Snapshot,
     Compaction,
     MessageUser,
@@ -324,3 +333,50 @@ pub struct ApprovalRequest {
     pub expires_at: OffsetDateTime,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TaskRecord {
+    pub task_id: TaskId,
+    pub session_id: SessionId,
+    pub title: String,
+    pub status: LifecycleStatus,
+    pub created_at: OffsetDateTime,
+    pub updated_at: OffsetDateTime,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_task_id: Option<TaskId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane_id: Option<LaneId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<AgentId>,
+    #[serde(default)]
+    pub metadata: JsonObject,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TaskPatch {
+    pub task_id: TaskId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<LifecycleStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<OffsetDateTime>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<AgentId>,
+    #[serde(default)]
+    pub metadata: JsonObject,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ArtifactRecord {
+    pub artifact_id: ArtifactId,
+    pub session_id: SessionId,
+    pub uri: String,
+    pub kind: String,
+    pub created_at: OffsetDateTime,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<TaskId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<RunId>,
+    #[serde(default)]
+    pub metadata: JsonObject,
+}

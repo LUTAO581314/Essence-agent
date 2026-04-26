@@ -59,7 +59,9 @@ Plugins own external sources and fast-changing integrations:
    `essence-core::subagent` now provides sidechain WAL append/replay helpers.
 9. Memory hooks. Done for the first WAL layer: memory candidates and saved
    memories are durable events and projection entries.
-10. Task store and UI event stream.
+10. Task store and UI event stream. Done for the first projection layer:
+    `TaskStore` exposes task queries and `UiEventStream` exposes cursor-based
+    UI refresh events.
 11. Plugin host and one CLI harness plugin.
 
 ## Permission Policy Contract
@@ -131,6 +133,8 @@ small on purpose:
   `fail_subagent` record parallel actor lifecycle metadata.
 - `propose_memory` and `save_memory` record memory extraction boundaries before
   a future `MemoryStore` indexes the saved records.
+- `task_store` returns the current task projection as queryable task views.
+- `ui_events_after` returns user-visible event stream entries after a cursor.
 - `append_event` is the escape hatch for typed protocol work that has not earned
   a dedicated helper yet.
 - `projection` replays a session WAL into the current `LedgerProjection`.

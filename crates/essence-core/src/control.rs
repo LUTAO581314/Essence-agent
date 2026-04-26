@@ -14,7 +14,9 @@ use crate::protocol::{
     SubagentMeta, SubagentRuntime, TaskId, TaskPatch, TaskRecord, ToolCallId, ToolCallRecord,
     TriggerKind, TurnId,
 };
+use crate::stream::{EventCursor, UiEvent, UiEventStream};
 use crate::subagent::{SidechainError, SidechainTranscript};
+use crate::task_store::TaskStore;
 use crate::wal::{JsonlWal, WalError};
 
 #[derive(Debug, thiserror::Error)]
@@ -532,6 +534,20 @@ impl ControlPlane {
             .collect())
     }
 
+    pub fn ui_events_after(
+        &self,
+        session_id: &SessionId,
+        cursor: EventCursor,
+    ) -> ControlResult<Vec<UiEvent>> {
+        let events = self.events(session_id)?;
+        Ok(UiEventStream::from_events(&events).user_visible_after(cursor))
+    }
+
+    pub fn task_store(&self, session_id: &SessionId) -> ControlResult<TaskStore> {
+        let projection = self.projection(session_id)?;
+        Ok(TaskStore::from_projection(&projection))
+    }
+
     pub fn wal_path(&self, session_id: &SessionId) -> PathBuf {
         self.root.join(self.transcript_uri(session_id))
     }
@@ -1044,7 +1060,8 @@ mod tests {
         ProposeMemoryRequest, RequestApprovalRequest, SpawnSubagentRequest, StartToolCallRequest,
     };
     use crate::protocol::{
-        ApprovalDecision, ContentBlock, EventType, IsolationMode, LifecycleStatus, TaskPatch,
+        ApprovalDecision, ContentBlock, EventType, IsolationMode, LaneId, LifecycleStatus,
+        TaskPatch,
     };
 
     #[test]
@@ -1309,6 +1326,49 @@ mod tests {
         assert_eq!(projected_task.title, "Wire task and artifact projection");
         assert_eq!(projected_artifact.task_id, Some(task.task_id));
         assert_eq!(projected_artifact.run_id, Some(run.run_id));
+
+        let task_store = control.task_store(&session.session_id).unwrap();
+        assert_eq!(task_store.len(), 1);
+        assert_eq!(
+            task_store
+                .by_lane(&LaneId("main".to_string()))
+                .next()
+                .unwrap()
+                .title,
+            "Wire task and artifact projection"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn streams_user_visible_ui_events_after_cursor() {
+        let root = std::env::temp_dir().join(format!("essence-control-{}", Uuid::new_v4()));
+        let control = ControlPlane::new(&root);
+        let session = control
+            .create_session(CreateSessionRequest::interactive("."))
+            .unwrap();
+        control
+            .submit_user_message(&session.session_id, "show this")
+            .unwrap();
+        control
+            .create_task(CreateTaskRequest::new(
+                session.session_id.clone(),
+                "audit only",
+            ))
+            .unwrap();
+        control
+            .submit_user_message(&session.session_id, "show this too")
+            .unwrap();
+
+        let events = control
+            .ui_events_after(&session.session_id, crate::stream::EventCursor::after(1))
+            .unwrap();
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].event_type, EventType::MessageUser);
+        assert_eq!(events[1].event_type, EventType::MessageUser);
+        assert!(events.iter().all(|event| event.is_user_visible()));
 
         let _ = std::fs::remove_dir_all(root);
     }

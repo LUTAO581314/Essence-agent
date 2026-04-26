@@ -144,11 +144,27 @@ pub enum MessageRole {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ContentBlock {
-    Text { text: String },
-    ToolUse { tool_call_id: ToolCallId, name: String, input: Value },
-    ToolResult { tool_call_id: ToolCallId, result: Value, is_error: bool },
-    File { uri: String, mime_type: Option<String> },
-    Image { uri: String, mime_type: Option<String> },
+    Text {
+        text: String,
+    },
+    ToolUse {
+        tool_call_id: ToolCallId,
+        name: String,
+        input: Value,
+    },
+    ToolResult {
+        tool_call_id: ToolCallId,
+        result: Value,
+        is_error: bool,
+    },
+    File {
+        uri: String,
+        mime_type: Option<String>,
+    },
+    Image {
+        uri: String,
+        mime_type: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

@@ -51,12 +51,13 @@ Plugins own external sources and fast-changing integrations:
 1. Core Rust protocol types. Done in `essence-core::protocol`.
 2. JSONL WAL append/replay. Done in `essence-core::wal`.
 3. Replayable in-memory ledger projections. Done in `essence-core::projection`.
-4. Control plane API for create session, submit prompt, stream events, cancel, approve.
-5. Tool registry and permission policy.
-6. Native subagent runtime with sidechain transcripts.
-7. Memory hooks.
-8. Task store and UI event stream.
-9. Plugin host and one CLI harness plugin.
+4. Minimal file-backed control plane. Done in `essence-core::control`.
+5. Control plane API for submit prompt, stream events, cancel, approve.
+6. Tool registry and permission policy.
+7. Native subagent runtime with sidechain transcripts.
+8. Memory hooks.
+9. Task store and UI event stream.
+10. Plugin host and one CLI harness plugin.
 
 ## Projection Contract
 
@@ -74,3 +75,18 @@ will index:
 
 Projection errors include the source sequence number and event type so corrupt
 or incompatible WAL lines can be diagnosed without losing the rest of the design.
+
+## Control Plane Contract
+
+The first control plane is a synchronous file-backed facade over the WAL. It is
+small on purpose:
+
+- `create_session` creates a session id, writes the first `session_meta` event,
+  and returns the durable `SessionMeta`.
+- `submit_user_message` appends a user-visible `message_user` event.
+- `append_event` is the escape hatch for typed protocol work that has not earned
+  a dedicated helper yet.
+- `projection` replays a session WAL into the current `LedgerProjection`.
+
+This keeps higher layers from needing to know transcript paths or sequence
+numbers while the kernel is still stabilizing.

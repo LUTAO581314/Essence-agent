@@ -4,8 +4,8 @@ use serde::de::DeserializeOwned;
 
 use crate::protocol::{
     ApprovalId, ApprovalRequest, ArtifactId, ArtifactRecord, EventEnvelope, EventType,
-    LifecycleStatus, MessagePayload, RunId, RunMeta, SessionMeta, SubagentMeta, TaskId,
-    TaskPatch, TaskRecord,
+    LifecycleStatus, MessagePayload, RunId, RunMeta, SessionMeta, SubagentMeta, TaskId, TaskPatch,
+    TaskRecord,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -76,7 +76,8 @@ impl LedgerProjection {
             }
             EventType::ApprovalRequested | EventType::ApprovalResolved => {
                 let approval = decode_payload::<ApprovalRequest>(event)?;
-                self.approvals.insert(approval.approval_id.clone(), approval);
+                self.approvals
+                    .insert(approval.approval_id.clone(), approval);
             }
             EventType::TaskCreated => {
                 let task = decode_payload::<TaskRecord>(event)?;
@@ -106,7 +107,8 @@ impl LedgerProjection {
             }
             EventType::ArtifactCreated => {
                 let artifact = decode_payload::<ArtifactRecord>(event)?;
-                self.artifacts.insert(artifact.artifact_id.clone(), artifact);
+                self.artifacts
+                    .insert(artifact.artifact_id.clone(), artifact);
             }
             EventType::MessageUser
             | EventType::MessageAssistantDelta
@@ -214,9 +216,24 @@ mod tests {
         };
 
         let events = vec![
-            envelope(1, session_id.clone(), EventType::SessionMeta, to_value(session).unwrap()),
-            envelope(2, session_id.clone(), EventType::RunStarted, to_value(run).unwrap()),
-            envelope(3, session_id.clone(), EventType::TaskCreated, to_value(task).unwrap()),
+            envelope(
+                1,
+                session_id.clone(),
+                EventType::SessionMeta,
+                to_value(session).unwrap(),
+            ),
+            envelope(
+                2,
+                session_id.clone(),
+                EventType::RunStarted,
+                to_value(run).unwrap(),
+            ),
+            envelope(
+                3,
+                session_id.clone(),
+                EventType::TaskCreated,
+                to_value(task).unwrap(),
+            ),
             envelope(
                 4,
                 session_id.clone(),
@@ -261,7 +278,10 @@ mod tests {
             projection.tasks.get(&task_id).unwrap().status,
             LifecycleStatus::Completed
         );
-        assert_eq!(projection.artifacts.get(&artifact_id).unwrap().kind, "markdown");
+        assert_eq!(
+            projection.artifacts.get(&artifact_id).unwrap().kind,
+            "markdown"
+        );
         assert_eq!(projection.messages.len(), 1);
     }
 

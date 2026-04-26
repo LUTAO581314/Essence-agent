@@ -88,12 +88,11 @@ impl JsonlWal {
             if line.trim().is_empty() {
                 continue;
             }
-            let event = serde_json::from_str::<EventEnvelope>(&line).map_err(|source| {
-                WalError::Json {
+            let event =
+                serde_json::from_str::<EventEnvelope>(&line).map_err(|source| WalError::Json {
                     path: self.path.clone(),
                     source,
-                }
-            })?;
+                })?;
             events.push(event);
         }
         Ok(events)
@@ -105,18 +104,13 @@ mod tests {
     use serde_json::json;
     use uuid::Uuid;
 
-    use crate::protocol::{
-        EventEnvelope, EventSource, EventType, EventVisibility, SessionId,
-    };
+    use crate::protocol::{EventEnvelope, EventSource, EventType, EventVisibility, SessionId};
 
     use super::JsonlWal;
 
     #[test]
     fn appends_and_replays_events() {
-        let path = std::env::temp_dir().join(format!(
-            "essence-wal-test-{}.jsonl",
-            Uuid::new_v4()
-        ));
+        let path = std::env::temp_dir().join(format!("essence-wal-test-{}.jsonl", Uuid::new_v4()));
         let wal = JsonlWal::new(&path);
         let session_id = SessionId(Uuid::new_v4());
 
@@ -148,4 +142,3 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 }
-

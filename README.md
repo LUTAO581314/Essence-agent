@@ -25,6 +25,8 @@ Current Rust crate status:
   subagents
 - `essence-core::policy`: minimal tool permission policy decisions for allow,
   approval, and deny flows
+- `essence-core::registry`: deterministic tool metadata registry with capability
+  filtering and policy generation
 
 The long-term shape is:
 

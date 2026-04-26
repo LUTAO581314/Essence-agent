@@ -54,7 +54,7 @@ Plugins own external sources and fast-changing integrations:
 4. Minimal file-backed control plane. Done in `essence-core::control`.
 5. Control plane API for submit prompt, stream events, cancel, approve.
 6. Minimal permission policy. Done in `essence-core::policy`.
-7. Tool registry.
+7. Tool registry. Done in `essence-core::registry`.
 8. Native subagent runtime with sidechain transcripts.
 9. Memory hooks.
 10. Task store and UI event stream.
@@ -73,6 +73,21 @@ returns one of three decisions:
 Explicit deny rules win over every mode. `Readonly` denies tool execution,
 `Plan` requires approval, `Auto` allows unless a tool is configured for
 approval, and `Default` requires an allow rule or approval rule.
+
+## Tool Registry Contract
+
+The first registry stores tool metadata only. It does not execute tools. Each
+tool has:
+
+- name
+- description
+- permission class
+- optional provider
+- optional input schema
+- capability tags
+
+The registry supports deterministic lookup, duplicate detection, capability
+filtering, and conversion into a `ToolPolicy`.
 
 ## Projection Contract
 

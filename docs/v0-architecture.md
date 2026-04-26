@@ -87,6 +87,8 @@ small on purpose:
   message events.
 - `start_run`, `complete_run`, and `fail_run` append auditable run lifecycle
   events.
+- `request_approval` and `resolve_approval` record permission boundaries and
+  their user decisions.
 - `append_event` is the escape hatch for typed protocol work that has not earned
   a dedicated helper yet.
 - `projection` replays a session WAL into the current `LedgerProjection`.

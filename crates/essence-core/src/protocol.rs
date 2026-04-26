@@ -353,6 +353,12 @@ pub struct ApprovalRequest {
     pub allowed_decisions: Vec<ApprovalDecision>,
     pub status: LifecycleStatus,
     pub expires_at: OffsetDateTime,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<ApprovalDecision>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_at: Option<OffsetDateTime>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_by: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

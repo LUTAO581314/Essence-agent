@@ -21,7 +21,7 @@ Current Rust crate status:
   artifacts, approvals, subagents, and messages
 - `essence-core::control`: minimal file-backed control plane for creating
   sessions, appending events, submitting messages, tracking run lifecycle, and
-  reading projections
+  recording approval decisions, and reading projections
 
 The long-term shape is:
 

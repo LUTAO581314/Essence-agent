@@ -2,14 +2,14 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use serde_json::Value;
-use time::OffsetDateTime;
+use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
 use crate::projection::{LedgerProjection, ProjectionError};
 use crate::protocol::{
-    ContentBlock, EventEnvelope, EventSource, EventType, EventVisibility, LifecycleStatus,
-    MessagePayload, MessageRole, PermissionMode, RunId, RunMeta, SessionId, SessionMeta,
-    SessionMode, TriggerKind, TurnId,
+    ApprovalDecision, ApprovalId, ApprovalRequest, ContentBlock, EventEnvelope, EventSource,
+    EventType, EventVisibility, LifecycleStatus, MessagePayload, MessageRole, PermissionMode,
+    RunId, RunMeta, SessionId, SessionMeta, SessionMode, ToolCallId, TriggerKind, TurnId,
 };
 use crate::wal::{JsonlWal, WalError};
 
@@ -159,6 +159,66 @@ impl ControlPlane {
         self.finish_run(run, LifecycleStatus::Failed, None, Some(stop_reason.into()))
     }
 
+    pub fn request_approval(
+        &self,
+        request: RequestApprovalRequest,
+    ) -> ControlResult<ApprovalRequest> {
+        let approval = ApprovalRequest {
+            approval_id: ApprovalId(Uuid::new_v4()),
+            session_id: request.session_id.clone(),
+            run_id: request.run_id.clone(),
+            tool_call_id: request.tool_call_id,
+            subject: request.subject,
+            input: request.input,
+            cwd: request.cwd,
+            reason: request.reason,
+            allowed_decisions: request.allowed_decisions,
+            status: LifecycleStatus::WaitingApproval,
+            expires_at: request.expires_at,
+            decision: None,
+            resolved_at: None,
+            resolved_by: None,
+        };
+
+        self.append_typed_event_with_run(
+            &request.session_id,
+            RunContext::from_run_only(request.run_id.as_ref()),
+            EventType::ApprovalRequested,
+            EventSource::System,
+            EventVisibility::Audit,
+            &approval,
+        )?;
+
+        Ok(approval)
+    }
+
+    pub fn resolve_approval(
+        &self,
+        approval: &ApprovalRequest,
+        decision: ApprovalDecision,
+        resolved_by: impl Into<String>,
+    ) -> ControlResult<ApprovalRequest> {
+        let mut resolved = approval.clone();
+        resolved.status = match decision {
+            ApprovalDecision::Deny => LifecycleStatus::Failed,
+            _ => LifecycleStatus::Completed,
+        };
+        resolved.decision = Some(decision);
+        resolved.resolved_at = Some(OffsetDateTime::now_utc());
+        resolved.resolved_by = Some(resolved_by.into());
+
+        self.append_typed_event_with_run(
+            &resolved.session_id,
+            RunContext::from_run_only(resolved.run_id.as_ref()),
+            EventType::ApprovalResolved,
+            EventSource::User,
+            EventVisibility::Audit,
+            &resolved,
+        )?;
+
+        Ok(resolved)
+    }
+
     pub fn append_event(
         &self,
         session_id: &SessionId,
@@ -292,6 +352,13 @@ impl<'a> RunContext<'a> {
         Self { run_id, turn_id }
     }
 
+    fn from_run_only(run_id: Option<&'a RunId>) -> Self {
+        Self {
+            run_id,
+            turn_id: None,
+        }
+    }
+
     fn parts(self) -> Option<(&'a RunId, &'a TurnId)> {
         match (self.run_id, self.turn_id) {
             (Some(run_id), Some(turn_id)) => Some((run_id, turn_id)),
@@ -365,12 +432,67 @@ impl StartRunRequest {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct RequestApprovalRequest {
+    pub session_id: SessionId,
+    pub run_id: Option<RunId>,
+    pub tool_call_id: Option<ToolCallId>,
+    pub subject: String,
+    pub input: Value,
+    pub cwd: Option<String>,
+    pub reason: String,
+    pub allowed_decisions: Vec<ApprovalDecision>,
+    pub expires_at: OffsetDateTime,
+}
+
+impl RequestApprovalRequest {
+    pub fn new(
+        session_id: SessionId,
+        subject: impl Into<String>,
+        input: Value,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            session_id,
+            run_id: None,
+            tool_call_id: None,
+            subject: subject.into(),
+            input,
+            cwd: None,
+            reason: reason.into(),
+            allowed_decisions: vec![ApprovalDecision::ApproveOnce, ApprovalDecision::Deny],
+            expires_at: OffsetDateTime::now_utc() + Duration::minutes(30),
+        }
+    }
+
+    pub fn for_run(mut self, run_id: RunId) -> Self {
+        self.run_id = Some(run_id);
+        self
+    }
+
+    pub fn for_tool_call(mut self, tool_call_id: ToolCallId) -> Self {
+        self.tool_call_id = Some(tool_call_id);
+        self
+    }
+
+    pub fn with_cwd(mut self, cwd: impl Into<String>) -> Self {
+        self.cwd = Some(cwd.into());
+        self
+    }
+
+    pub fn with_allowed_decisions(mut self, decisions: Vec<ApprovalDecision>) -> Self {
+        self.allowed_decisions = decisions;
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
     use uuid::Uuid;
 
-    use crate::control::{ControlPlane, CreateSessionRequest};
-    use crate::protocol::{ContentBlock, EventType, LifecycleStatus};
+    use crate::control::{ControlPlane, CreateSessionRequest, RequestApprovalRequest};
+    use crate::protocol::{ApprovalDecision, ContentBlock, EventType, LifecycleStatus};
 
     #[test]
     fn creates_session_and_projects_user_messages() {
@@ -443,6 +565,45 @@ mod tests {
             LifecycleStatus::Completed
         );
         assert_eq!(projection.messages.len(), 1);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn records_approval_request_and_resolution() {
+        let root = std::env::temp_dir().join(format!("essence-control-{}", Uuid::new_v4()));
+        let control = ControlPlane::new(&root);
+        let session = control
+            .create_session(CreateSessionRequest::interactive("."))
+            .unwrap();
+        let run = control
+            .start_run(crate::control::StartRunRequest::user(
+                session.session_id.clone(),
+            ))
+            .unwrap();
+
+        let approval = control
+            .request_approval(
+                RequestApprovalRequest::new(
+                    session.session_id.clone(),
+                    "shell command",
+                    json!({"command": "cargo test"}),
+                    "Running project tests touches the local workspace.",
+                )
+                .for_run(run.run_id.clone())
+                .with_cwd("."),
+            )
+            .unwrap();
+        let resolved = control
+            .resolve_approval(&approval, ApprovalDecision::ApproveOnce, "user")
+            .unwrap();
+
+        let projection = control.projection(&session.session_id).unwrap();
+        let projected = projection.approvals.get(&approval.approval_id).unwrap();
+
+        assert_eq!(resolved.status, LifecycleStatus::Completed);
+        assert_eq!(projected.decision, Some(ApprovalDecision::ApproveOnce));
+        assert_eq!(projected.status, LifecycleStatus::Completed);
 
         let _ = std::fs::remove_dir_all(root);
     }

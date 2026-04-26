@@ -55,7 +55,8 @@ Plugins own external sources and fast-changing integrations:
 5. Control plane API for submit prompt, stream events, cancel, approve.
 6. Minimal permission policy. Done in `essence-core::policy`.
 7. Tool registry. Done in `essence-core::registry`.
-8. Native subagent runtime with sidechain transcripts.
+8. Native subagent runtime with sidechain transcripts. In progress:
+   `essence-core::subagent` now provides sidechain WAL append/replay helpers.
 9. Memory hooks.
 10. Task store and UI event stream.
 11. Plugin host and one CLI harness plugin.

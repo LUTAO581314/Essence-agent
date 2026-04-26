@@ -27,6 +27,8 @@ Current Rust crate status:
   approval, and deny flows
 - `essence-core::registry`: deterministic tool metadata registry with capability
   filtering and policy generation
+- `essence-core::subagent`: native subagent sidechain transcript helper for
+  append/replay of per-lane WAL files
 
 The long-term shape is:
 

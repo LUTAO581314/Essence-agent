@@ -8,6 +8,7 @@ pub mod policy;
 pub mod projection;
 pub mod protocol;
 pub mod registry;
+pub mod subagent;
 pub mod wal;
 
 pub use control::*;
@@ -15,4 +16,5 @@ pub use policy::*;
 pub use projection::*;
 pub use protocol::*;
 pub use registry::*;
+pub use subagent::*;
 pub use wal::*;

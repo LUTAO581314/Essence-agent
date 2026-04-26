@@ -13,6 +13,7 @@ use crate::protocol::{
     RunMeta, SessionId, SessionMeta, SessionMode, SessionStatePatch, SubagentMeta, SubagentRuntime,
     TaskId, TaskPatch, TaskRecord, ToolCallId, ToolCallRecord, TriggerKind, TurnId,
 };
+use crate::subagent::{SidechainError, SidechainTranscript};
 use crate::wal::{JsonlWal, WalError};
 
 #[derive(Debug, thiserror::Error)]
@@ -21,6 +22,8 @@ pub enum ControlError {
     Wal(#[from] WalError),
     #[error(transparent)]
     Projection(#[from] ProjectionError),
+    #[error(transparent)]
+    Sidechain(#[from] SidechainError),
     #[error("could not encode event payload: {0}")]
     Payload(#[from] serde_json::Error),
 }
@@ -485,6 +488,10 @@ impl ControlPlane {
 
     pub fn wal_path(&self, session_id: &SessionId) -> PathBuf {
         self.root.join(self.transcript_uri(session_id))
+    }
+
+    pub fn sidechain(&self, subagent: &SubagentMeta) -> ControlResult<SidechainTranscript> {
+        SidechainTranscript::open(&self.root, subagent.clone()).map_err(ControlError::from)
     }
 
     fn append_typed_event<T: Serialize>(

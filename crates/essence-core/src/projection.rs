@@ -5,7 +5,7 @@ use serde::de::DeserializeOwned;
 use crate::protocol::{
     ApprovalId, ApprovalRequest, ArtifactId, ArtifactRecord, EventEnvelope, EventType,
     LifecycleStatus, MessagePayload, RunId, RunMeta, SessionMeta, SubagentMeta, TaskId, TaskPatch,
-    TaskRecord,
+    TaskRecord, ToolCallId, ToolCallRecord,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -28,6 +28,7 @@ pub struct LedgerProjection {
     pub runs: BTreeMap<RunId, RunMeta>,
     pub subagents: BTreeMap<String, SubagentMeta>,
     pub approvals: BTreeMap<ApprovalId, ApprovalRequest>,
+    pub tool_calls: BTreeMap<ToolCallId, ToolCallRecord>,
     pub tasks: BTreeMap<TaskId, TaskRecord>,
     pub artifacts: BTreeMap<ArtifactId, ArtifactRecord>,
     pub messages: Vec<MessagePayload>,
@@ -78,6 +79,14 @@ impl LedgerProjection {
                 let approval = decode_payload::<ApprovalRequest>(event)?;
                 self.approvals
                     .insert(approval.approval_id.clone(), approval);
+            }
+            EventType::ToolCallStarted
+            | EventType::ToolCallOutput
+            | EventType::ToolCallCompleted
+            | EventType::ToolCallFailed => {
+                let tool_call = decode_payload::<ToolCallRecord>(event)?;
+                self.tool_calls
+                    .insert(tool_call.tool_call_id.clone(), tool_call);
             }
             EventType::TaskCreated => {
                 let task = decode_payload::<TaskRecord>(event)?;

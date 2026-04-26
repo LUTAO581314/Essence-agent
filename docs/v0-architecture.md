@@ -89,6 +89,8 @@ small on purpose:
   events.
 - `request_approval` and `resolve_approval` record permission boundaries and
   their user decisions.
+- `start_tool_call`, `complete_tool_call`, and `fail_tool_call` record tool
+  execution boundaries.
 - `append_event` is the escape hatch for typed protocol work that has not earned
   a dedicated helper yet.
 - `projection` replays a session WAL into the current `LedgerProjection`.

@@ -9,7 +9,8 @@ use crate::projection::{LedgerProjection, ProjectionError};
 use crate::protocol::{
     ApprovalDecision, ApprovalId, ApprovalRequest, ContentBlock, EventEnvelope, EventSource,
     EventType, EventVisibility, LifecycleStatus, MessagePayload, MessageRole, PermissionMode,
-    RunId, RunMeta, SessionId, SessionMeta, SessionMode, ToolCallId, TriggerKind, TurnId,
+    RunId, RunMeta, SessionId, SessionMeta, SessionMode, ToolCallId, ToolCallRecord, TriggerKind,
+    TurnId,
 };
 use crate::wal::{JsonlWal, WalError};
 
@@ -219,6 +220,49 @@ impl ControlPlane {
         Ok(resolved)
     }
 
+    pub fn start_tool_call(&self, request: StartToolCallRequest) -> ControlResult<ToolCallRecord> {
+        let tool_call = ToolCallRecord {
+            tool_call_id: ToolCallId(Uuid::new_v4()),
+            session_id: request.session_id.clone(),
+            run_id: request.run_id.clone(),
+            turn_id: request.turn_id.clone(),
+            name: request.name,
+            input: request.input,
+            status: LifecycleStatus::WaitingTool,
+            started_at: OffsetDateTime::now_utc(),
+            ended_at: None,
+            output: None,
+            error: None,
+        };
+
+        self.append_typed_event_with_run(
+            &request.session_id,
+            RunContext::from_options(request.run_id.as_ref(), request.turn_id.as_ref()),
+            EventType::ToolCallStarted,
+            EventSource::MainAgent,
+            EventVisibility::Audit,
+            &tool_call,
+        )?;
+
+        Ok(tool_call)
+    }
+
+    pub fn complete_tool_call(
+        &self,
+        tool_call: &ToolCallRecord,
+        output: Value,
+    ) -> ControlResult<ToolCallRecord> {
+        self.finish_tool_call(tool_call, LifecycleStatus::Completed, Some(output), None)
+    }
+
+    pub fn fail_tool_call(
+        &self,
+        tool_call: &ToolCallRecord,
+        error: impl Into<String>,
+    ) -> ControlResult<ToolCallRecord> {
+        self.finish_tool_call(tool_call, LifecycleStatus::Failed, None, Some(error.into()))
+    }
+
     pub fn append_event(
         &self,
         session_id: &SessionId,
@@ -318,6 +362,37 @@ impl ControlPlane {
             RunContext::new(&updated.run_id, &updated.turn_id),
             EventType::RunStateChanged,
             EventSource::MainAgent,
+            EventVisibility::Audit,
+            &updated,
+        )?;
+
+        Ok(updated)
+    }
+
+    fn finish_tool_call(
+        &self,
+        tool_call: &ToolCallRecord,
+        status: LifecycleStatus,
+        output: Option<Value>,
+        error: Option<String>,
+    ) -> ControlResult<ToolCallRecord> {
+        let mut updated = tool_call.clone();
+        updated.status = status;
+        updated.ended_at = Some(OffsetDateTime::now_utc());
+        updated.output = output;
+        updated.error = error;
+
+        let event_type = match updated.status {
+            LifecycleStatus::Completed => EventType::ToolCallCompleted,
+            LifecycleStatus::Failed => EventType::ToolCallFailed,
+            _ => EventType::ToolCallOutput,
+        };
+
+        self.append_typed_event_with_run(
+            &updated.session_id,
+            RunContext::from_options(updated.run_id.as_ref(), updated.turn_id.as_ref()),
+            event_type,
+            EventSource::Tool(updated.name.clone()),
             EventVisibility::Audit,
             &updated,
         )?;
@@ -486,12 +561,41 @@ impl RequestApprovalRequest {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct StartToolCallRequest {
+    pub session_id: SessionId,
+    pub run_id: Option<RunId>,
+    pub turn_id: Option<TurnId>,
+    pub name: String,
+    pub input: Value,
+}
+
+impl StartToolCallRequest {
+    pub fn new(session_id: SessionId, name: impl Into<String>, input: Value) -> Self {
+        Self {
+            session_id,
+            run_id: None,
+            turn_id: None,
+            name: name.into(),
+            input,
+        }
+    }
+
+    pub fn for_run(mut self, run: &RunMeta) -> Self {
+        self.run_id = Some(run.run_id.clone());
+        self.turn_id = Some(run.turn_id.clone());
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
     use uuid::Uuid;
 
-    use crate::control::{ControlPlane, CreateSessionRequest, RequestApprovalRequest};
+    use crate::control::{
+        ControlPlane, CreateSessionRequest, RequestApprovalRequest, StartToolCallRequest,
+    };
     use crate::protocol::{ApprovalDecision, ContentBlock, EventType, LifecycleStatus};
 
     #[test]
@@ -604,6 +708,44 @@ mod tests {
         assert_eq!(resolved.status, LifecycleStatus::Completed);
         assert_eq!(projected.decision, Some(ApprovalDecision::ApproveOnce));
         assert_eq!(projected.status, LifecycleStatus::Completed);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn records_tool_call_lifecycle() {
+        let root = std::env::temp_dir().join(format!("essence-control-{}", Uuid::new_v4()));
+        let control = ControlPlane::new(&root);
+        let session = control
+            .create_session(CreateSessionRequest::interactive("."))
+            .unwrap();
+        let run = control
+            .start_run(crate::control::StartRunRequest::user(
+                session.session_id.clone(),
+            ))
+            .unwrap();
+
+        let tool_call = control
+            .start_tool_call(
+                StartToolCallRequest::new(
+                    session.session_id.clone(),
+                    "shell",
+                    json!({"command": "cargo test"}),
+                )
+                .for_run(&run),
+            )
+            .unwrap();
+        let completed = control
+            .complete_tool_call(&tool_call, json!({"exit_code": 0}))
+            .unwrap();
+
+        let projection = control.projection(&session.session_id).unwrap();
+        let projected = projection.tool_calls.get(&tool_call.tool_call_id).unwrap();
+
+        assert_eq!(completed.status, LifecycleStatus::Completed);
+        assert_eq!(projected.status, LifecycleStatus::Completed);
+        assert_eq!(projected.output, Some(json!({"exit_code": 0})));
+        assert_eq!(projected.run_id, Some(run.run_id));
 
         let _ = std::fs::remove_dir_all(root);
     }

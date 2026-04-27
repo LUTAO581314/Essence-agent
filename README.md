@@ -45,5 +45,20 @@ The long-term shape is:
 - Python adapters for memory, research, and fast experimentation
 - TypeScript UI/plugin SDK for dashboards, office views, and product shells
 
-See [docs/v0-architecture.md](docs/v0-architecture.md) for the current v0
-architecture draft.
+## CLI
+
+There is now a minimal `essence` CLI over the local control plane. It writes
+runtime data to `.essence/` by default and can be pointed elsewhere with
+`--root`.
+
+```bash
+cargo run -- session create --title "First session"
+cargo run -- message send --session-id <session-id> --text "Build the next layer"
+cargo run -- events tail --session-id <session-id> --user-visible
+```
+
+## Project Notes
+
+- [Current status](docs/status.md)
+- [Reference synthesis](docs/reference-synthesis.md)
+- [v0 architecture draft](docs/v0-architecture.md)

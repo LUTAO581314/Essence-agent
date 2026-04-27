@@ -128,7 +128,7 @@ fn query_schema() -> serde_json::Value {
 fn context_schema() -> serde_json::Value {
     json!({
         "type": "object",
-        "required": ["target"],
+        "required": ["target", "direction"],
         "properties": {
             "target": {"type": "string"},
             "repo": {"type": "string"}
@@ -186,6 +186,7 @@ fn tool_map_schema() -> serde_json::Value {
 fn analyze_schema() -> serde_json::Value {
     json!({
         "type": "object",
+        "required": ["path"],
         "properties": {
             "path": {"type": "string", "default": "."},
             "name": {"type": "string"},
@@ -242,5 +243,26 @@ mod tests {
                 json!({"path": "."})
             ))
             .requires_approval());
+    }
+
+    #[test]
+    fn renders_gitnexus_impact_command() {
+        let harness = gitnexus_harness();
+        let command = harness
+            .command_for_tool("gitnexus.impact")
+            .unwrap()
+            .render(&json!({"target": "ControlPlane", "direction": "upstream"}))
+            .unwrap();
+
+        assert_eq!(command.binary, "gitnexus");
+        assert_eq!(
+            command.args,
+            vec![
+                "impact".to_string(),
+                "ControlPlane".to_string(),
+                "--direction".to_string(),
+                "upstream".to_string()
+            ]
+        );
     }
 }

@@ -7,9 +7,9 @@ repository.workspace = true
 description = "Core protocol and WAL primitives for Essence Agent."
 
 [dependencies]
+clap = { version = "4", features = ["derive"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 time.workspace = true
 uuid.workspace = true
-

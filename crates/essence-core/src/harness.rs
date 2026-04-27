@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::plugin::PluginManifest;
 
@@ -12,6 +13,8 @@ pub enum HarnessError {
     MissingCommandForTool(String),
     #[error("command `{0}` is already registered")]
     DuplicateCommand(String),
+    #[error("command `{command}` is missing required input `{key}`")]
+    MissingInput { command: String, key: String },
 }
 
 pub type HarnessResult<T> = Result<T, HarnessError>;
@@ -22,6 +25,13 @@ pub struct CliCommandSpec {
     pub tool_name: String,
     pub binary: String,
     #[serde(default)]
+    pub args: Vec<String>,
+    pub writes_workspace: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RenderedCliCommand {
+    pub binary: String,
     pub args: Vec<String>,
     pub writes_workspace: bool,
 }
@@ -50,6 +60,38 @@ impl CliCommandSpec {
         self.writes_workspace = writes_workspace;
         self
     }
+
+    pub fn render(&self, input: &Value) -> HarnessResult<RenderedCliCommand> {
+        let args = self
+            .args
+            .iter()
+            .map(|arg| self.render_arg(arg, input))
+            .collect::<HarnessResult<Vec<_>>>()?;
+
+        Ok(RenderedCliCommand {
+            binary: self.binary.clone(),
+            args,
+            writes_workspace: self.writes_workspace,
+        })
+    }
+
+    fn render_arg(&self, arg: &str, input: &Value) -> HarnessResult<String> {
+        let Some(key) = placeholder_key(arg) else {
+            return Ok(arg.to_string());
+        };
+        let value = input.get(key).ok_or_else(|| HarnessError::MissingInput {
+            command: self.name.clone(),
+            key: key.to_string(),
+        })?;
+        Ok(match value {
+            Value::String(value) => value.clone(),
+            other => other.to_string(),
+        })
+    }
+}
+
+fn placeholder_key(arg: &str) -> Option<&str> {
+    arg.strip_prefix("{{")?.strip_suffix("}}")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -134,6 +176,44 @@ mod tests {
             harness.command_for_tool("code.query").unwrap().args,
             vec!["query".to_string(), "{{query}}".to_string()]
         );
+    }
+
+    #[test]
+    fn renders_cli_command_templates_from_json_input() {
+        let command = CliCommandSpec::new("query", "code.query", "code")
+            .with_arg("query")
+            .with_arg("{{query}}")
+            .with_arg("--limit")
+            .with_arg("{{limit}}");
+
+        let rendered = command
+            .render(&serde_json::json!({"query": "ControlPlane", "limit": 5}))
+            .unwrap();
+
+        assert_eq!(rendered.binary, "code");
+        assert_eq!(
+            rendered.args,
+            vec![
+                "query".to_string(),
+                "ControlPlane".to_string(),
+                "--limit".to_string(),
+                "5".to_string()
+            ]
+        );
+        assert!(!rendered.writes_workspace);
+    }
+
+    #[test]
+    fn rejects_missing_template_inputs() {
+        let command = CliCommandSpec::new("query", "code.query", "code").with_arg("{{query}}");
+
+        let error = command.render(&serde_json::json!({})).unwrap_err();
+
+        assert!(matches!(
+            error,
+            HarnessError::MissingInput { command, key }
+                if command == "query" && key == "query"
+        ));
     }
 
     #[test]

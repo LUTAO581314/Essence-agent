@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use crate::approval_index::ApprovalGrantIndex;
 use crate::harness::{CliExecutionResult, HarnessError, PolicyBoundCliHarness, RenderedCliCommand};
+use crate::memory_store::MemoryStore;
 use crate::policy::{PolicyDecision, ToolPolicyRequest};
 use crate::projection::{LedgerProjection, ProjectionError};
 use crate::protocol::{
@@ -788,6 +789,11 @@ impl ControlPlane {
     pub fn task_store(&self, session_id: &SessionId) -> ControlResult<TaskStore> {
         let projection = self.projection(session_id)?;
         Ok(TaskStore::from_projection(&projection))
+    }
+
+    pub fn memory_store(&self, session_id: &SessionId) -> ControlResult<MemoryStore> {
+        let projection = self.projection(session_id)?;
+        Ok(MemoryStore::from_projection(&projection))
     }
 
     pub fn task_scheduler(&self, session_id: &SessionId) -> ControlResult<TaskScheduler> {
@@ -2413,6 +2419,11 @@ mod tests {
         assert_eq!(projected.status, LifecycleStatus::Completed);
         assert_eq!(projected.source_event_ids, vec![user_message.event_id]);
         assert_eq!(projected.confidence, Some(0.95));
+
+        let memory_store = control.memory_store(&session.session_id).unwrap();
+        assert_eq!(memory_store.saved().count(), 1);
+        assert_eq!(memory_store.by_kind("decision").count(), 1);
+        assert_eq!(memory_store.search_text("canonical").count(), 1);
 
         let _ = std::fs::remove_dir_all(root);
     }

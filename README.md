@@ -30,6 +30,7 @@ Current Rust crate status:
 - `essence-core::subagent`: native subagent sidechain transcript helper for
   append/replay of per-lane WAL files
 - memory hooks: candidate and saved memory events projected from the WAL
+- `essence-core::memory_store`: local saved-memory queries by kind and text
 - `essence-core::task_store`: task projection queries by status, lane, and
   assignee
 - `essence-core::stream`: cursor-based UI event stream over ledger events

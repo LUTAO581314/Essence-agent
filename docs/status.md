@@ -15,6 +15,7 @@ The implemented layer is the durable local kernel:
 - session and run lifecycle records
 - tool call and approval records
 - task, artifact, and memory events
+- local saved-memory store queries by kind and text
 - native subagent metadata and sidechain transcripts
 - deterministic tool registry and permission policy
 - plugin manifest host

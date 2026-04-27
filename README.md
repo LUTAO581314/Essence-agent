@@ -169,11 +169,64 @@ runtime data to `.essence/` by default and can be pointed elsewhere with
 `--root`.
 
 ```bash
-cargo run -- session create --title "First session"
-cargo run -- message send --session-id <session-id> --text "Build the next layer"
-cargo run -- events tail --session-id <session-id> --user-visible
-cargo run -- approval pending --session-id <session-id>
-cargo run -- approval resolve --session-id <session-id> --approval-id <approval-id> --decision deny
+cargo run -p essence-core --bin essence -- session create --title "First session"
+cargo run -p essence-core --bin essence -- message send --session-id <session-id> --text "Build the next layer"
+cargo run -p essence-core --bin essence -- events tail --session-id <session-id> --user-visible
+cargo run -p essence-core --bin essence -- approval pending --session-id <session-id>
+cargo run -p essence-core --bin essence -- approval resolve --session-id <session-id> --approval-id <approval-id> --decision deny
+```
+
+Interactive chat and the Star Office-style agent board are available from the
+same CLI:
+
+```bash
+cargo run -p essence-core --bin essence -- chat --title "Desk session"
+```
+
+Inside chat, type `/office` to render the multi-agent board and `/exit` to
+quit. Chat registers itself as the `main` agent, flips to `running` while a turn
+is active, and returns to `idle` when ready.
+
+The default assistant is local and ledger-backed, so the loop can be tested
+without external model credentials. To use a real model, point chat at any
+command that reads the rendered transcript from stdin and writes the assistant
+reply to stdout:
+
+```bash
+export ESSENCE_CHAT_MODEL_CMD='your-model-command'
+cargo run -p essence-core --bin essence -- chat --title "Desk session"
+
+cargo run -p essence-core --bin essence -- chat --model-command 'your-model-command'
+```
+
+PowerShell:
+
+```powershell
+$env:ESSENCE_CHAT_MODEL_CMD = "your-model-command"
+cargo run -p essence-core --bin essence -- chat --title "Desk session"
+```
+
+For example, the command can be a small wrapper around an LLM CLI, an HTTP
+client, or a local model runner. Non-empty stdout becomes the assistant message
+and is written back to the Essence ledger. Model commands are bounded by default
+with a 30 second timeout, 1 MiB stdout cap, and 64 KiB stderr cap:
+
+```bash
+cargo run -p essence-core --bin essence -- chat \
+  --model-command 'your-model-command' \
+  --model-timeout-ms 30000 \
+  --model-max-stdout-bytes 1048576 \
+  --model-max-stderr-bytes 65536
+```
+
+To populate the board from another terminal:
+
+```bash
+cargo run -p essence-core --bin essence -- agent register --session-id <session-id> --agent-id researcher --lane research --role Research
+cargo run -p essence-core --bin essence -- task create --session-id <session-id> --title "Map repo" --lane research
+cargo run -p essence-core --bin essence -- agent heartbeat --session-id <session-id> --agent-id researcher --status running --lane research --note "indexing"
+cargo run -p essence-core --bin essence -- workspace dashboard --session-id <session-id>
+cargo run -p essence-core --bin essence -- workspace watch --session-id <session-id>
 ```
 
 ## Project Notes

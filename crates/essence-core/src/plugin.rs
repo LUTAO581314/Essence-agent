@@ -191,14 +191,20 @@ impl PluginCatalog {
 }
 
 pub fn basic_plugin_catalog() -> PluginCatalog {
-    PluginCatalog::new()
-        .with_plugin(crate::gitnexus::gitnexus_harness().plugin)
-        .with_plugin(crate::workspace::browser_daemon_plugin(
-            crate::workspace::BrowserDaemonDescriptor::local(".essence/browser-daemon.json"),
-        ))
+    let catalog = PluginCatalog::new()
         .with_plugin(memory_index_plugin())
         .with_plugin(research_radar_plugin())
-        .with_plugin(workspace_shell_plugin())
+        .with_plugin(workspace_shell_plugin());
+
+    #[cfg(feature = "gitnexus")]
+    let catalog = catalog.with_plugin(crate::gitnexus::gitnexus_harness().plugin);
+
+    #[cfg(feature = "workspace")]
+    let catalog = catalog.with_plugin(crate::workspace::browser_daemon_plugin(
+        crate::workspace::BrowserDaemonDescriptor::local(".essence/browser-daemon.json"),
+    ));
+
+    catalog
 }
 
 pub fn memory_index_plugin() -> PluginManifest {
@@ -398,7 +404,11 @@ mod tests {
             catalog.by_kind(PluginKind::UiShell).next().unwrap().id,
             "workspace-shell"
         );
+
+        #[cfg(feature = "workspace")]
         assert!(catalog.by_capability("browser_daemon").next().is_some());
+        #[cfg(not(feature = "workspace"))]
+        assert!(catalog.by_capability("browser_daemon").next().is_none());
     }
 
     #[test]

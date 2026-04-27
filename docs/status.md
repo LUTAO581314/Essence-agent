@@ -59,6 +59,12 @@ cargo test --workspace
 
 Expected result: all library and CLI tests pass.
 
+Core-only proof:
+
+```bash
+cargo test -p essence-core --no-default-features
+```
+
 ## Not Yet Built
 
 - durable SwarmRuntime scheduler with production supervision and concurrent lane

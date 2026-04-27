@@ -6,6 +6,15 @@ license.workspace = true
 repository.workspace = true
 description = "Core protocol and WAL primitives for Essence Agent."
 
+[features]
+default = ["full"]
+full = ["api", "gitnexus", "mcp", "swarm", "workspace"]
+api = []
+gitnexus = []
+mcp = ["api", "swarm"]
+swarm = []
+workspace = []
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 serde.workspace = true

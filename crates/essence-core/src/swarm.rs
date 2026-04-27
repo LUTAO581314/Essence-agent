@@ -1,9 +1,4 @@
 use std::collections::BTreeMap;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
-use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -16,6 +11,7 @@ use crate::protocol::{
     AgentHeartbeat, AgentId, AgentRecord, LaneId, LifecycleStatus, RunMeta, SessionId,
     SubagentBudget, SubagentMeta, SubagentResult, TaskId, TaskPatch, TaskRecord, TriggerKind,
 };
+use crate::swarm_scheduler::SwarmSchedulerHandle;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SwarmAgentSpec {
@@ -97,48 +93,6 @@ pub struct CompletedDispatchedTask {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct SwarmTick {
     pub dispatched: Vec<DispatchedTask>,
-}
-
-#[derive(Debug)]
-pub struct SwarmSchedulerHandle {
-    running: Arc<AtomicBool>,
-    join: Option<JoinHandle<()>>,
-}
-
-impl SwarmSchedulerHandle {
-    pub fn stop(mut self) {
-        self.running.store(false, Ordering::SeqCst);
-        if let Some(join) = self.join.take() {
-            let _ = join.join();
-        }
-    }
-}
-
-#[cfg(test)]
-fn wait_for_agent_heartbeat(
-    control: &ControlPlane,
-    session_id: &SessionId,
-    agent_id: &AgentId,
-    timeout: Duration,
-) -> Option<AgentHeartbeat> {
-    let started = std::time::Instant::now();
-    loop {
-        if let Ok(projection) = control.projection(session_id) {
-            if let Some(heartbeat) = projection.agent_heartbeats.get(agent_id) {
-                return Some(heartbeat.clone());
-            }
-        }
-        if started.elapsed() >= timeout {
-            return None;
-        }
-        thread::sleep(Duration::from_millis(5));
-    }
-}
-
-impl Drop for SwarmSchedulerHandle {
-    fn drop(&mut self) {
-        self.running.store(false, Ordering::SeqCst);
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -301,20 +255,7 @@ impl SwarmRuntime {
         session_id: SessionId,
         interval: Duration,
     ) -> SwarmSchedulerHandle {
-        let runtime = self.clone();
-        let running = Arc::new(AtomicBool::new(true));
-        let thread_running = Arc::clone(&running);
-        let join = thread::spawn(move || {
-            while thread_running.load(Ordering::SeqCst) {
-                let _ = runtime.tick_session(&session_id);
-                thread::sleep(interval);
-            }
-        });
-
-        SwarmSchedulerHandle {
-            running,
-            join: Some(join),
-        }
+        SwarmSchedulerHandle::start(self.clone(), session_id, interval)
     }
 
     fn agent_for_session(
@@ -948,16 +889,13 @@ mod tests {
             session.session_id.clone(),
             std::time::Duration::from_millis(10),
         );
-        let heartbeat = super::wait_for_agent_heartbeat(
-            &control,
-            &session.session_id,
-            &AgentId("daemon".to_string()),
-            std::time::Duration::from_millis(250),
-        )
-        .expect("scheduler loop should emit a heartbeat");
-        handle.stop();
-
         let projection = control.projection(&session.session_id).unwrap();
+        let heartbeat = projection
+            .agent_heartbeats
+            .get(&AgentId("daemon".to_string()))
+            .cloned()
+            .expect("scheduler loop should emit a heartbeat before returning");
+        handle.stop();
 
         assert_eq!(heartbeat.status, LifecycleStatus::Running);
         assert!(projection

@@ -135,6 +135,27 @@ Users should be able to browse the catalog, choose which plugins to install,
 and let the kernel register only the selected plugins. Installed plugins still
 flow through the same registry, policy, approval, budget, and ledger contracts.
 
+## Core Only
+
+The crate supports a core-only build path. Use the kernel without optional
+integrations with:
+
+```bash
+cargo test -p essence-core --no-default-features
+cargo check -p essence-core --no-default-features --features api
+```
+
+Feature groups are opt-in:
+
+- `api`: local JSON-friendly Control API facade
+- `mcp`: MCP adapter manifest and tool dispatcher
+- `swarm`: swarm runtime, budget, registry, and scheduler helpers
+- `gitnexus`: bundled code-intelligence plugin
+- `workspace`: browser daemon and workspace shell plugin boundary
+
+Default build keeps `full` enabled, so the current repo still ships the whole
+kernel by default.
+
 ## CLI
 
 There is now a minimal `essence` CLI over the local control plane. It writes

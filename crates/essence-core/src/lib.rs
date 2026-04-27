@@ -3,11 +3,14 @@
 //! The v0 kernel keeps the source of truth as replayable JSONL events.
 //! Databases, UI streams, memory indexes, and task views are projections.
 
+#[cfg(feature = "api")]
 pub mod api;
 pub mod approval_index;
 pub mod control;
+#[cfg(feature = "gitnexus")]
 pub mod gitnexus;
 pub mod harness;
+#[cfg(feature = "mcp")]
 pub mod mcp;
 pub mod memory_index;
 pub mod memory_store;
@@ -21,19 +24,27 @@ pub mod scheduler;
 pub mod snapshot;
 pub mod stream;
 pub mod subagent;
+#[cfg(feature = "swarm")]
 pub mod swarm;
+#[cfg(feature = "swarm")]
 pub mod swarm_budget;
+#[cfg(feature = "swarm")]
 pub mod swarm_registry;
+#[cfg(feature = "swarm")]
 pub mod swarm_scheduler;
 pub mod task_store;
 pub mod wal;
+#[cfg(feature = "workspace")]
 pub mod workspace;
 
+#[cfg(feature = "api")]
 pub use api::*;
 pub use approval_index::*;
 pub use control::*;
+#[cfg(feature = "gitnexus")]
 pub use gitnexus::*;
 pub use harness::*;
+#[cfg(feature = "mcp")]
 pub use mcp::*;
 pub use memory_index::*;
 pub use memory_store::*;
@@ -47,9 +58,15 @@ pub use scheduler::*;
 pub use snapshot::*;
 pub use stream::*;
 pub use subagent::*;
+#[cfg(feature = "swarm")]
 pub use swarm::*;
+#[cfg(feature = "swarm")]
 pub use swarm_budget::*;
+#[cfg(feature = "swarm")]
 pub use swarm_registry::*;
+#[cfg(feature = "swarm")]
+pub use swarm_scheduler::*;
 pub use task_store::*;
 pub use wal::*;
+#[cfg(feature = "workspace")]
 pub use workspace::*;

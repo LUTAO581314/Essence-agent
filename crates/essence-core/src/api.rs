@@ -1,13 +1,14 @@
 use serde::{Deserialize, Serialize};
 
 use crate::control::{ControlPlane, ControlResult, CreateSessionRequest};
+#[cfg(feature = "mcp")]
 use crate::mcp::McpAdapterManifest;
 use crate::memory_index::MemorySearchHit;
-use crate::protocol::{
-    AgentHeartbeat, ApprovalRequest, EventEnvelope, LifecycleStatus, SessionId, SessionMeta,
-    SubagentBudget,
-};
+#[cfg(feature = "swarm")]
+use crate::protocol::{AgentHeartbeat, LifecycleStatus, SubagentBudget};
+use crate::protocol::{ApprovalRequest, EventEnvelope, SessionId, SessionMeta};
 use crate::snapshot::ProjectionSnapshot;
+#[cfg(feature = "swarm")]
 use crate::swarm::{SwarmAgentSpec, SwarmRuntime, SwarmTick};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -64,6 +65,7 @@ pub struct ApiEventsAfterRequest {
     pub after_seq: u64,
 }
 
+#[cfg(feature = "swarm")]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ApiRegisterAgentRequest {
     pub session_id: SessionId,
@@ -76,6 +78,7 @@ pub struct ApiRegisterAgentRequest {
     pub budget: Option<SubagentBudget>,
 }
 
+#[cfg(feature = "swarm")]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ApiAgentHeartbeatRequest {
     pub session_id: SessionId,
@@ -83,6 +86,7 @@ pub struct ApiAgentHeartbeatRequest {
     pub status: LifecycleStatus,
 }
 
+#[cfg(feature = "swarm")]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ApiSwarmTickRequest {
     pub session_id: SessionId,
@@ -137,6 +141,7 @@ impl ControlApi {
         self.control.write_projection_snapshot(session_id)
     }
 
+    #[cfg(feature = "swarm")]
     pub fn register_agent(
         &self,
         request: ApiRegisterAgentRequest,
@@ -151,6 +156,7 @@ impl ControlApi {
         SwarmRuntime::new(self.control.clone()).register_agent(&request.session_id, agent)
     }
 
+    #[cfg(feature = "swarm")]
     pub fn agent_heartbeat(
         &self,
         request: ApiAgentHeartbeatRequest,
@@ -162,6 +168,7 @@ impl ControlApi {
         )
     }
 
+    #[cfg(feature = "swarm")]
     pub fn swarm_tick(&self, request: ApiSwarmTickRequest) -> ControlResult<SwarmTick> {
         SwarmRuntime::new(self.control.clone()).tick_session(&request.session_id)
     }
@@ -175,6 +182,7 @@ impl ControlApi {
         Ok(index.search(&request.query, request.limit))
     }
 
+    #[cfg(feature = "mcp")]
     pub fn mcp_manifest(&self) -> McpAdapterManifest {
         let tools = [
             crate::registry::ToolSpec::new(
@@ -203,13 +211,17 @@ impl ControlApi {
 mod tests {
     use uuid::Uuid;
 
+    #[cfg(all(feature = "mcp", feature = "swarm"))]
+    use crate::api::ApiMemorySearchRequest;
+    #[cfg(feature = "swarm")]
+    use crate::api::{ApiAgentHeartbeatRequest, ApiRegisterAgentRequest, ApiSwarmTickRequest};
     use crate::api::{
-        ApiAgentHeartbeatRequest, ApiCreateSessionRequest, ApiEventsAfterRequest,
-        ApiMemorySearchRequest, ApiRegisterAgentRequest, ApiSendMessageRequest,
-        ApiSwarmTickRequest, ControlApi,
+        ApiCreateSessionRequest, ApiEventsAfterRequest, ApiSendMessageRequest, ControlApi,
     };
     use crate::control::ControlPlane;
-    use crate::protocol::{EventType, LifecycleStatus, SubagentBudget};
+    use crate::protocol::EventType;
+    #[cfg(feature = "swarm")]
+    use crate::protocol::{LifecycleStatus, SubagentBudget};
 
     #[test]
     fn api_facade_creates_session_and_streams_events() {
@@ -257,6 +269,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[cfg(all(feature = "mcp", feature = "swarm"))]
     #[test]
     fn api_facade_registers_agents_ticks_and_searches_memory() {
         let root = std::env::temp_dir().join(format!("essence-api-{}", Uuid::new_v4()));

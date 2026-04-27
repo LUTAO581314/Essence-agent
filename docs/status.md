@@ -26,6 +26,7 @@ The implemented layer is the durable local kernel:
 - pending approval queue queries by session, run, and tool call
 - CLI commands for listing and resolving approvals
 - session-level approval reuse for `approve-session` and `approve-always`
+- cross-session approval reuse for `approve-always`
 - GitNexus harness plugin
 - minimal `essence` CLI for session creation, message append, and event tailing
 
@@ -43,7 +44,7 @@ Expected result: all library and CLI tests pass.
 
 - model execution loop
 - full SwarmRuntime scheduler
-- cross-session `approve-always` persistence
+- indexed approval grant cache for large session histories
 - persistent database projections
 - MCP/API server adapters
 - memory embedding/index backend

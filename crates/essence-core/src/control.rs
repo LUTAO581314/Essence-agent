@@ -35,6 +35,12 @@ pub enum ControlError {
     ApprovalMissingToolCall(ApprovalId),
     #[error("tool call `{0:?}` is not recorded")]
     MissingToolCall(ToolCallId),
+    #[error("io error at {path}: {source}")]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("could not encode event payload: {0}")]
     Payload(#[from] serde_json::Error),
 }
@@ -355,6 +361,7 @@ impl ControlPlane {
                 if self
                     .projection(&request.session_id)?
                     .has_approval_grant_for_subject(&request.tool_name)
+                    || self.has_approval_always_grant_for_subject(&request.tool_name)?
                 {
                     let result = rendered.execute_with_cwd(request.cwd.as_deref())?;
                     let completed =
@@ -693,6 +700,25 @@ impl ControlPlane {
             .collect())
     }
 
+    pub fn approval_always_grants_for_subject(
+        &self,
+        subject: &str,
+    ) -> ControlResult<Vec<ApprovalRequest>> {
+        let mut grants = Vec::new();
+        for projection in self.session_projections()? {
+            grants.extend(
+                projection
+                    .approval_always_grants_for_subject(subject)
+                    .cloned(),
+            );
+        }
+        Ok(grants)
+    }
+
+    pub fn has_approval_always_grant_for_subject(&self, subject: &str) -> ControlResult<bool> {
+        Ok(!self.approval_always_grants_for_subject(subject)?.is_empty())
+    }
+
     pub fn events(&self, session_id: &SessionId) -> ControlResult<Vec<EventEnvelope>> {
         self.wal(session_id).replay().map_err(ControlError::from)
     }
@@ -855,6 +881,33 @@ impl ControlPlane {
 
     fn wal(&self, session_id: &SessionId) -> JsonlWal {
         JsonlWal::new(self.wal_path(session_id))
+    }
+
+    fn session_projections(&self) -> ControlResult<Vec<LedgerProjection>> {
+        let sessions_dir = self.root.join("sessions");
+        if !sessions_dir.exists() {
+            return Ok(Vec::new());
+        }
+
+        let entries = std::fs::read_dir(&sessions_dir).map_err(|source| ControlError::Io {
+            path: sessions_dir.clone(),
+            source,
+        })?;
+        let mut projections = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|source| ControlError::Io {
+                path: sessions_dir.clone(),
+                source,
+            })?;
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let events = JsonlWal::new(path).replay()?;
+            projections.push(LedgerProjection::replay(&events)?);
+        }
+
+        Ok(projections)
     }
 
     fn transcript_uri(&self, session_id: &SessionId) -> String {
@@ -1778,6 +1831,123 @@ mod tests {
                 .len(),
             0
         );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reuses_approve_always_cli_harness_grant_across_sessions() {
+        let root = std::env::temp_dir().join(format!("essence-control-{}", Uuid::new_v4()));
+        let control = ControlPlane::new(&root);
+        let first_session = control
+            .create_session(CreateSessionRequest::interactive("."))
+            .unwrap();
+        let second_session = control
+            .create_session(CreateSessionRequest::interactive("."))
+            .unwrap();
+        let runner = test_policy_bound_harness("code.list", ToolPermission::RequireApproval);
+        let pending = control
+            .run_cli_harness_tool(
+                &runner,
+                RunCliHarnessToolRequest::new(
+                    first_session.session_id.clone(),
+                    "code.list",
+                    json!({}),
+                ),
+            )
+            .unwrap();
+        let RecordedCliHarnessOutcome::RequiresApproval { approval, .. } = pending else {
+            panic!("expected approval outcome");
+        };
+        control
+            .resolve_cli_harness_approval(&approval, ApprovalDecision::ApproveAlways, "test-user")
+            .unwrap();
+
+        let reused = control
+            .run_cli_harness_tool(
+                &runner,
+                RunCliHarnessToolRequest::new(
+                    second_session.session_id.clone(),
+                    "code.list",
+                    json!({}),
+                ),
+            )
+            .unwrap();
+
+        let RecordedCliHarnessOutcome::Executed { result, .. } = reused else {
+            panic!("expected approve-always grant reuse to execute");
+        };
+
+        assert!(result.success);
+        assert_eq!(
+            control
+                .approval_always_grants_for_subject("code.list")
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(control
+            .pending_approvals(&second_session.session_id)
+            .unwrap()
+            .is_empty());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn approve_session_cli_harness_grant_is_not_reused_across_sessions() {
+        let root = std::env::temp_dir().join(format!("essence-control-{}", Uuid::new_v4()));
+        let control = ControlPlane::new(&root);
+        let first_session = control
+            .create_session(CreateSessionRequest::interactive("."))
+            .unwrap();
+        let second_session = control
+            .create_session(CreateSessionRequest::interactive("."))
+            .unwrap();
+        let runner = test_policy_bound_harness("code.list", ToolPermission::RequireApproval);
+        let pending = control
+            .run_cli_harness_tool(
+                &runner,
+                RunCliHarnessToolRequest::new(
+                    first_session.session_id.clone(),
+                    "code.list",
+                    json!({}),
+                ),
+            )
+            .unwrap();
+        let RecordedCliHarnessOutcome::RequiresApproval { approval, .. } = pending else {
+            panic!("expected approval outcome");
+        };
+        control
+            .resolve_cli_harness_approval(&approval, ApprovalDecision::ApproveSession, "test-user")
+            .unwrap();
+
+        let second = control
+            .run_cli_harness_tool(
+                &runner,
+                RunCliHarnessToolRequest::new(
+                    second_session.session_id.clone(),
+                    "code.list",
+                    json!({}),
+                ),
+            )
+            .unwrap();
+
+        assert!(matches!(
+            second,
+            RecordedCliHarnessOutcome::RequiresApproval { .. }
+        ));
+        assert_eq!(
+            control
+                .pending_approvals(&second_session.session_id)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(control
+            .approval_always_grants_for_subject("code.list")
+            .unwrap()
+            .is_empty());
 
         let _ = std::fs::remove_dir_all(root);
     }

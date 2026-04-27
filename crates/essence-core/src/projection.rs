@@ -175,6 +175,23 @@ impl LedgerProjection {
     pub fn has_approval_grant_for_subject(&self, subject: &str) -> bool {
         self.approval_grants_for_subject(subject).next().is_some()
     }
+
+    pub fn approval_always_grants_for_subject<'a>(
+        &'a self,
+        subject: &'a str,
+    ) -> impl Iterator<Item = &'a ApprovalRequest> {
+        self.approvals.values().filter(move |approval| {
+            approval.status == LifecycleStatus::Completed
+                && approval.subject == subject
+                && approval.decision == Some(ApprovalDecision::ApproveAlways)
+        })
+    }
+
+    pub fn has_approval_always_grant_for_subject(&self, subject: &str) -> bool {
+        self.approval_always_grants_for_subject(subject)
+            .next()
+            .is_some()
+    }
 }
 
 fn decode_payload<T: DeserializeOwned>(event: &EventEnvelope) -> ProjectionResult<T> {
@@ -463,6 +480,51 @@ mod tests {
         assert_eq!(grants[0].approval_id, grant.approval_id);
         assert!(projection.has_approval_grant_for_subject("code.list"));
         assert!(!projection.has_approval_grant_for_subject("other.tool"));
+    }
+
+    #[test]
+    fn filters_approve_always_grants() {
+        let session_id = SessionId(Uuid::new_v4());
+        let run_id = RunId(Uuid::new_v4());
+        let mut always = approval(
+            session_id.clone(),
+            run_id.clone(),
+            ToolCallId(Uuid::new_v4()),
+            LifecycleStatus::Completed,
+        );
+        always.subject = "code.list".to_string();
+        always.decision = Some(ApprovalDecision::ApproveAlways);
+        let mut session_only = approval(
+            session_id.clone(),
+            run_id,
+            ToolCallId(Uuid::new_v4()),
+            LifecycleStatus::Completed,
+        );
+        session_only.subject = "code.list".to_string();
+        session_only.decision = Some(ApprovalDecision::ApproveSession);
+        let events = vec![
+            envelope(
+                1,
+                session_id.clone(),
+                EventType::ApprovalResolved,
+                to_value(always.clone()).unwrap(),
+            ),
+            envelope(
+                2,
+                session_id,
+                EventType::ApprovalResolved,
+                to_value(session_only).unwrap(),
+            ),
+        ];
+
+        let projection = LedgerProjection::replay(&events).unwrap();
+        let grants = projection
+            .approval_always_grants_for_subject("code.list")
+            .collect::<Vec<_>>();
+
+        assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0].approval_id, always.approval_id);
+        assert!(projection.has_approval_always_grant_for_subject("code.list"));
     }
 
     fn envelope(

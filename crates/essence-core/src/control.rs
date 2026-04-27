@@ -635,6 +635,38 @@ impl ControlPlane {
         LedgerProjection::replay(&events).map_err(ControlError::from)
     }
 
+    pub fn pending_approvals(&self, session_id: &SessionId) -> ControlResult<Vec<ApprovalRequest>> {
+        Ok(self
+            .projection(session_id)?
+            .pending_approvals()
+            .cloned()
+            .collect())
+    }
+
+    pub fn pending_approvals_for_tool_call(
+        &self,
+        session_id: &SessionId,
+        tool_call_id: &ToolCallId,
+    ) -> ControlResult<Vec<ApprovalRequest>> {
+        Ok(self
+            .projection(session_id)?
+            .pending_approvals_for_tool_call(tool_call_id)
+            .cloned()
+            .collect())
+    }
+
+    pub fn pending_approvals_for_run(
+        &self,
+        session_id: &SessionId,
+        run_id: &RunId,
+    ) -> ControlResult<Vec<ApprovalRequest>> {
+        Ok(self
+            .projection(session_id)?
+            .pending_approvals_for_run(run_id)
+            .cloned()
+            .collect())
+    }
+
     pub fn events(&self, session_id: &SessionId) -> ControlResult<Vec<EventEnvelope>> {
         self.wal(session_id).replay().map_err(ControlError::from)
     }
@@ -1566,6 +1598,60 @@ mod tests {
             Some(tool_call.tool_call_id)
         );
         assert_eq!(projected_approval.run_id, Some(run.run_id));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn queries_pending_cli_harness_approvals() {
+        let root = std::env::temp_dir().join(format!("essence-control-{}", Uuid::new_v4()));
+        let control = ControlPlane::new(&root);
+        let session = control
+            .create_session(CreateSessionRequest::interactive("."))
+            .unwrap();
+        let run = control
+            .start_run(crate::control::StartRunRequest::user(
+                session.session_id.clone(),
+            ))
+            .unwrap();
+        let runner = test_policy_bound_harness("code.list", ToolPermission::RequireApproval);
+        let outcome = control
+            .run_cli_harness_tool(
+                &runner,
+                RunCliHarnessToolRequest::new(session.session_id.clone(), "code.list", json!({}))
+                    .for_run(&run),
+            )
+            .unwrap();
+        let RecordedCliHarnessOutcome::RequiresApproval {
+            tool_call,
+            approval,
+            ..
+        } = outcome
+        else {
+            panic!("expected approval outcome");
+        };
+
+        let all_pending = control.pending_approvals(&session.session_id).unwrap();
+        let run_pending = control
+            .pending_approvals_for_run(&session.session_id, &run.run_id)
+            .unwrap();
+        let tool_pending = control
+            .pending_approvals_for_tool_call(&session.session_id, &tool_call.tool_call_id)
+            .unwrap();
+
+        assert_eq!(all_pending.len(), 1);
+        assert_eq!(run_pending.len(), 1);
+        assert_eq!(tool_pending.len(), 1);
+        assert_eq!(all_pending[0].approval_id, approval.approval_id);
+
+        control
+            .resolve_cli_harness_approval(&approval, ApprovalDecision::ApproveOnce, "test-user")
+            .unwrap();
+
+        assert!(control
+            .pending_approvals(&session.session_id)
+            .unwrap()
+            .is_empty());
 
         let _ = std::fs::remove_dir_all(root);
     }

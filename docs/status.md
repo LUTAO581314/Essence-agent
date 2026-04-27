@@ -23,6 +23,7 @@ The implemented layer is the durable local kernel:
 - ControlPlane recording for policy-bound CLI harness executions, approvals,
   and denials
 - approved CLI harness replay after approval resolution
+- pending approval queue queries by session, run, and tool call
 - GitNexus harness plugin
 - minimal `essence` CLI for session creation, message append, and event tailing
 
@@ -40,7 +41,7 @@ Expected result: all library and CLI tests pass.
 
 - model execution loop
 - full SwarmRuntime scheduler
-- durable approval resume queue and session-level approval reuse
+- session-level approval reuse
 - persistent database projections
 - MCP/API server adapters
 - memory embedding/index backend

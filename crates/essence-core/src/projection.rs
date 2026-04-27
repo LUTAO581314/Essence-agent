@@ -134,6 +134,28 @@ impl LedgerProjection {
 
         Ok(())
     }
+
+    pub fn pending_approvals(&self) -> impl Iterator<Item = &ApprovalRequest> {
+        self.approvals
+            .values()
+            .filter(|approval| approval.status == LifecycleStatus::WaitingApproval)
+    }
+
+    pub fn pending_approvals_for_tool_call<'a>(
+        &'a self,
+        tool_call_id: &'a ToolCallId,
+    ) -> impl Iterator<Item = &'a ApprovalRequest> {
+        self.pending_approvals()
+            .filter(move |approval| approval.tool_call_id.as_ref() == Some(tool_call_id))
+    }
+
+    pub fn pending_approvals_for_run<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> impl Iterator<Item = &'a ApprovalRequest> {
+        self.pending_approvals()
+            .filter(move |approval| approval.run_id.as_ref() == Some(run_id))
+    }
 }
 
 fn decode_payload<T: DeserializeOwned>(event: &EventEnvelope) -> ProjectionResult<T> {
@@ -151,10 +173,10 @@ mod tests {
     use uuid::Uuid;
 
     use crate::protocol::{
-        ArtifactId, ArtifactRecord, ContentBlock, EventEnvelope, EventSource, EventType,
-        EventVisibility, LifecycleStatus, MemoryId, MemoryRecord, MessagePayload, MessageRole,
-        PermissionMode, RunId, RunMeta, SessionId, SessionMeta, SessionMode, TaskId, TaskPatch,
-        TaskRecord, TriggerKind, TurnId,
+        ApprovalId, ApprovalRequest, ArtifactId, ArtifactRecord, ContentBlock, EventEnvelope,
+        EventSource, EventType, EventVisibility, LifecycleStatus, MemoryId, MemoryRecord,
+        MessagePayload, MessageRole, PermissionMode, RunId, RunMeta, SessionId, SessionMeta,
+        SessionMode, TaskId, TaskPatch, TaskRecord, ToolCallId, TriggerKind, TurnId,
     };
 
     use super::LedgerProjection;
@@ -331,6 +353,53 @@ mod tests {
         assert!(error.to_string().contains("seq 7"));
     }
 
+    #[test]
+    fn filters_pending_approvals() {
+        let session_id = SessionId(Uuid::new_v4());
+        let run_id = RunId(Uuid::new_v4());
+        let tool_call_id = ToolCallId(Uuid::new_v4());
+        let pending = approval(
+            session_id.clone(),
+            run_id.clone(),
+            tool_call_id.clone(),
+            LifecycleStatus::WaitingApproval,
+        );
+        let resolved = approval(
+            session_id.clone(),
+            run_id.clone(),
+            ToolCallId(Uuid::new_v4()),
+            LifecycleStatus::Completed,
+        );
+        let events = vec![
+            envelope(
+                1,
+                session_id.clone(),
+                EventType::ApprovalRequested,
+                to_value(pending.clone()).unwrap(),
+            ),
+            envelope(
+                2,
+                session_id,
+                EventType::ApprovalResolved,
+                to_value(resolved).unwrap(),
+            ),
+        ];
+
+        let projection = LedgerProjection::replay(&events).unwrap();
+        let pending = projection.pending_approvals().collect::<Vec<_>>();
+        let by_tool = projection
+            .pending_approvals_for_tool_call(&tool_call_id)
+            .collect::<Vec<_>>();
+        let by_run = projection
+            .pending_approvals_for_run(&run_id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(pending.len(), 1);
+        assert_eq!(by_tool.len(), 1);
+        assert_eq!(by_run.len(), 1);
+        assert_eq!(pending[0].approval_id, by_tool[0].approval_id);
+    }
+
     fn envelope(
         seq: u64,
         session_id: SessionId,
@@ -345,5 +414,29 @@ mod tests {
             EventVisibility::Audit,
             payload,
         )
+    }
+
+    fn approval(
+        session_id: SessionId,
+        run_id: RunId,
+        tool_call_id: ToolCallId,
+        status: LifecycleStatus,
+    ) -> ApprovalRequest {
+        ApprovalRequest {
+            approval_id: ApprovalId(Uuid::new_v4()),
+            session_id,
+            run_id: Some(run_id),
+            tool_call_id: Some(tool_call_id),
+            subject: "code.list".to_string(),
+            input: json!({}),
+            cwd: None,
+            reason: "test".to_string(),
+            allowed_decisions: Vec::new(),
+            status,
+            expires_at: OffsetDateTime::now_utc(),
+            decision: None,
+            resolved_at: None,
+            resolved_by: None,
+        }
     }
 }

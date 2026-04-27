@@ -3,6 +3,7 @@
 //! The v0 kernel keeps the source of truth as replayable JSONL events.
 //! Databases, UI streams, memory indexes, and task views are projections.
 
+pub mod approval_index;
 pub mod control;
 pub mod gitnexus;
 pub mod harness;
@@ -16,6 +17,7 @@ pub mod subagent;
 pub mod task_store;
 pub mod wal;
 
+pub use approval_index::*;
 pub use control::*;
 pub use gitnexus::*;
 pub use harness::*;

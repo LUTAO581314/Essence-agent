@@ -5,6 +5,7 @@ use serde_json::Value;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
+use crate::approval_index::ApprovalGrantIndex;
 use crate::harness::{CliExecutionResult, HarnessError, PolicyBoundCliHarness, RenderedCliCommand};
 use crate::policy::{PolicyDecision, ToolPolicyRequest};
 use crate::projection::{LedgerProjection, ProjectionError};
@@ -694,10 +695,9 @@ impl ControlPlane {
         subject: &str,
     ) -> ControlResult<Vec<ApprovalRequest>> {
         Ok(self
-            .projection(session_id)?
-            .approval_grants_for_subject(subject)
-            .cloned()
-            .collect())
+            .approval_grant_index(session_id)?
+            .session_grants_for_subject(subject)
+            .to_vec())
     }
 
     pub fn approval_always_grants_for_subject(
@@ -705,18 +705,23 @@ impl ControlPlane {
         subject: &str,
     ) -> ControlResult<Vec<ApprovalRequest>> {
         let mut grants = Vec::new();
-        for projection in self.session_projections()? {
-            grants.extend(
-                projection
-                    .approval_always_grants_for_subject(subject)
-                    .cloned(),
-            );
+        for index in self.approval_grant_indexes()? {
+            grants.extend(index.always_grants_for_subject(subject).to_vec());
         }
         Ok(grants)
     }
 
     pub fn has_approval_always_grant_for_subject(&self, subject: &str) -> ControlResult<bool> {
         Ok(!self.approval_always_grants_for_subject(subject)?.is_empty())
+    }
+
+    pub fn approval_grant_index(
+        &self,
+        session_id: &SessionId,
+    ) -> ControlResult<ApprovalGrantIndex> {
+        Ok(ApprovalGrantIndex::from_projection(
+            &self.projection(session_id)?,
+        ))
     }
 
     pub fn events(&self, session_id: &SessionId) -> ControlResult<Vec<EventEnvelope>> {
@@ -908,6 +913,14 @@ impl ControlPlane {
         }
 
         Ok(projections)
+    }
+
+    fn approval_grant_indexes(&self) -> ControlResult<Vec<ApprovalGrantIndex>> {
+        Ok(self
+            .session_projections()?
+            .iter()
+            .map(ApprovalGrantIndex::from_projection)
+            .collect())
     }
 
     fn transcript_uri(&self, session_id: &SessionId) -> String {

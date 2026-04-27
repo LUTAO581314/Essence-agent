@@ -30,6 +30,7 @@ The implemented layer is the durable local kernel:
 - indexed approval grant cache for reusable approval lookup
 - GitNexus harness plugin
 - minimal model execution loop abstraction
+- task scheduler primitives for claiming queued work
 - minimal `essence` CLI for session creation, message append, and event tailing
 
 ## Verification

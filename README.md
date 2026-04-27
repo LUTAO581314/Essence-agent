@@ -41,6 +41,7 @@ Current Rust crate status:
   GitNexus graph search, context, impact, diff detection, and indexing
 - `essence-core::model_loop`: minimal model execution loop abstraction over
   the control plane
+- `essence-core::scheduler`: task scheduling primitives for queued work
 
 The long-term shape is:
 

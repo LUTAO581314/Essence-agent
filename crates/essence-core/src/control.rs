@@ -17,6 +17,7 @@ use crate::protocol::{
     SubagentMeta, SubagentRuntime, TaskId, TaskPatch, TaskRecord, ToolCallId, ToolCallRecord,
     TriggerKind, TurnId,
 };
+use crate::scheduler::TaskScheduler;
 use crate::stream::{EventCursor, UiEvent, UiEventStream};
 use crate::subagent::{SidechainError, SidechainTranscript};
 use crate::task_store::TaskStore;
@@ -768,6 +769,38 @@ impl ControlPlane {
         Ok(TaskStore::from_projection(&projection))
     }
 
+    pub fn task_scheduler(&self, session_id: &SessionId) -> ControlResult<TaskScheduler> {
+        Ok(TaskScheduler::from_task_store(
+            &self.task_store(session_id)?,
+        ))
+    }
+
+    pub fn claim_next_task(
+        &self,
+        session_id: &SessionId,
+        assignee: impl Into<String>,
+    ) -> ControlResult<Option<TaskPatch>> {
+        let assignee = AgentId(assignee.into());
+        let Some(task) = self
+            .task_scheduler(session_id)?
+            .next_for_assignee(&assignee)
+            .map(|scheduled| scheduled.task.clone())
+        else {
+            return Ok(None);
+        };
+
+        let patch = TaskPatch {
+            task_id: task.task_id,
+            title: None,
+            status: Some(LifecycleStatus::Running),
+            updated_at: Some(OffsetDateTime::now_utc()),
+            assignee: Some(assignee),
+            metadata: Default::default(),
+        };
+        self.update_task(session_id, patch.clone())?;
+        Ok(Some(patch))
+    }
+
     pub fn wal_path(&self, session_id: &SessionId) -> PathBuf {
         self.root.join(self.transcript_uri(session_id))
     }
@@ -1416,7 +1449,7 @@ mod tests {
     use crate::harness::{CliCommandSpec, CliHarnessManifest, PolicyBoundCliHarness};
     use crate::plugin::PluginManifest;
     use crate::protocol::{
-        ApprovalDecision, ContentBlock, EventType, IsolationMode, LaneId, LifecycleStatus,
+        AgentId, ApprovalDecision, ContentBlock, EventType, IsolationMode, LaneId, LifecycleStatus,
         PermissionMode, TaskPatch,
     };
     use crate::registry::{ToolPermission, ToolRegistry, ToolSpec};
@@ -2179,6 +2212,38 @@ mod tests {
                 .title,
             "Wire task and artifact projection"
         );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn claims_next_queued_task_for_assignee() {
+        let root = std::env::temp_dir().join(format!("essence-control-{}", Uuid::new_v4()));
+        let control = ControlPlane::new(&root);
+        let session = control
+            .create_session(CreateSessionRequest::interactive("."))
+            .unwrap();
+        let task = control
+            .create_task(CreateTaskRequest::new(
+                session.session_id.clone(),
+                "Build scheduler",
+            ))
+            .unwrap();
+
+        let claimed = control
+            .claim_next_task(&session.session_id, "agent-a")
+            .unwrap()
+            .unwrap();
+        let projection = control.projection(&session.session_id).unwrap();
+        let projected = projection.tasks.get(&task.task_id).unwrap();
+
+        assert_eq!(claimed.task_id, task.task_id);
+        assert_eq!(projected.status, LifecycleStatus::Running);
+        assert_eq!(projected.assignee, Some(AgentId("agent-a".to_string())));
+        assert!(control
+            .claim_next_task(&session.session_id, "agent-a")
+            .unwrap()
+            .is_none());
 
         let _ = std::fs::remove_dir_all(root);
     }

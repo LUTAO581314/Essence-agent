@@ -20,6 +20,8 @@ The implemented layer is the durable local kernel:
 - plugin manifest host
 - CLI harness metadata, command rendering, and execution result capture
 - policy-bound CLI harness runner for allow, approval, and deny outcomes
+- ControlPlane recording for policy-bound CLI harness executions, approvals,
+  and denials
 - GitNexus harness plugin
 - minimal `essence` CLI for session creation, message append, and event tailing
 
@@ -37,8 +39,7 @@ Expected result: all library and CLI tests pass.
 
 - model execution loop
 - full SwarmRuntime scheduler
-- ControlPlane integration that records policy-bound harness runs as tool call
-  events
+- approved harness replay after approval resolution
 - persistent database projections
 - MCP/API server adapters
 - memory embedding/index backend

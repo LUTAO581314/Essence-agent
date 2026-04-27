@@ -5,6 +5,8 @@ use serde_json::Value;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
+use crate::harness::{CliExecutionResult, HarnessError, PolicyBoundCliHarness, RenderedCliCommand};
+use crate::policy::{PolicyDecision, ToolPolicyRequest};
 use crate::projection::{LedgerProjection, ProjectionError};
 use crate::protocol::{
     AgentId, ApprovalDecision, ApprovalId, ApprovalRequest, ArtifactId, ArtifactRecord,
@@ -27,6 +29,8 @@ pub enum ControlError {
     Projection(#[from] ProjectionError),
     #[error(transparent)]
     Sidechain(#[from] SidechainError),
+    #[error(transparent)]
+    Harness(#[from] HarnessError),
     #[error("could not encode event payload: {0}")]
     Payload(#[from] serde_json::Error),
 }
@@ -308,6 +312,68 @@ impl ControlPlane {
         error: impl Into<String>,
     ) -> ControlResult<ToolCallRecord> {
         self.finish_tool_call(tool_call, LifecycleStatus::Failed, None, Some(error.into()))
+    }
+
+    pub fn run_cli_harness_tool(
+        &self,
+        runner: &PolicyBoundCliHarness,
+        request: RunCliHarnessToolRequest,
+    ) -> ControlResult<RecordedCliHarnessOutcome> {
+        let rendered = runner
+            .manifest
+            .render_tool_command(&request.tool_name, &request.input)?;
+        let tool_call = self.start_tool_call(StartToolCallRequest {
+            session_id: request.session_id.clone(),
+            run_id: request.run_id.clone(),
+            turn_id: request.turn_id.clone(),
+            name: request.tool_name.clone(),
+            input: harness_tool_input(&request.input, &rendered)?,
+        })?;
+
+        let mut policy_request =
+            ToolPolicyRequest::new(request.tool_name.clone(), request.input.clone());
+        if let Some(cwd) = request.cwd.clone() {
+            policy_request = policy_request.with_cwd(cwd);
+        }
+
+        match runner.policy.decide(&policy_request) {
+            PolicyDecision::Allow => {
+                let result = rendered.execute_with_cwd(request.cwd.as_deref())?;
+                let completed =
+                    self.complete_tool_call(&tool_call, serde_json::to_value(&result)?)?;
+                Ok(RecordedCliHarnessOutcome::Executed {
+                    tool_call: completed,
+                    command: rendered,
+                    result,
+                })
+            }
+            PolicyDecision::RequireApproval { reason } => {
+                let approval = self.request_approval(
+                    RequestApprovalRequest::new(
+                        request.session_id,
+                        request.tool_name,
+                        harness_tool_input(&request.input, &rendered)?,
+                        reason,
+                    )
+                    .with_optional_run_id(request.run_id)
+                    .for_tool_call(tool_call.tool_call_id.clone())
+                    .with_optional_cwd(request.cwd),
+                )?;
+                Ok(RecordedCliHarnessOutcome::RequiresApproval {
+                    tool_call,
+                    approval,
+                    command: rendered,
+                })
+            }
+            PolicyDecision::Deny { reason } => {
+                let failed = self.fail_tool_call(&tool_call, reason.clone())?;
+                Ok(RecordedCliHarnessOutcome::Denied {
+                    tool_call: failed,
+                    command: rendered,
+                    reason,
+                })
+            }
+        }
     }
 
     pub fn create_task(&self, request: CreateTaskRequest) -> ControlResult<TaskRecord> {
@@ -823,6 +889,11 @@ impl RequestApprovalRequest {
         self
     }
 
+    pub fn with_optional_run_id(mut self, run_id: Option<RunId>) -> Self {
+        self.run_id = run_id;
+        self
+    }
+
     pub fn for_tool_call(mut self, tool_call_id: ToolCallId) -> Self {
         self.tool_call_id = Some(tool_call_id);
         self
@@ -830,6 +901,11 @@ impl RequestApprovalRequest {
 
     pub fn with_cwd(mut self, cwd: impl Into<String>) -> Self {
         self.cwd = Some(cwd.into());
+        self
+    }
+
+    pub fn with_optional_cwd(mut self, cwd: Option<String>) -> Self {
+        self.cwd = cwd;
         self
     }
 
@@ -864,6 +940,66 @@ impl StartToolCallRequest {
         self.turn_id = Some(run.turn_id.clone());
         self
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct RunCliHarnessToolRequest {
+    pub session_id: SessionId,
+    pub run_id: Option<RunId>,
+    pub turn_id: Option<TurnId>,
+    pub tool_name: String,
+    pub input: Value,
+    pub cwd: Option<String>,
+}
+
+impl RunCliHarnessToolRequest {
+    pub fn new(session_id: SessionId, tool_name: impl Into<String>, input: Value) -> Self {
+        Self {
+            session_id,
+            run_id: None,
+            turn_id: None,
+            tool_name: tool_name.into(),
+            input,
+            cwd: None,
+        }
+    }
+
+    pub fn for_run(mut self, run: &RunMeta) -> Self {
+        self.run_id = Some(run.run_id.clone());
+        self.turn_id = Some(run.turn_id.clone());
+        self
+    }
+
+    pub fn with_cwd(mut self, cwd: impl Into<String>) -> Self {
+        self.cwd = Some(cwd.into());
+        self
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum RecordedCliHarnessOutcome {
+    Executed {
+        tool_call: ToolCallRecord,
+        command: RenderedCliCommand,
+        result: CliExecutionResult,
+    },
+    RequiresApproval {
+        tool_call: ToolCallRecord,
+        approval: ApprovalRequest,
+        command: RenderedCliCommand,
+    },
+    Denied {
+        tool_call: ToolCallRecord,
+        command: RenderedCliCommand,
+        reason: String,
+    },
+}
+
+fn harness_tool_input(input: &Value, command: &RenderedCliCommand) -> ControlResult<Value> {
+    Ok(serde_json::json!({
+        "input": input,
+        "command": command,
+    }))
 }
 
 #[derive(Debug, Clone)]
@@ -1057,12 +1193,16 @@ mod tests {
 
     use crate::control::{
         ControlPlane, CreateArtifactRequest, CreateSessionRequest, CreateTaskRequest,
-        ProposeMemoryRequest, RequestApprovalRequest, SpawnSubagentRequest, StartToolCallRequest,
+        ProposeMemoryRequest, RecordedCliHarnessOutcome, RequestApprovalRequest,
+        RunCliHarnessToolRequest, SpawnSubagentRequest, StartToolCallRequest,
     };
+    use crate::harness::{CliCommandSpec, CliHarnessManifest, PolicyBoundCliHarness};
+    use crate::plugin::PluginManifest;
     use crate::protocol::{
         ApprovalDecision, ContentBlock, EventType, IsolationMode, LaneId, LifecycleStatus,
-        TaskPatch,
+        PermissionMode, TaskPatch,
     };
+    use crate::registry::{ToolPermission, ToolRegistry, ToolSpec};
 
     #[test]
     fn creates_session_and_projects_user_messages() {
@@ -1272,6 +1412,123 @@ mod tests {
     }
 
     #[test]
+    fn records_allowed_cli_harness_tool_execution() {
+        let root = std::env::temp_dir().join(format!("essence-control-{}", Uuid::new_v4()));
+        let control = ControlPlane::new(&root);
+        let session = control
+            .create_session(CreateSessionRequest::interactive("."))
+            .unwrap();
+        let run = control
+            .start_run(crate::control::StartRunRequest::user(
+                session.session_id.clone(),
+            ))
+            .unwrap();
+        let runner = test_policy_bound_harness("code.list", ToolPermission::Allow);
+
+        let outcome = control
+            .run_cli_harness_tool(
+                &runner,
+                RunCliHarnessToolRequest::new(session.session_id.clone(), "code.list", json!({}))
+                    .for_run(&run),
+            )
+            .unwrap();
+
+        let RecordedCliHarnessOutcome::Executed {
+            tool_call, result, ..
+        } = outcome
+        else {
+            panic!("expected executed outcome");
+        };
+        let projection = control.projection(&session.session_id).unwrap();
+        let projected = projection.tool_calls.get(&tool_call.tool_call_id).unwrap();
+
+        assert!(result.success);
+        assert_eq!(projected.status, LifecycleStatus::Completed);
+        assert_eq!(projected.name, "code.list");
+        assert!(projected.output.is_some());
+        assert_eq!(projected.run_id, Some(run.run_id));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn records_cli_harness_approval_request_without_executing() {
+        let root = std::env::temp_dir().join(format!("essence-control-{}", Uuid::new_v4()));
+        let control = ControlPlane::new(&root);
+        let session = control
+            .create_session(CreateSessionRequest::interactive("."))
+            .unwrap();
+        let run = control
+            .start_run(crate::control::StartRunRequest::user(
+                session.session_id.clone(),
+            ))
+            .unwrap();
+        let runner = test_policy_bound_harness("code.list", ToolPermission::RequireApproval);
+
+        let outcome = control
+            .run_cli_harness_tool(
+                &runner,
+                RunCliHarnessToolRequest::new(session.session_id.clone(), "code.list", json!({}))
+                    .for_run(&run),
+            )
+            .unwrap();
+
+        let RecordedCliHarnessOutcome::RequiresApproval {
+            tool_call,
+            approval,
+            ..
+        } = outcome
+        else {
+            panic!("expected approval outcome");
+        };
+        let projection = control.projection(&session.session_id).unwrap();
+        let projected_tool = projection.tool_calls.get(&tool_call.tool_call_id).unwrap();
+        let projected_approval = projection.approvals.get(&approval.approval_id).unwrap();
+
+        assert_eq!(projected_tool.status, LifecycleStatus::WaitingTool);
+        assert_eq!(projected_approval.status, LifecycleStatus::WaitingApproval);
+        assert_eq!(
+            projected_approval.tool_call_id,
+            Some(tool_call.tool_call_id)
+        );
+        assert_eq!(projected_approval.run_id, Some(run.run_id));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn records_denied_cli_harness_tool_as_failed_call() {
+        let root = std::env::temp_dir().join(format!("essence-control-{}", Uuid::new_v4()));
+        let control = ControlPlane::new(&root);
+        let session = control
+            .create_session(CreateSessionRequest::interactive("."))
+            .unwrap();
+        let runner = test_policy_bound_harness("code.list", ToolPermission::Deny);
+
+        let outcome = control
+            .run_cli_harness_tool(
+                &runner,
+                RunCliHarnessToolRequest::new(session.session_id.clone(), "code.list", json!({})),
+            )
+            .unwrap();
+
+        let RecordedCliHarnessOutcome::Denied {
+            tool_call, reason, ..
+        } = outcome
+        else {
+            panic!("expected denied outcome");
+        };
+        let projection = control.projection(&session.session_id).unwrap();
+        let projected = projection.tool_calls.get(&tool_call.tool_call_id).unwrap();
+
+        assert_eq!(projected.status, LifecycleStatus::Failed);
+        assert!(reason.contains("explicitly denied"));
+        assert_eq!(projected.error.as_deref(), Some(reason.as_str()));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn records_tasks_and_artifacts() {
         let root = std::env::temp_dir().join(format!("essence-control-{}", Uuid::new_v4()));
         let control = ControlPlane::new(&root);
@@ -1457,5 +1714,26 @@ mod tests {
         assert_eq!(projected.confidence, Some(0.95));
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn test_policy_bound_harness(
+        tool_name: &str,
+        permission: ToolPermission,
+    ) -> PolicyBoundCliHarness {
+        let binary = std::env::current_exe()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let plugin = PluginManifest::new("code", "Code", "0.1.0", "Code tools.")
+            .with_tool(ToolSpec::new(tool_name, "List tests.", permission));
+        let manifest = CliHarnessManifest::new(plugin.clone())
+            .with_command(CliCommandSpec::new("list", tool_name, binary).with_arg("--list"))
+            .unwrap();
+        let mut registry = ToolRegistry::new();
+        for spec in plugin.tools {
+            registry.register(spec).unwrap();
+        }
+
+        PolicyBoundCliHarness::new(manifest, registry.to_policy(PermissionMode::Default))
     }
 }

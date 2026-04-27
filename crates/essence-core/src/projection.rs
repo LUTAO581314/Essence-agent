@@ -3,9 +3,10 @@ use std::collections::BTreeMap;
 use serde::de::DeserializeOwned;
 
 use crate::protocol::{
-    ApprovalId, ApprovalRequest, ArtifactId, ArtifactRecord, EventEnvelope, EventType,
-    LifecycleStatus, MemoryId, MemoryRecord, MessagePayload, RunId, RunMeta, SessionMeta,
-    SessionStatePatch, SubagentMeta, TaskId, TaskPatch, TaskRecord, ToolCallId, ToolCallRecord,
+    ApprovalDecision, ApprovalId, ApprovalRequest, ArtifactId, ArtifactRecord, EventEnvelope,
+    EventType, LifecycleStatus, MemoryId, MemoryRecord, MessagePayload, RunId, RunMeta,
+    SessionMeta, SessionStatePatch, SubagentMeta, TaskId, TaskPatch, TaskRecord, ToolCallId,
+    ToolCallRecord,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -156,6 +157,24 @@ impl LedgerProjection {
         self.pending_approvals()
             .filter(move |approval| approval.run_id.as_ref() == Some(run_id))
     }
+
+    pub fn approval_grants_for_subject<'a>(
+        &'a self,
+        subject: &'a str,
+    ) -> impl Iterator<Item = &'a ApprovalRequest> {
+        self.approvals.values().filter(move |approval| {
+            approval.status == LifecycleStatus::Completed
+                && approval.subject == subject
+                && matches!(
+                    approval.decision,
+                    Some(ApprovalDecision::ApproveSession | ApprovalDecision::ApproveAlways)
+                )
+        })
+    }
+
+    pub fn has_approval_grant_for_subject(&self, subject: &str) -> bool {
+        self.approval_grants_for_subject(subject).next().is_some()
+    }
 }
 
 fn decode_payload<T: DeserializeOwned>(event: &EventEnvelope) -> ProjectionResult<T> {
@@ -173,10 +192,10 @@ mod tests {
     use uuid::Uuid;
 
     use crate::protocol::{
-        ApprovalId, ApprovalRequest, ArtifactId, ArtifactRecord, ContentBlock, EventEnvelope,
-        EventSource, EventType, EventVisibility, LifecycleStatus, MemoryId, MemoryRecord,
-        MessagePayload, MessageRole, PermissionMode, RunId, RunMeta, SessionId, SessionMeta,
-        SessionMode, TaskId, TaskPatch, TaskRecord, ToolCallId, TriggerKind, TurnId,
+        ApprovalDecision, ApprovalId, ApprovalRequest, ArtifactId, ArtifactRecord, ContentBlock,
+        EventEnvelope, EventSource, EventType, EventVisibility, LifecycleStatus, MemoryId,
+        MemoryRecord, MessagePayload, MessageRole, PermissionMode, RunId, RunMeta, SessionId,
+        SessionMeta, SessionMode, TaskId, TaskPatch, TaskRecord, ToolCallId, TriggerKind, TurnId,
     };
 
     use super::LedgerProjection;
@@ -398,6 +417,52 @@ mod tests {
         assert_eq!(by_tool.len(), 1);
         assert_eq!(by_run.len(), 1);
         assert_eq!(pending[0].approval_id, by_tool[0].approval_id);
+    }
+
+    #[test]
+    fn filters_session_approval_grants() {
+        let session_id = SessionId(Uuid::new_v4());
+        let run_id = RunId(Uuid::new_v4());
+        let mut grant = approval(
+            session_id.clone(),
+            run_id.clone(),
+            ToolCallId(Uuid::new_v4()),
+            LifecycleStatus::Completed,
+        );
+        grant.subject = "code.list".to_string();
+        grant.decision = Some(ApprovalDecision::ApproveSession);
+        let mut one_shot = approval(
+            session_id.clone(),
+            run_id,
+            ToolCallId(Uuid::new_v4()),
+            LifecycleStatus::Completed,
+        );
+        one_shot.subject = "code.list".to_string();
+        one_shot.decision = Some(ApprovalDecision::ApproveOnce);
+        let events = vec![
+            envelope(
+                1,
+                session_id.clone(),
+                EventType::ApprovalResolved,
+                to_value(grant.clone()).unwrap(),
+            ),
+            envelope(
+                2,
+                session_id,
+                EventType::ApprovalResolved,
+                to_value(one_shot).unwrap(),
+            ),
+        ];
+
+        let projection = LedgerProjection::replay(&events).unwrap();
+        let grants = projection
+            .approval_grants_for_subject("code.list")
+            .collect::<Vec<_>>();
+
+        assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0].approval_id, grant.approval_id);
+        assert!(projection.has_approval_grant_for_subject("code.list"));
+        assert!(!projection.has_approval_grant_for_subject("other.tool"));
     }
 
     fn envelope(

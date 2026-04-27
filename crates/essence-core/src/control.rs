@@ -352,6 +352,20 @@ impl ControlPlane {
                 })
             }
             PolicyDecision::RequireApproval { reason } => {
+                if self
+                    .projection(&request.session_id)?
+                    .has_approval_grant_for_subject(&request.tool_name)
+                {
+                    let result = rendered.execute_with_cwd(request.cwd.as_deref())?;
+                    let completed =
+                        self.complete_tool_call(&tool_call, serde_json::to_value(&result)?)?;
+                    return Ok(RecordedCliHarnessOutcome::Executed {
+                        tool_call: completed,
+                        command: rendered,
+                        result,
+                    });
+                }
+
                 let approval = self.request_approval(
                     RequestApprovalRequest::new(
                         request.session_id,
@@ -663,6 +677,18 @@ impl ControlPlane {
         Ok(self
             .projection(session_id)?
             .pending_approvals_for_run(run_id)
+            .cloned()
+            .collect())
+    }
+
+    pub fn approval_grants_for_subject(
+        &self,
+        session_id: &SessionId,
+        subject: &str,
+    ) -> ControlResult<Vec<ApprovalRequest>> {
+        Ok(self
+            .projection(session_id)?
+            .approval_grants_for_subject(subject)
             .cloned()
             .collect())
     }
@@ -1704,6 +1730,101 @@ mod tests {
             projected_approval.decision,
             Some(ApprovalDecision::ApproveOnce)
         );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reuses_session_cli_harness_approval_grant() {
+        let root = std::env::temp_dir().join(format!("essence-control-{}", Uuid::new_v4()));
+        let control = ControlPlane::new(&root);
+        let session = control
+            .create_session(CreateSessionRequest::interactive("."))
+            .unwrap();
+        let runner = test_policy_bound_harness("code.list", ToolPermission::RequireApproval);
+        let pending = control
+            .run_cli_harness_tool(
+                &runner,
+                RunCliHarnessToolRequest::new(session.session_id.clone(), "code.list", json!({})),
+            )
+            .unwrap();
+        let RecordedCliHarnessOutcome::RequiresApproval { approval, .. } = pending else {
+            panic!("expected approval outcome");
+        };
+        control
+            .resolve_cli_harness_approval(&approval, ApprovalDecision::ApproveSession, "test-user")
+            .unwrap();
+
+        let reused = control
+            .run_cli_harness_tool(
+                &runner,
+                RunCliHarnessToolRequest::new(session.session_id.clone(), "code.list", json!({})),
+            )
+            .unwrap();
+
+        let RecordedCliHarnessOutcome::Executed { result, .. } = reused else {
+            panic!("expected grant reuse to execute");
+        };
+        let grants = control
+            .approval_grants_for_subject(&session.session_id, "code.list")
+            .unwrap();
+
+        assert!(result.success);
+        assert_eq!(grants.len(), 1);
+        assert_eq!(
+            control
+                .pending_approvals(&session.session_id)
+                .unwrap()
+                .len(),
+            0
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn approve_once_cli_harness_approval_is_not_reused() {
+        let root = std::env::temp_dir().join(format!("essence-control-{}", Uuid::new_v4()));
+        let control = ControlPlane::new(&root);
+        let session = control
+            .create_session(CreateSessionRequest::interactive("."))
+            .unwrap();
+        let runner = test_policy_bound_harness("code.list", ToolPermission::RequireApproval);
+        let pending = control
+            .run_cli_harness_tool(
+                &runner,
+                RunCliHarnessToolRequest::new(session.session_id.clone(), "code.list", json!({})),
+            )
+            .unwrap();
+        let RecordedCliHarnessOutcome::RequiresApproval { approval, .. } = pending else {
+            panic!("expected approval outcome");
+        };
+        control
+            .resolve_cli_harness_approval(&approval, ApprovalDecision::ApproveOnce, "test-user")
+            .unwrap();
+
+        let second = control
+            .run_cli_harness_tool(
+                &runner,
+                RunCliHarnessToolRequest::new(session.session_id.clone(), "code.list", json!({})),
+            )
+            .unwrap();
+
+        assert!(matches!(
+            second,
+            RecordedCliHarnessOutcome::RequiresApproval { .. }
+        ));
+        assert_eq!(
+            control
+                .pending_approvals(&session.session_id)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(control
+            .approval_grants_for_subject(&session.session_id, "code.list")
+            .unwrap()
+            .is_empty());
 
         let _ = std::fs::remove_dir_all(root);
     }

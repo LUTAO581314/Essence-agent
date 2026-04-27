@@ -187,10 +187,68 @@ Inside chat, type `/office` to render the multi-agent board and `/exit` to
 quit. Chat registers itself as the `main` agent, flips to `running` while a turn
 is active, and returns to `idle` when ready.
 
+The CLI also includes a pixel-styled setup flow for the full path from install
+to model configuration, chat, and the live board:
+
+```bash
+cargo run -p essence-core --bin essence -- setup --model your-model-name
+cargo run -p essence-core --bin essence -- setup --model your-model-name --save
+cargo run -p essence-core --bin essence -- setup --model your-model-name \
+  --main-agent main \
+  --main-agent-role "Main Operator" \
+  --main-agent-prompt "You are the custom main Essence agent." \
+  --save
+```
+
+`--save` writes `.essence/model.json`. The file stores the provider, model,
+base URL, and API key environment variable name, but not the secret value.
+Later `chat` commands use that saved model configuration unless CLI flags or
+environment variables override it.
+
+`setup` can also write a main agent profile to `.essence/agents/<id>.json`.
+Use `--main-agent`, `--main-agent-lane`, `--main-agent-role`,
+`--main-agent-prompt`, `--main-agent-prompt-file`, or
+`--main-agent-template`. A saved profile named `main` is loaded automatically by
+plain `essence chat`; other profiles can be selected with
+`essence chat --agent <id>`.
+
 The default assistant is local and ledger-backed, so the loop can be tested
-without external model credentials. To use a real model, point chat at any
-command that reads the rendered transcript from stdin and writes the assistant
-reply to stdout:
+without external model credentials. To use an OpenAI-compatible chat
+completions endpoint, provide the provider, model, base URL, and API key:
+
+```bash
+export ESSENCE_MODEL_PROVIDER=openai-compatible
+export ESSENCE_MODEL_BASE_URL='https://api.openai.com/v1'
+export OPENAI_API_KEY='sk-...'
+export ESSENCE_MODEL='your-model-name'
+
+cargo run -p essence-core --bin essence -- chat --title "Desk session"
+
+cargo run -p essence-core --bin essence -- chat \
+  --model-provider openai-compatible \
+  --model-base-url 'https://api.openai.com/v1' \
+  --model-api-key-env OPENAI_API_KEY \
+  --model your-model-name
+```
+
+PowerShell:
+
+```powershell
+$env:ESSENCE_MODEL_PROVIDER = "openai-compatible"
+$env:ESSENCE_MODEL_BASE_URL = "https://api.openai.com/v1"
+$env:OPENAI_API_KEY = "sk-..."
+$env:ESSENCE_MODEL = "your-model-name"
+
+cargo run -p essence-core --bin essence -- chat --title "Desk session"
+```
+
+`ESSENCE_MODEL_API_KEY` is checked before `OPENAI_API_KEY`, and
+`--model-api-key-env` can point at another environment variable. The
+OpenAI-compatible provider sends a native `POST /chat/completions` request and
+uses `--model` as the request's model name.
+
+You can also point chat at any command that reads the rendered transcript from
+stdin and writes the assistant reply to stdout:
 
 ```bash
 export ESSENCE_CHAT_MODEL_CMD='your-model-command'
@@ -206,15 +264,17 @@ $env:ESSENCE_CHAT_MODEL_CMD = "your-model-command"
 cargo run -p essence-core --bin essence -- chat --title "Desk session"
 ```
 
-For example, the command can be a small wrapper around an LLM CLI, an HTTP
-client, or a local model runner. Non-empty stdout becomes the assistant message
-and is written back to the Essence ledger. Model commands are bounded by default
-with a 30 second timeout, 1 MiB stdout cap, and 64 KiB stderr cap:
+For example, the command can be a small wrapper around an LLM CLI or a local
+model runner. Non-empty stdout becomes the assistant message and is written back
+to the Essence ledger. Model adapters are bounded by default with a 30 second
+timeout, a 1 MiB HTTP response cap, a 1 MiB command stdout cap, and a 64 KiB
+command stderr cap:
 
 ```bash
 cargo run -p essence-core --bin essence -- chat \
   --model-command 'your-model-command' \
   --model-timeout-ms 30000 \
+  --model-max-response-bytes 1048576 \
   --model-max-stdout-bytes 1048576 \
   --model-max-stderr-bytes 65536
 ```

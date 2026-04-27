@@ -21,8 +21,16 @@ pub(crate) enum CliError {
     InvalidPath(PathBuf),
     #[error("approval `{0}` is not recorded")]
     MissingApproval(String),
+    #[error("agent profile `{0}` is not recorded")]
+    MissingAgentProfile(String),
+    #[error("agent template `{0}` is not available")]
+    MissingAgentTemplate(String),
+    #[error("invalid agent id `{0}`; use letters, numbers, `-`, or `_`")]
+    InvalidAgentId(String),
     #[error("anchor key env var `{0}` is not set")]
     MissingAnchorKeyEnv(String),
+    #[error("invalid model configuration: {0}")]
+    ModelConfig(String),
 }
 
 pub(crate) fn emit_events(

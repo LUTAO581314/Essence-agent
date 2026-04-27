@@ -18,6 +18,7 @@ pub(crate) struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
+    Setup(SetupArgs),
     Chat(ChatArgs),
     Session(SessionArgs),
     Message(MessageArgs),
@@ -29,7 +30,43 @@ pub(crate) enum Command {
 }
 
 #[derive(Debug, Args)]
+pub(crate) struct SetupArgs {
+    #[arg(long, value_enum, default_value_t = CliModelProvider::OpenaiCompatible)]
+    pub(crate) model_provider: CliModelProvider,
+    #[arg(long)]
+    pub(crate) model: Option<String>,
+    #[arg(long)]
+    pub(crate) model_base_url: Option<String>,
+    #[arg(long, default_value = "OPENAI_API_KEY")]
+    pub(crate) model_api_key_env: Option<String>,
+    #[arg(long)]
+    pub(crate) model_command: Option<String>,
+    #[arg(long, alias = "agent", value_name = "ID")]
+    pub(crate) main_agent: Option<String>,
+    #[arg(long)]
+    pub(crate) main_agent_lane: Option<String>,
+    #[arg(long)]
+    pub(crate) main_agent_role: Option<String>,
+    #[arg(long)]
+    pub(crate) main_agent_prompt: Option<String>,
+    #[arg(long)]
+    pub(crate) main_agent_prompt_file: Option<PathBuf>,
+    #[arg(long)]
+    pub(crate) main_agent_template: Option<String>,
+    #[arg(long)]
+    pub(crate) save: bool,
+    #[arg(long)]
+    pub(crate) no_color: bool,
+}
+
+#[derive(Debug, Args)]
 pub(crate) struct ChatArgs {
+    #[arg(long = "agent", alias = "agent-profile")]
+    pub(crate) agent_profile: Option<String>,
+    #[arg(long)]
+    pub(crate) system_prompt: Option<String>,
+    #[arg(long)]
+    pub(crate) system_prompt_file: Option<PathBuf>,
     #[arg(long)]
     pub(crate) session_id: Option<String>,
     #[arg(long)]
@@ -38,10 +75,18 @@ pub(crate) struct ChatArgs {
     pub(crate) title: Option<String>,
     #[arg(long)]
     pub(crate) model: Option<String>,
+    #[arg(long, value_enum)]
+    pub(crate) model_provider: Option<CliModelProvider>,
+    #[arg(long)]
+    pub(crate) model_base_url: Option<String>,
+    #[arg(long)]
+    pub(crate) model_api_key_env: Option<String>,
     #[arg(long)]
     pub(crate) model_command: Option<String>,
     #[arg(long, default_value_t = 30_000)]
     pub(crate) model_timeout_ms: u64,
+    #[arg(long, default_value_t = 1_048_576)]
+    pub(crate) model_max_response_bytes: usize,
     #[arg(long, default_value_t = 1_048_576)]
     pub(crate) model_max_stdout_bytes: usize,
     #[arg(long, default_value_t = 65_536)]
@@ -150,6 +195,9 @@ pub(crate) struct AgentArgs {
 pub(crate) enum AgentCommand {
     Register(AgentRegisterArgs),
     Heartbeat(AgentHeartbeatArgs),
+    Define(AgentDefineArgs),
+    Profiles(AgentProfilesArgs),
+    Templates(AgentTemplatesArgs),
 }
 
 #[derive(Debug, Args)]
@@ -182,6 +230,54 @@ pub(crate) struct AgentHeartbeatArgs {
     pub(crate) task_id: Option<String>,
     #[arg(long)]
     pub(crate) note: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct AgentDefineArgs {
+    #[arg(long)]
+    pub(crate) agent_id: String,
+    #[arg(long)]
+    pub(crate) template: Option<String>,
+    #[arg(long, default_value = "main")]
+    pub(crate) lane: String,
+    #[arg(long, default_value = "Custom Agent")]
+    pub(crate) role: String,
+    #[arg(long)]
+    pub(crate) system_prompt: Option<String>,
+    #[arg(long)]
+    pub(crate) system_prompt_file: Option<PathBuf>,
+    #[arg(long, value_enum)]
+    pub(crate) model_provider: Option<CliModelProvider>,
+    #[arg(long)]
+    pub(crate) model: Option<String>,
+    #[arg(long)]
+    pub(crate) model_base_url: Option<String>,
+    #[arg(long)]
+    pub(crate) model_api_key_env: Option<String>,
+    #[arg(long)]
+    pub(crate) model_command: Option<String>,
+    #[arg(long)]
+    pub(crate) save: bool,
+    #[arg(long)]
+    pub(crate) no_color: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct AgentProfilesArgs {
+    #[arg(long)]
+    pub(crate) no_color: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct AgentTemplatesArgs {
+    #[arg(long)]
+    pub(crate) query: Option<String>,
+    #[arg(long)]
+    pub(crate) category: Option<String>,
+    #[arg(long, default_value_t = 40)]
+    pub(crate) limit: usize,
+    #[arg(long)]
+    pub(crate) no_color: bool,
 }
 
 #[derive(Debug, Args)]
@@ -317,6 +413,13 @@ pub(crate) enum CliPermissionMode {
     Auto,
     Bypass,
     Readonly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum CliModelProvider {
+    Local,
+    Command,
+    OpenaiCompatible,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]

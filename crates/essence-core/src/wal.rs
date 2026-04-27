@@ -523,7 +523,7 @@ fn encode_hex(bytes: &[u8]) -> String {
 }
 
 fn decode_hex(value: &str) -> WalResult<Vec<u8>> {
-    if value.len() % 2 != 0 {
+    if !value.len().is_multiple_of(2) {
         return Err(WalError::InvalidAnchorSignature);
     }
     let mut bytes = Vec::with_capacity(value.len() / 2);

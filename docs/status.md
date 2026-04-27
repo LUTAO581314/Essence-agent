@@ -17,6 +17,7 @@ The implemented layer is the durable local kernel:
 - task, artifact, and memory events
 - local saved-memory store queries by kind and text
 - native subagent metadata and sidechain transcripts
+- subagent steering, cancellation, budget, and result records
 - deterministic tool registry and permission policy
 - plugin manifest host
 - CLI harness metadata, command rendering, and execution result capture
@@ -32,6 +33,16 @@ The implemented layer is the durable local kernel:
 - GitNexus harness plugin
 - minimal model execution loop abstraction
 - task scheduler primitives for claiming queued work
+- minimal SwarmRuntime facade with WAL-backed agent registration, projection
+  restore, heartbeat/presence records, queued task dispatch, subagent spawn,
+  scheduler ticks, turn/tool-call budget checks, completion, and cancellation
+- background scheduler loop handle for repeated session ticks
+- deterministic local memory index/search layer
+- Control API facade methods for swarm registration, heartbeat, ticks, memory
+  search, and MCP manifest discovery
+- MCP adapter manifest descriptors and core tool dispatcher for future
+  stdio/HTTP servers
+- browser daemon plugin boundary and workspace shell projection helpers
 - JSON projection snapshots for persistent replay checkpoints
 - local Control API adapter primitives for future HTTP/MCP servers
 - minimal `essence` CLI for session creation, message append, and event tailing
@@ -48,12 +59,14 @@ Expected result: all library and CLI tests pass.
 
 ## Not Yet Built
 
-- full SwarmRuntime scheduler
-- MCP/API server adapters
-- memory embedding/index backend
-- browser daemon plugin
+- durable SwarmRuntime scheduler with production supervision and concurrent lane
+  worker execution
+- token budget enforcement
+- concrete MCP/API server transports
+- production memory embedding backend
+- executable browser daemon plugin
 - research radar plugins
-- visual multi-agent workspace shell
+- visual multi-agent workspace shell UI
 - evolution asset store
 
 ## Architecture Direction

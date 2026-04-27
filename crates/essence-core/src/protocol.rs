@@ -111,10 +111,15 @@ pub enum EventType {
     ToolCallFailed,
     ApprovalRequested,
     ApprovalResolved,
+    AgentRegistered,
+    AgentStateChanged,
+    AgentHeartbeat,
     SubagentSpawned,
     SubagentProgress,
+    SubagentSteered,
     SubagentCompleted,
     SubagentFailed,
+    SubagentCancelled,
     TaskCreated,
     TaskStateChanged,
     TaskBlocked,
@@ -301,6 +306,37 @@ pub struct RunMeta {
     pub stop_reason: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentRecord {
+    pub agent_id: AgentId,
+    pub session_id: SessionId,
+    pub lane_id: LaneId,
+    pub role: String,
+    pub status: LifecycleStatus,
+    #[serde(default)]
+    pub toolsets: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<SubagentBudget>,
+    #[serde(default)]
+    pub metadata: JsonObject,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentHeartbeat {
+    pub agent_id: AgentId,
+    pub session_id: SessionId,
+    pub status: LifecycleStatus,
+    pub seen_at: OffsetDateTime,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane_id: Option<LaneId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_run_id: Option<RunId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_task_id: Option<TaskId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SubagentRuntime {
@@ -317,6 +353,27 @@ pub enum IsolationMode {
     Worktree,
     Container,
     Remote,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SubagentBudget {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_turns: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tool_calls: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SubagentResult {
+    pub summary: String,
+    #[serde(default)]
+    pub artifact_refs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -337,6 +394,12 @@ pub struct SubagentMeta {
     pub toolsets: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<SubagentBudget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<SubagentResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

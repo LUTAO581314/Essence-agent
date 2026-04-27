@@ -56,13 +56,32 @@ Plugins own external sources and fast-changing integrations:
 6. Minimal permission policy. Done in `essence-core::policy`.
 7. Tool registry. Done in `essence-core::registry`.
 8. Native subagent runtime with sidechain transcripts. In progress:
-   `essence-core::subagent` now provides sidechain WAL append/replay helpers.
+   `essence-core::subagent` now provides sidechain WAL append/replay helpers,
+   and the control plane records spawn, steer, progress, cancel, complete,
+   fail, budget, and result semantics.
 9. Memory hooks. Done for the first WAL layer: memory candidates and saved
    memories are durable events and projection entries.
 10. Task store and UI event stream. Done for the first projection layer:
     `TaskStore` exposes task queries and `UiEventStream` exposes cursor-based
     UI refresh events.
-11. Plugin host and one CLI harness plugin. In progress:
+11. Minimal SwarmRuntime facade. In progress:
+    `essence-core::swarm` now records agent registration in the WAL, restores
+    agent specs from projection, records heartbeat/presence updates, claims
+    queued tasks, starts scheduler-triggered runs, spawns task-linked subagents,
+    advances scheduler ticks over idle agents, enforces turn/tool-call budgets,
+    exposes a background loop handle for repeated ticks, and records completion
+    or cancellation through the control plane.
+12. API/MCP adapter primitives. In progress:
+    `ControlApi` exposes JSON-friendly methods for sessions, events, swarm
+    registration, heartbeat, ticks, memory search, snapshots, and MCP manifest
+    discovery. `essence-core::mcp` maps tool specs into adapter descriptors for
+    a later concrete stdio/HTTP MCP server and dispatches core tool calls
+    against the local Control API.
+13. Memory and workspace shell projections. In progress:
+    `essence-core::memory_index` provides deterministic local term-vector
+    search over saved memories. `essence-core::workspace` provides browser
+    daemon boundary metadata and Star Office style agent tile projections.
+14. Plugin host and one CLI harness plugin. In progress:
     `PluginHost` registers plugin manifests and exposes their tools through the
     deterministic tool registry. `essence-core::gitnexus` is the first CLI
     harness manifest for external code-intelligence tools.

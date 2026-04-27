@@ -4,10 +4,10 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::protocol::{
-    ApprovalDecision, ApprovalId, ApprovalRequest, ArtifactId, ArtifactRecord, EventEnvelope,
-    EventType, LifecycleStatus, MemoryId, MemoryRecord, MessagePayload, RunId, RunMeta,
-    SessionMeta, SessionStatePatch, SubagentMeta, TaskId, TaskPatch, TaskRecord, ToolCallId,
-    ToolCallRecord,
+    AgentHeartbeat, AgentId, AgentRecord, ApprovalDecision, ApprovalId, ApprovalRequest,
+    ArtifactId, ArtifactRecord, EventEnvelope, EventType, LifecycleStatus, MemoryId, MemoryRecord,
+    MessagePayload, RunId, RunMeta, SessionMeta, SessionStatePatch, SubagentMeta, TaskId,
+    TaskPatch, TaskRecord, ToolCallId, ToolCallRecord,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -28,6 +28,8 @@ pub struct LedgerProjection {
     pub latest_seq: u64,
     pub session: Option<SessionMeta>,
     pub runs: BTreeMap<RunId, RunMeta>,
+    pub agents: BTreeMap<AgentId, AgentRecord>,
+    pub agent_heartbeats: BTreeMap<AgentId, AgentHeartbeat>,
     pub subagents: BTreeMap<String, SubagentMeta>,
     pub approvals: BTreeMap<ApprovalId, ApprovalRequest>,
     pub tool_calls: BTreeMap<ToolCallId, ToolCallRecord>,
@@ -70,10 +72,21 @@ impl LedgerProjection {
                 let run = decode_payload::<RunMeta>(event)?;
                 self.runs.insert(run.run_id.clone(), run);
             }
+            EventType::AgentRegistered | EventType::AgentStateChanged => {
+                let agent = decode_payload::<AgentRecord>(event)?;
+                self.agents.insert(agent.agent_id.clone(), agent);
+            }
+            EventType::AgentHeartbeat => {
+                let heartbeat = decode_payload::<AgentHeartbeat>(event)?;
+                self.agent_heartbeats
+                    .insert(heartbeat.agent_id.clone(), heartbeat);
+            }
             EventType::SubagentSpawned
             | EventType::SubagentProgress
+            | EventType::SubagentSteered
             | EventType::SubagentCompleted
-            | EventType::SubagentFailed => {
+            | EventType::SubagentFailed
+            | EventType::SubagentCancelled => {
                 let subagent = decode_payload::<SubagentMeta>(event)?;
                 self.subagents
                     .insert(subagent.subagent_id.0.clone(), subagent);

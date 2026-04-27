@@ -29,20 +29,31 @@ Current Rust crate status:
   filtering and policy generation
 - `essence-core::subagent`: native subagent sidechain transcript helper for
   append/replay of per-lane WAL files
+- subagent control records: spawn, steer, progress, cancel, complete, fail,
+  budgets, and results
 - memory hooks: candidate and saved memory events projected from the WAL
 - `essence-core::memory_store`: local saved-memory queries by kind and text
+- `essence-core::memory_index`: deterministic local memory search/index layer
 - `essence-core::task_store`: task projection queries by status, lane, and
   assignee
 - `essence-core::stream`: cursor-based UI event stream over ledger events
 - `essence-core::approval_index`: indexed reusable approval grants by subject
 - `essence-core::plugin`: minimal plugin manifest host that registers plugin
   tools into the core tool registry
+- `essence-core::mcp`: MCP adapter manifest descriptors and core tool
+  dispatcher for future stdio/HTTP transports
 - `essence-core::harness`: CLI harness metadata for external tool adapters
 - `essence-core::gitnexus`: first code-intelligence harness plugin for
   GitNexus graph search, context, impact, diff detection, and indexing
 - `essence-core::model_loop`: minimal model execution loop abstraction over
   the control plane
 - `essence-core::scheduler`: task scheduling primitives for queued work
+- `essence-core::swarm`: minimal swarm runtime facade with WAL-backed agent
+  registration, heartbeat/presence records, queued task dispatch, subagent
+  spawn, scheduler ticks, turn/tool-call budget checks, and work
+  completion/cancel
+- `essence-core::workspace`: browser daemon descriptor and workspace shell
+  projection helpers
 - `essence-core::snapshot`: JSON projection snapshots for persistent replay
   checkpoints
 - `essence-core::api`: local JSON-friendly Control API façade for future
@@ -53,6 +64,55 @@ The long-term shape is:
 - Rust core for the durable kernel
 - Python adapters for memory, research, and fast experimentation
 - TypeScript UI/plugin SDK for dashboards, office views, and product shells
+
+## Reference Influences
+
+Essence Agent uses other agent systems as architecture references, not as code
+to copy. The core idea is to absorb durable patterns, then re-express them as a
+small, auditable Rust kernel with an append-only ledger as the source of truth.
+
+- Claude Code: the main backbone reference for a query-style execution loop,
+  JSONL transcript/session storage, headless and interactive control-plane
+  entrypoints, AgentTool-style subagent delegation, sidechain transcripts, and
+  permission mediation around tool use.
+- OpenClaw and Claw Code: references for swarm/runtime boundaries, session APIs,
+  tool catalog and policy pipelines, subagent registry lifecycle, Rust-oriented
+  crate boundaries, task packets, lane events, worker lifecycle, and MCP/tool
+  registry ideas.
+- Hermes: a simpler reference for agent loop shape, tool registry/toolsets,
+  terminal or gateway backends, approval queues, MCP exposure, and profile-scoped
+  runtime state.
+- Agency Agents: inspiration for role packets, missions, workflow contracts,
+  handoffs, quality gates, evidence requirements, and agent workbench concepts.
+  Essence treats these as role/product-layer assets, not as the kernel itself.
+- MemPalace: reference for local-first memory, layered retrieval, source
+  tracking, wake-up context, and compaction resilience. Essence keeps memory
+  provenance tied back to ledger events.
+- DeerFlow: reference for visible task orchestration, subtask streams,
+  artifacts/reports, and workflow UI patterns, without importing its full
+  LangGraph/FastAPI/Next stack into the Rust core.
+- Star Office UI: reference for a visual multi-agent workspace: agent presence,
+  status, area/lane placement, avatar/bubble style projections, and an office
+  board shell over ledger events.
+- GStack: reference for browser daemon isolation, session/tab pairing, health
+  discovery, and external browser control as a plugin boundary rather than core
+  ledger state.
+- Paperclip and TrendRadar: references for heartbeat/adapters, plugin guardrails,
+  research source adapters, normalized items, scheduled ingestion, and query
+  surfaces.
+- Evolver and Edict: references for future evolution assets and structured
+  task/state capture. Essence avoids copying incompatible or tightly coupled
+  upstream code and keeps these ideas behind explicit ledger/plugin boundaries.
+
+The guiding constraints are:
+
+- JSONL/WAL remains canonical; databases, memory indexes, UI streams, and API
+  responses are projections.
+- Plugins and external harnesses cannot bypass approvals, budgets, auth,
+  checkout, or storage contracts.
+- Product shells, browser automation, research radars, and visual workspaces
+  live outside the kernel behind stable protocol boundaries.
+- Private memory stays local-first and opt-in for external lookup.
 
 ## CLI
 

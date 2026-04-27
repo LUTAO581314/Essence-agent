@@ -201,6 +201,20 @@ impl ControlPlane {
         self.finish_run(run, LifecycleStatus::Completed, usage, None)
     }
 
+    pub fn complete_run_with_stop_reason(
+        &self,
+        run: &RunMeta,
+        usage: Option<Value>,
+        stop_reason: impl Into<String>,
+    ) -> ControlResult<RunMeta> {
+        self.finish_run(
+            run,
+            LifecycleStatus::Completed,
+            usage,
+            Some(stop_reason.into()),
+        )
+    }
+
     pub fn fail_run(
         &self,
         run: &RunMeta,
@@ -1022,6 +1036,11 @@ impl StartRunRequest {
 
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model = Some(model.into());
+        self
+    }
+
+    pub fn with_input_event(mut self, event_id: crate::protocol::EventId) -> Self {
+        self.input_message_ids.push(event_id);
         self
     }
 }

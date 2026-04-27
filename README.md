@@ -39,6 +39,8 @@ Current Rust crate status:
 - `essence-core::harness`: CLI harness metadata for external tool adapters
 - `essence-core::gitnexus`: first code-intelligence harness plugin for
   GitNexus graph search, context, impact, diff detection, and indexing
+- `essence-core::model_loop`: minimal model execution loop abstraction over
+  the control plane
 
 The long-term shape is:
 

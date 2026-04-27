@@ -373,7 +373,7 @@ mod tests {
     fn policy_bound_harness_executes_allowed_tools() {
         let tool_name = "code.list";
         let harness = test_executable_harness(tool_name, ToolPermission::Allow);
-        let policy = harness.plugin.tools.iter().cloned().collect::<Vec<_>>();
+        let policy = harness.plugin.tools.to_vec();
         let mut registry = crate::registry::ToolRegistry::new();
         for spec in policy {
             registry.register(spec).unwrap();

@@ -150,6 +150,16 @@ impl LedgerProjection {
         Ok(())
     }
 
+    pub fn apply_all<'a>(
+        &mut self,
+        events: impl IntoIterator<Item = &'a EventEnvelope>,
+    ) -> ProjectionResult<()> {
+        for event in events {
+            self.apply(event)?;
+        }
+        Ok(())
+    }
+
     pub fn pending_approvals(&self) -> impl Iterator<Item = &ApprovalRequest> {
         self.approvals
             .values()

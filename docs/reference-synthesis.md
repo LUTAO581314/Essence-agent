@@ -1,13 +1,20 @@
 # Reference Synthesis
 
 This project uses upstream agent systems as design references, not as code to
-copy. The goal is to take the durable ideas and reshape them into the Essence
-kernel.
+copy. Claude Code is the primary backbone reference; the other projects are
+secondary references for narrower boundaries such as browser isolation, memory,
+research adapters, and visual workspaces. The goal is to take the durable ideas
+and reshape them into the Essence kernel.
 
 ## Principle
 
 Essence Agent should be a swarm-native trusted control plane with a unified
 ledger, explicit tool policy, subagent sidechains, and plugin boundaries.
+
+The Claude Code-shaped kernel surface comes first: transcript/WAL, session/run
+control, headless CLI, interactive adapters, permission mediation, tool call
+records, and AgentTool-style delegated sidechains. Other references should not
+pull the kernel away from this small auditable loop.
 
 Reference projects inform the shape of the system, but the Rust kernel remains
 small, auditable, and replayable.

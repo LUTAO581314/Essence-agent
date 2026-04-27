@@ -69,6 +69,10 @@ impl JsonlWal {
     }
 
     pub fn replay(&self) -> WalResult<Vec<EventEnvelope>> {
+        self.replay_after(0)
+    }
+
+    pub fn replay_after(&self, seq: u64) -> WalResult<Vec<EventEnvelope>> {
         if !self.path.exists() {
             return Ok(Vec::new());
         }
@@ -93,7 +97,9 @@ impl JsonlWal {
                     path: self.path.clone(),
                     source,
                 })?;
-            events.push(event);
+            if event.seq > seq {
+                events.push(event);
+            }
         }
         Ok(events)
     }

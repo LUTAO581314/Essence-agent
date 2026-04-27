@@ -250,6 +250,11 @@ impl EventEnvelope {
         self.turn_id = Some(turn_id);
         self
     }
+
+    pub fn with_prev_event_id(mut self, event_id: EventId) -> Self {
+        self.prev_event_id = Some(event_id);
+        self
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

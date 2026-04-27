@@ -1,4 +1,8 @@
+use std::fs::{File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::{Duration as StdDuration, Instant, SystemTime};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -39,6 +43,8 @@ pub enum ControlError {
     Snapshot(#[from] SnapshotError),
     #[error("approval `{0:?}` is not linked to a tool call")]
     ApprovalMissingToolCall(ApprovalId),
+    #[error("timed out waiting for WAL lock at {0:?}")]
+    WalLockTimeout(PathBuf),
     #[error("tool call `{0:?}` is not recorded")]
     MissingToolCall(ToolCallId),
     #[error("io error at {path}: {source}")]
@@ -52,6 +58,10 @@ pub enum ControlError {
 }
 
 pub type ControlResult<T> = Result<T, ControlError>;
+
+const WAL_LOCK_TIMEOUT: StdDuration = StdDuration::from_secs(5);
+const WAL_LOCK_RETRY_DELAY: StdDuration = StdDuration::from_millis(2);
+const WAL_LOCK_STALE_AFTER: StdDuration = StdDuration::from_secs(60);
 
 #[derive(Debug, Clone)]
 pub struct ControlPlane {
@@ -785,24 +795,26 @@ impl ControlPlane {
         visibility: EventVisibility,
         payload: Value,
     ) -> ControlResult<EventEnvelope> {
-        let wal = self.wal(session_id);
-        let events = wal.replay()?;
-        let seq = events.last().map_or(1, |event| event.seq + 1);
-        let event = EventEnvelope::new(
-            seq,
-            session_id.clone(),
+        self.append_event_with_context(
+            session_id,
+            RunContext::from_options(None, None),
             event_type,
             source,
             visibility,
             payload,
-        );
-        wal.append(&event)?;
-        Ok(event)
+        )
     }
 
     pub fn projection(&self, session_id: &SessionId) -> ControlResult<LedgerProjection> {
-        let events = self.wal(session_id).replay()?;
-        LedgerProjection::replay(&events).map_err(ControlError::from)
+        if let Some(snapshot) = self.read_projection_snapshot(session_id)? {
+            let events = self.wal(session_id).replay_after(snapshot.latest_seq)?;
+            let mut projection = snapshot.projection;
+            projection.apply_all(&events)?;
+            Ok(projection)
+        } else {
+            let events = self.wal(session_id).replay()?;
+            LedgerProjection::replay(&events).map_err(ControlError::from)
+        }
     }
 
     pub fn write_projection_snapshot(
@@ -995,10 +1007,30 @@ impl ControlPlane {
         visibility: EventVisibility,
         payload: &T,
     ) -> ControlResult<EventEnvelope> {
-        let payload = serde_json::to_value(payload)?;
+        self.append_event_with_context(
+            session_id,
+            run_context,
+            event_type,
+            source,
+            visibility,
+            serde_json::to_value(payload)?,
+        )
+    }
+
+    fn append_event_with_context(
+        &self,
+        session_id: &SessionId,
+        run_context: RunContext<'_>,
+        event_type: EventType,
+        source: EventSource,
+        visibility: EventVisibility,
+        payload: Value,
+    ) -> ControlResult<EventEnvelope> {
+        let _lock = SessionWalLock::acquire(self.wal_lock_path(session_id), WAL_LOCK_TIMEOUT)?;
         let wal = self.wal(session_id);
         let events = wal.replay()?;
-        let seq = events.last().map_or(1, |event| event.seq + 1);
+        let previous = events.last();
+        let seq = previous.map_or(1, |event| event.seq + 1);
         let mut event = EventEnvelope::new(
             seq,
             session_id.clone(),
@@ -1007,6 +1039,9 @@ impl ControlPlane {
             visibility,
             payload,
         );
+        if let Some(previous) = previous {
+            event = event.with_prev_event_id(previous.event_id.clone());
+        }
         if let Some((run_id, turn_id)) = run_context.parts() {
             event = event.with_run(run_id.clone(), turn_id.clone());
         }
@@ -1102,6 +1137,12 @@ impl ControlPlane {
         JsonlWal::new(self.wal_path(session_id))
     }
 
+    fn wal_lock_path(&self, session_id: &SessionId) -> PathBuf {
+        self.root
+            .join("locks")
+            .join(format!("{}.wal.lock", session_id.0))
+    }
+
     fn session_projections(&self) -> ControlResult<Vec<LedgerProjection>> {
         let sessions_dir = self.root.join("sessions");
         if !sessions_dir.exists() {
@@ -1139,6 +1180,82 @@ impl ControlPlane {
 
     fn transcript_uri(&self, session_id: &SessionId) -> String {
         format!("sessions/{}.jsonl", session_id.0)
+    }
+}
+
+#[derive(Debug)]
+struct SessionWalLock {
+    path: PathBuf,
+    file: Option<File>,
+}
+
+impl SessionWalLock {
+    fn acquire(path: PathBuf, timeout: StdDuration) -> ControlResult<Self> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| ControlError::Io {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+
+        let started = Instant::now();
+        loop {
+            match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(mut file) => {
+                    writeln!(file, "pid={}", std::process::id()).map_err(|source| {
+                        ControlError::Io {
+                            path: path.clone(),
+                            source,
+                        }
+                    })?;
+                    return Ok(Self {
+                        path,
+                        file: Some(file),
+                    });
+                }
+                Err(source)
+                    if matches!(
+                        source.kind(),
+                        std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::PermissionDenied
+                    ) =>
+                {
+                    if lock_is_stale(&path, WAL_LOCK_STALE_AFTER) {
+                        let _ = std::fs::remove_file(&path);
+                        continue;
+                    }
+                    if started.elapsed() >= timeout {
+                        return Err(ControlError::WalLockTimeout(path));
+                    }
+                    thread::sleep(WAL_LOCK_RETRY_DELAY);
+                }
+                Err(source) => {
+                    return Err(ControlError::Io {
+                        path: path.clone(),
+                        source,
+                    });
+                }
+            }
+        }
+    }
+}
+
+impl Drop for SessionWalLock {
+    fn drop(&mut self) {
+        let _ = self.file.take();
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+fn lock_is_stale(path: &Path, timeout: StdDuration) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    let Ok(modified) = metadata.modified() else {
+        return false;
+    };
+    match SystemTime::now().duration_since(modified) {
+        Ok(age) => age > timeout,
+        Err(_) => false,
     }
 }
 
@@ -1767,6 +1884,8 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].seq, 1);
         assert_eq!(events[1].seq, 2);
+        assert_eq!(events[0].prev_event_id, None);
+        assert_eq!(events[1].prev_event_id, Some(events[0].event_id.clone()));
         assert_eq!(projection.session.unwrap().status, LifecycleStatus::Active);
         assert_eq!(projection.messages.len(), 1);
         assert_eq!(
@@ -1776,6 +1895,43 @@ mod tests {
             }
         );
         assert!(control.wal_path(&session.session_id).exists());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn serializes_concurrent_session_appends() {
+        let root = std::env::temp_dir().join(format!("essence-control-{}", Uuid::new_v4()));
+        let control = ControlPlane::new(&root);
+        let session = control
+            .create_session(CreateSessionRequest::interactive("."))
+            .unwrap();
+
+        let handles = (0..16)
+            .map(|index| {
+                let control = control.clone();
+                let session_id = session.session_id.clone();
+                std::thread::spawn(move || {
+                    control
+                        .submit_user_message(&session_id, format!("concurrent {index}"))
+                        .unwrap();
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let events = control.events(&session.session_id).unwrap();
+        assert_eq!(events.len(), 17);
+        assert_eq!(
+            events.iter().map(|event| event.seq).collect::<Vec<_>>(),
+            (1..=17).collect::<Vec<_>>()
+        );
+        for pair in events.windows(2) {
+            assert_eq!(pair[1].prev_event_id, Some(pair[0].event_id.clone()));
+        }
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -2529,6 +2685,48 @@ mod tests {
         assert_eq!(written.latest_seq, 2);
         assert_eq!(read.latest_seq, 2);
         assert_eq!(read.projection.messages.len(), 1);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn projection_replays_tail_from_snapshot() {
+        let root = std::env::temp_dir().join(format!("essence-control-{}", Uuid::new_v4()));
+        let control = ControlPlane::new(&root);
+        let session = control
+            .create_session(CreateSessionRequest::interactive("."))
+            .unwrap();
+        control
+            .submit_user_message(&session.session_id, "before snapshot")
+            .unwrap();
+        control
+            .write_projection_snapshot(&session.session_id)
+            .unwrap();
+        control
+            .submit_user_message(&session.session_id, "after snapshot")
+            .unwrap();
+
+        let wal_path = control.wal_path(&session.session_id);
+        let tail = std::fs::read_to_string(&wal_path)
+            .unwrap()
+            .lines()
+            .filter(|line| line.contains("\"seq\":3"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&wal_path, format!("{tail}\n")).unwrap();
+
+        let projection = control.projection(&session.session_id).unwrap();
+
+        assert_eq!(projection.latest_seq, 3);
+        assert_eq!(projection.messages.len(), 2);
+        assert!(matches!(
+            &projection.messages[0].content[0],
+            ContentBlock::Text { text } if text == "before snapshot"
+        ));
+        assert!(matches!(
+            &projection.messages[1].content[0],
+            ContentBlock::Text { text } if text == "after snapshot"
+        ));
 
         let _ = std::fs::remove_dir_all(root);
     }

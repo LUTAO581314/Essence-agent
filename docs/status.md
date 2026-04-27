@@ -1,6 +1,6 @@
 # Project Status
 
-Updated: 2026-04-27
+Updated: 2026-04-28
 
 ## State
 
@@ -47,7 +47,11 @@ The implemented layer is the durable local kernel:
 - browser daemon plugin boundary and workspace shell projection helpers
 - JSON projection snapshots for persistent replay checkpoints
 - local Control API adapter primitives for future HTTP/MCP servers
-- minimal `essence` CLI for session creation, message append, and event tailing
+- minimal `essence` CLI for session creation, message append, event tailing,
+  interactive chat, Star Office-style terminal workspace watching, agent/task
+  heartbeat commands, and bounded model-command chat adapters
+- split CLI implementation modules for args, chat/model adapters, control
+  commands, workspace rendering, shared support, and tests
 
 ## Verification
 

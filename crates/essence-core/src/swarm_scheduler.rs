@@ -5,8 +5,11 @@ use std::sync::{
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+#[cfg(test)]
 use crate::control::ControlPlane;
-use crate::protocol::{AgentHeartbeat, AgentId, SessionId};
+#[cfg(test)]
+use crate::protocol::{AgentHeartbeat, AgentId};
+use crate::protocol::SessionId;
 use crate::swarm::SwarmRuntime;
 
 #[derive(Debug)]

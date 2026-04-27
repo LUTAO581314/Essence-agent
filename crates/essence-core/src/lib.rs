@@ -50,7 +50,6 @@ pub use subagent::*;
 pub use swarm::*;
 pub use swarm_budget::*;
 pub use swarm_registry::*;
-pub use swarm_scheduler::*;
 pub use task_store::*;
 pub use wal::*;
 pub use workspace::*;

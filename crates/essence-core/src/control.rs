@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
@@ -31,6 +31,10 @@ pub enum ControlError {
     Sidechain(#[from] SidechainError),
     #[error(transparent)]
     Harness(#[from] HarnessError),
+    #[error("approval `{0:?}` is not linked to a tool call")]
+    ApprovalMissingToolCall(ApprovalId),
+    #[error("tool call `{0:?}` is not recorded")]
+    MissingToolCall(ToolCallId),
     #[error("could not encode event payload: {0}")]
     Payload(#[from] serde_json::Error),
 }
@@ -371,6 +375,53 @@ impl ControlPlane {
                     tool_call: failed,
                     command: rendered,
                     reason,
+                })
+            }
+        }
+    }
+
+    pub fn resolve_cli_harness_approval(
+        &self,
+        approval: &ApprovalRequest,
+        decision: ApprovalDecision,
+        resolved_by: impl Into<String>,
+    ) -> ControlResult<RecordedCliHarnessApprovalOutcome> {
+        let resolved = self.resolve_approval(approval, decision.clone(), resolved_by)?;
+        let tool_call_id = approval
+            .tool_call_id
+            .clone()
+            .ok_or_else(|| ControlError::ApprovalMissingToolCall(approval.approval_id.clone()))?;
+        let projection = self.projection(&approval.session_id)?;
+        let tool_call = projection
+            .tool_calls
+            .get(&tool_call_id)
+            .cloned()
+            .ok_or_else(|| ControlError::MissingToolCall(tool_call_id.clone()))?;
+        let harness_input: HarnessToolInput = serde_json::from_value(approval.input.clone())?;
+
+        match decision {
+            ApprovalDecision::Deny => {
+                let failed = self.fail_tool_call(&tool_call, "approval denied")?;
+                Ok(RecordedCliHarnessApprovalOutcome::Denied {
+                    approval: resolved,
+                    tool_call: failed,
+                    command: harness_input.command,
+                    reason: "approval denied".to_string(),
+                })
+            }
+            ApprovalDecision::ApproveOnce
+            | ApprovalDecision::ApproveSession
+            | ApprovalDecision::ApproveAlways => {
+                let result = harness_input
+                    .command
+                    .execute_with_cwd(approval.cwd.as_deref())?;
+                let completed =
+                    self.complete_tool_call(&tool_call, serde_json::to_value(&result)?)?;
+                Ok(RecordedCliHarnessApprovalOutcome::Executed {
+                    approval: resolved,
+                    tool_call: completed,
+                    command: harness_input.command,
+                    result,
                 })
             }
         }
@@ -995,11 +1046,33 @@ pub enum RecordedCliHarnessOutcome {
     },
 }
 
+#[derive(Debug, Clone)]
+pub enum RecordedCliHarnessApprovalOutcome {
+    Executed {
+        approval: ApprovalRequest,
+        tool_call: ToolCallRecord,
+        command: RenderedCliCommand,
+        result: CliExecutionResult,
+    },
+    Denied {
+        approval: ApprovalRequest,
+        tool_call: ToolCallRecord,
+        command: RenderedCliCommand,
+        reason: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct HarnessToolInput {
+    input: Value,
+    command: RenderedCliCommand,
+}
+
 fn harness_tool_input(input: &Value, command: &RenderedCliCommand) -> ControlResult<Value> {
-    Ok(serde_json::json!({
-        "input": input,
-        "command": command,
-    }))
+    Ok(serde_json::to_value(HarnessToolInput {
+        input: input.clone(),
+        command: command.clone(),
+    })?)
 }
 
 #[derive(Debug, Clone)]
@@ -1193,8 +1266,9 @@ mod tests {
 
     use crate::control::{
         ControlPlane, CreateArtifactRequest, CreateSessionRequest, CreateTaskRequest,
-        ProposeMemoryRequest, RecordedCliHarnessOutcome, RequestApprovalRequest,
-        RunCliHarnessToolRequest, SpawnSubagentRequest, StartToolCallRequest,
+        ProposeMemoryRequest, RecordedCliHarnessApprovalOutcome, RecordedCliHarnessOutcome,
+        RequestApprovalRequest, RunCliHarnessToolRequest, SpawnSubagentRequest,
+        StartToolCallRequest,
     };
     use crate::harness::{CliCommandSpec, CliHarnessManifest, PolicyBoundCliHarness};
     use crate::plugin::PluginManifest;
@@ -1492,6 +1566,108 @@ mod tests {
             Some(tool_call.tool_call_id)
         );
         assert_eq!(projected_approval.run_id, Some(run.run_id));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn executes_cli_harness_tool_after_approval() {
+        let root = std::env::temp_dir().join(format!("essence-control-{}", Uuid::new_v4()));
+        let control = ControlPlane::new(&root);
+        let session = control
+            .create_session(CreateSessionRequest::interactive("."))
+            .unwrap();
+        let runner = test_policy_bound_harness("code.list", ToolPermission::RequireApproval);
+        let pending = control
+            .run_cli_harness_tool(
+                &runner,
+                RunCliHarnessToolRequest::new(session.session_id.clone(), "code.list", json!({})),
+            )
+            .unwrap();
+        let RecordedCliHarnessOutcome::RequiresApproval {
+            tool_call,
+            approval,
+            ..
+        } = pending
+        else {
+            panic!("expected approval outcome");
+        };
+
+        let resumed = control
+            .resolve_cli_harness_approval(&approval, ApprovalDecision::ApproveOnce, "test-user")
+            .unwrap();
+
+        let RecordedCliHarnessApprovalOutcome::Executed {
+            approval,
+            tool_call: completed,
+            result,
+            ..
+        } = resumed
+        else {
+            panic!("expected executed approval outcome");
+        };
+        let projection = control.projection(&session.session_id).unwrap();
+        let projected_tool = projection.tool_calls.get(&tool_call.tool_call_id).unwrap();
+        let projected_approval = projection.approvals.get(&approval.approval_id).unwrap();
+
+        assert!(result.success);
+        assert_eq!(completed.status, LifecycleStatus::Completed);
+        assert_eq!(projected_tool.status, LifecycleStatus::Completed);
+        assert_eq!(projected_approval.status, LifecycleStatus::Completed);
+        assert_eq!(
+            projected_approval.decision,
+            Some(ApprovalDecision::ApproveOnce)
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn denies_cli_harness_tool_after_approval_denial() {
+        let root = std::env::temp_dir().join(format!("essence-control-{}", Uuid::new_v4()));
+        let control = ControlPlane::new(&root);
+        let session = control
+            .create_session(CreateSessionRequest::interactive("."))
+            .unwrap();
+        let runner = test_policy_bound_harness("code.list", ToolPermission::RequireApproval);
+        let pending = control
+            .run_cli_harness_tool(
+                &runner,
+                RunCliHarnessToolRequest::new(session.session_id.clone(), "code.list", json!({})),
+            )
+            .unwrap();
+        let RecordedCliHarnessOutcome::RequiresApproval {
+            tool_call,
+            approval,
+            ..
+        } = pending
+        else {
+            panic!("expected approval outcome");
+        };
+
+        let resumed = control
+            .resolve_cli_harness_approval(&approval, ApprovalDecision::Deny, "test-user")
+            .unwrap();
+
+        let RecordedCliHarnessApprovalOutcome::Denied {
+            approval,
+            tool_call: failed,
+            reason,
+            ..
+        } = resumed
+        else {
+            panic!("expected denied approval outcome");
+        };
+        let projection = control.projection(&session.session_id).unwrap();
+        let projected_tool = projection.tool_calls.get(&tool_call.tool_call_id).unwrap();
+        let projected_approval = projection.approvals.get(&approval.approval_id).unwrap();
+
+        assert_eq!(failed.status, LifecycleStatus::Failed);
+        assert_eq!(reason, "approval denied");
+        assert_eq!(projected_tool.status, LifecycleStatus::Failed);
+        assert_eq!(projected_tool.error.as_deref(), Some("approval denied"));
+        assert_eq!(projected_approval.status, LifecycleStatus::Failed);
+        assert_eq!(projected_approval.decision, Some(ApprovalDecision::Deny));
 
         let _ = std::fs::remove_dir_all(root);
     }

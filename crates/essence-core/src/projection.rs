@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 
 use crate::protocol::{
     ApprovalDecision, ApprovalId, ApprovalRequest, ArtifactId, ArtifactRecord, EventEnvelope,
@@ -22,7 +23,7 @@ pub enum ProjectionError {
 
 pub type ProjectionResult<T> = Result<T, ProjectionError>;
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct LedgerProjection {
     pub latest_seq: u64,
     pub session: Option<SessionMeta>,

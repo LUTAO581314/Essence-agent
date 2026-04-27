@@ -42,6 +42,8 @@ Current Rust crate status:
 - `essence-core::model_loop`: minimal model execution loop abstraction over
   the control plane
 - `essence-core::scheduler`: task scheduling primitives for queued work
+- `essence-core::snapshot`: JSON projection snapshots for persistent replay
+  checkpoints
 
 The long-term shape is:
 

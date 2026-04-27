@@ -18,6 +18,7 @@ use crate::protocol::{
     TriggerKind, TurnId,
 };
 use crate::scheduler::TaskScheduler;
+use crate::snapshot::{ProjectionSnapshot, SnapshotError, SnapshotStore};
 use crate::stream::{EventCursor, UiEvent, UiEventStream};
 use crate::subagent::{SidechainError, SidechainTranscript};
 use crate::task_store::TaskStore;
@@ -33,6 +34,8 @@ pub enum ControlError {
     Sidechain(#[from] SidechainError),
     #[error(transparent)]
     Harness(#[from] HarnessError),
+    #[error(transparent)]
+    Snapshot(#[from] SnapshotError),
     #[error("approval `{0:?}` is not linked to a tool call")]
     ApprovalMissingToolCall(ApprovalId),
     #[error("tool call `{0:?}` is not recorded")]
@@ -672,6 +675,24 @@ impl ControlPlane {
         LedgerProjection::replay(&events).map_err(ControlError::from)
     }
 
+    pub fn write_projection_snapshot(
+        &self,
+        session_id: &SessionId,
+    ) -> ControlResult<ProjectionSnapshot> {
+        let snapshot = ProjectionSnapshot::new(session_id.clone(), self.projection(session_id)?);
+        self.snapshot_store().write(&snapshot)?;
+        Ok(snapshot)
+    }
+
+    pub fn read_projection_snapshot(
+        &self,
+        session_id: &SessionId,
+    ) -> ControlResult<Option<ProjectionSnapshot>> {
+        self.snapshot_store()
+            .read(session_id)
+            .map_err(ControlError::from)
+    }
+
     pub fn pending_approvals(&self, session_id: &SessionId) -> ControlResult<Vec<ApprovalRequest>> {
         Ok(self
             .projection(session_id)?
@@ -807,6 +828,10 @@ impl ControlPlane {
 
     pub fn sidechain(&self, subagent: &SubagentMeta) -> ControlResult<SidechainTranscript> {
         SidechainTranscript::open(&self.root, subagent.clone()).map_err(ControlError::from)
+    }
+
+    pub fn snapshot_store(&self) -> SnapshotStore {
+        SnapshotStore::new(&self.root)
     }
 
     fn append_typed_event<T: Serialize>(
@@ -2212,6 +2237,32 @@ mod tests {
                 .title,
             "Wire task and artifact projection"
         );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn writes_and_reads_projection_snapshot_from_control_plane() {
+        let root = std::env::temp_dir().join(format!("essence-control-{}", Uuid::new_v4()));
+        let control = ControlPlane::new(&root);
+        let session = control
+            .create_session(CreateSessionRequest::interactive("."))
+            .unwrap();
+        control
+            .submit_user_message(&session.session_id, "snapshot me")
+            .unwrap();
+
+        let written = control
+            .write_projection_snapshot(&session.session_id)
+            .unwrap();
+        let read = control
+            .read_projection_snapshot(&session.session_id)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(written.latest_seq, 2);
+        assert_eq!(read.latest_seq, 2);
+        assert_eq!(read.projection.messages.len(), 1);
 
         let _ = std::fs::remove_dir_all(root);
     }

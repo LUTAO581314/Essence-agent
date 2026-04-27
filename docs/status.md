@@ -31,6 +31,7 @@ The implemented layer is the durable local kernel:
 - GitNexus harness plugin
 - minimal model execution loop abstraction
 - task scheduler primitives for claiming queued work
+- JSON projection snapshots for persistent replay checkpoints
 - minimal `essence` CLI for session creation, message append, and event tailing
 
 ## Verification
@@ -46,7 +47,6 @@ Expected result: all library and CLI tests pass.
 ## Not Yet Built
 
 - full SwarmRuntime scheduler
-- persistent database projections
 - MCP/API server adapters
 - memory embedding/index backend
 - browser daemon plugin

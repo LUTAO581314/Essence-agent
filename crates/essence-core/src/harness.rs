@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -15,6 +16,8 @@ pub enum HarnessError {
     DuplicateCommand(String),
     #[error("command `{command}` is missing required input `{key}`")]
     MissingInput { command: String, key: String },
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
 }
 
 pub type HarnessResult<T> = Result<T, HarnessError>;
@@ -34,6 +37,28 @@ pub struct RenderedCliCommand {
     pub binary: String,
     pub args: Vec<String>,
     pub writes_workspace: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CliExecutionResult {
+    pub status_code: Option<i32>,
+    pub success: bool,
+    pub stdout: String,
+    pub stderr: String,
+    pub writes_workspace: bool,
+}
+
+impl RenderedCliCommand {
+    pub fn execute(&self) -> HarnessResult<CliExecutionResult> {
+        let output = Command::new(&self.binary).args(&self.args).output()?;
+        Ok(CliExecutionResult {
+            status_code: output.status.code(),
+            success: output.status.success(),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            writes_workspace: self.writes_workspace,
+        })
+    }
 }
 
 impl CliCommandSpec {
@@ -127,6 +152,24 @@ impl CliHarnessManifest {
             .find(|command| command.tool_name == tool_name)
     }
 
+    pub fn render_tool_command(
+        &self,
+        tool_name: &str,
+        input: &Value,
+    ) -> HarnessResult<RenderedCliCommand> {
+        self.command_for_tool(tool_name)
+            .ok_or_else(|| HarnessError::MissingCommandForTool(tool_name.to_string()))?
+            .render(input)
+    }
+
+    pub fn execute_tool_command(
+        &self,
+        tool_name: &str,
+        input: &Value,
+    ) -> HarnessResult<CliExecutionResult> {
+        self.render_tool_command(tool_name, input)?.execute()
+    }
+
     pub fn validate(&self) -> HarnessResult<()> {
         for command in self.commands.values() {
             if !self
@@ -154,7 +197,9 @@ impl CliHarnessManifest {
 
 #[cfg(test)]
 mod tests {
-    use crate::harness::{CliCommandSpec, CliHarnessManifest, HarnessError};
+    use crate::harness::{
+        CliCommandSpec, CliExecutionResult, CliHarnessManifest, HarnessError, RenderedCliCommand,
+    };
     use crate::plugin::PluginManifest;
     use crate::registry::{ToolPermission, ToolSpec};
 
@@ -214,6 +259,48 @@ mod tests {
             HarnessError::MissingInput { command, key }
                 if command == "query" && key == "query"
         ));
+    }
+
+    #[test]
+    fn renders_tool_commands_from_manifest() {
+        let plugin = PluginManifest::new("code", "Code", "0.1.0", "Code tools.").with_tool(
+            ToolSpec::new("code.query", "Search code.", ToolPermission::Allow),
+        );
+        let harness = CliHarnessManifest::new(plugin)
+            .with_command(
+                CliCommandSpec::new("query", "code.query", "code")
+                    .with_arg("query")
+                    .with_arg("{{query}}"),
+            )
+            .unwrap();
+
+        let rendered = harness
+            .render_tool_command("code.query", &serde_json::json!({"query": "ControlPlane"}))
+            .unwrap();
+
+        assert_eq!(rendered.binary, "code");
+        assert_eq!(rendered.args, vec!["query", "ControlPlane"]);
+    }
+
+    #[test]
+    fn executes_rendered_cli_commands_and_captures_output() {
+        let command = RenderedCliCommand {
+            binary: std::env::current_exe()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            args: vec!["--list".to_string()],
+            writes_workspace: false,
+        };
+
+        let result: CliExecutionResult = command.execute().unwrap();
+
+        assert!(result.success);
+        assert_eq!(result.status_code, Some(0));
+        assert!(result
+            .stdout
+            .contains("executes_rendered_cli_commands_and_captures_output"));
+        assert!(!result.writes_workspace);
     }
 
     #[test]

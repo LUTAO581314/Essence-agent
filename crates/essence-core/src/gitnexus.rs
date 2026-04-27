@@ -128,7 +128,7 @@ fn query_schema() -> serde_json::Value {
 fn context_schema() -> serde_json::Value {
     json!({
         "type": "object",
-        "required": ["target", "direction"],
+        "required": ["target"],
         "properties": {
             "target": {"type": "string"},
             "repo": {"type": "string"}
@@ -139,7 +139,7 @@ fn context_schema() -> serde_json::Value {
 fn impact_schema() -> serde_json::Value {
     json!({
         "type": "object",
-        "required": ["target"],
+        "required": ["target", "direction"],
         "properties": {
             "target": {"type": "string"},
             "repo": {"type": "string"},

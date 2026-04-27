@@ -18,7 +18,8 @@ The implemented layer is the durable local kernel:
 - native subagent metadata and sidechain transcripts
 - deterministic tool registry and permission policy
 - plugin manifest host
-- CLI harness metadata and GitNexus harness plugin
+- CLI harness metadata, command rendering, and execution result capture
+- GitNexus harness plugin
 - minimal `essence` CLI for session creation, message append, and event tailing
 
 ## Verification
@@ -35,7 +36,7 @@ Expected result: all library and CLI tests pass.
 
 - model execution loop
 - full SwarmRuntime scheduler
-- live tool execution runner for harness commands
+- policy-bound live tool execution runner for harness commands
 - persistent database projections
 - MCP/API server adapters
 - memory embedding/index backend

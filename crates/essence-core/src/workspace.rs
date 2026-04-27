@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::plugin::PluginManifest;
+use crate::plugin::{PluginKind, PluginManifest, PluginSource};
 use crate::projection::LedgerProjection;
 use crate::protocol::{AgentHeartbeat, AgentId, LifecycleStatus, TaskRecord};
 
@@ -69,6 +69,8 @@ pub fn browser_daemon_plugin(descriptor: BrowserDaemonDescriptor) -> PluginManif
         "0.1.0",
         "External browser daemon boundary for isolated tab/session control.",
     )
+    .with_kind(PluginKind::BrowserDaemon)
+    .with_source(PluginSource::bundled("essence://plugins/browser-daemon"))
     .with_capability("browser_daemon")
     .with_metadata("discovery_ref", serde_json::json!(descriptor.discovery_ref))
     .with_metadata("health_ref", serde_json::json!(descriptor.health_ref))

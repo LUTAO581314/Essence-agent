@@ -1,7 +1,7 @@
 use serde_json::json;
 
 use crate::harness::{CliCommandSpec, CliHarnessManifest};
-use crate::plugin::PluginManifest;
+use crate::plugin::{PluginKind, PluginManifest, PluginSource};
 use crate::registry::{ToolPermission, ToolSpec};
 
 pub const GITNEXUS_PLUGIN_ID: &str = "gitnexus";
@@ -16,6 +16,8 @@ pub fn gitnexus_harness() -> CliHarnessManifest {
     )
     .with_capability("code_intelligence")
     .with_capability("code_graph")
+    .with_kind(PluginKind::CliHarness)
+    .with_source(PluginSource::bundled("essence://plugins/gitnexus"))
     .with_metadata("license", json!("PolyForm-Noncommercial-1.0.0"))
     .with_metadata("integration", json!("external_cli"))
     .with_tool(readonly_tool(

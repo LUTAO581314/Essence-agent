@@ -39,7 +39,8 @@ Current Rust crate status:
 - `essence-core::stream`: cursor-based UI event stream over ledger events
 - `essence-core::approval_index`: indexed reusable approval grants by subject
 - `essence-core::plugin`: minimal plugin manifest host that registers plugin
-  tools into the core tool registry
+  tools into the core tool registry, plus a catalog for selectable plugin
+  installation
 - `essence-core::mcp`: MCP adapter manifest descriptors and core tool
   dispatcher for future stdio/HTTP transports
 - `essence-core::harness`: CLI harness metadata for external tool adapters
@@ -113,6 +114,26 @@ The guiding constraints are:
 - Product shells, browser automation, research radars, and visual workspaces
   live outside the kernel behind stable protocol boundaries.
 - Private memory stays local-first and opt-in for external lookup.
+
+## Plugin Model
+
+Plugins are installable capability packages. A plugin can provide tools, an
+external CLI harness, a browser daemon boundary, a memory backend, a research
+radar, a role pack, or a frontend UI shell. Frontend interfaces are treated as
+plugins through `ui_slots`, so a workspace dashboard can be installed and
+discovered the same way as a tool provider.
+
+The first bundled plugin catalog includes:
+
+- `gitnexus`: code-intelligence CLI harness plugin.
+- `memory-index`: deterministic local memory search plugin.
+- `browser-daemon`: browser control boundary plugin.
+- `research-radar`: scheduled source-ingestion boundary plugin.
+- `workspace-shell`: frontend UI shell plugin with a workspace slot.
+
+Users should be able to browse the catalog, choose which plugins to install,
+and let the kernel register only the selected plugins. Installed plugins still
+flow through the same registry, policy, approval, budget, and ledger contracts.
 
 ## CLI
 

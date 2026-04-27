@@ -20,6 +20,8 @@ The implemented layer is the durable local kernel:
 - subagent steering, cancellation, budget, and result records
 - deterministic tool registry and permission policy
 - plugin manifest host
+- selectable bundled plugin catalog with installable memory, browser, research,
+  code-intelligence, and UI shell plugins
 - CLI harness metadata, command rendering, and execution result capture
 - policy-bound CLI harness runner for allow, approval, and deny outcomes
 - ControlPlane recording for policy-bound CLI harness executions, approvals,

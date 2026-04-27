@@ -114,6 +114,27 @@ impl SwarmSchedulerHandle {
     }
 }
 
+#[cfg(test)]
+fn wait_for_agent_heartbeat(
+    control: &ControlPlane,
+    session_id: &SessionId,
+    agent_id: &AgentId,
+    timeout: Duration,
+) -> Option<AgentHeartbeat> {
+    let started = std::time::Instant::now();
+    loop {
+        if let Ok(projection) = control.projection(session_id) {
+            if let Some(heartbeat) = projection.agent_heartbeats.get(agent_id) {
+                return Some(heartbeat.clone());
+            }
+        }
+        if started.elapsed() >= timeout {
+            return None;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
 impl Drop for SwarmSchedulerHandle {
     fn drop(&mut self) {
         self.running.store(false, Ordering::SeqCst);
@@ -927,14 +948,16 @@ mod tests {
             session.session_id.clone(),
             std::time::Duration::from_millis(10),
         );
-        std::thread::sleep(std::time::Duration::from_millis(40));
+        let heartbeat = super::wait_for_agent_heartbeat(
+            &control,
+            &session.session_id,
+            &AgentId("daemon".to_string()),
+            std::time::Duration::from_millis(250),
+        )
+        .expect("scheduler loop should emit a heartbeat");
         handle.stop();
 
         let projection = control.projection(&session.session_id).unwrap();
-        let heartbeat = projection
-            .agent_heartbeats
-            .get(&AgentId("daemon".to_string()))
-            .unwrap();
 
         assert_eq!(heartbeat.status, LifecycleStatus::Running);
         assert!(projection

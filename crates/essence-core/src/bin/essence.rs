@@ -4,12 +4,22 @@ use std::process::ExitCode;
 use clap::Parser;
 use essence_core::ControlPlane;
 
+#[path = "essence_cli/agency_templates.rs"]
+mod agency_templates;
+#[path = "essence_cli/agent_profile.rs"]
+mod agent_profile;
 #[path = "essence_cli/args.rs"]
 mod args;
 #[path = "essence_cli/chat.rs"]
 mod chat;
 #[path = "essence_cli/commands.rs"]
 mod commands;
+#[path = "essence_cli/model_config.rs"]
+mod model_config;
+#[path = "essence_cli/pixel_ui.rs"]
+mod pixel_ui;
+#[path = "essence_cli/setup.rs"]
+mod setup;
 #[path = "essence_cli/support.rs"]
 mod support;
 #[path = "essence_cli/workspace_view.rs"]
@@ -39,6 +49,7 @@ fn main() -> ExitCode {
 fn execute(cli: Cli, writer: &mut impl Write) -> Result<(), CliError> {
     let control = ControlPlane::new(&cli.root);
     match cli.command {
+        Command::Setup(args) => setup::execute_setup(&control, args, writer),
         Command::Chat(args) => {
             let stdin = io::stdin();
             let mut reader = stdin.lock();

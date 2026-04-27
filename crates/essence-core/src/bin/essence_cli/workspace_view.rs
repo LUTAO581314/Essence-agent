@@ -6,6 +6,9 @@ use std::time::Duration;
 use essence_core::{ControlPlane, LedgerProjection, LifecycleStatus, SessionId};
 
 use super::args::{WorkspaceArgs, WorkspaceCommand};
+use super::pixel_ui::{
+    brand_header, key_value, mid, reset, row, status_chip, style, tiny_logo, top,
+};
 use super::support::{parse_session_id, CliError};
 
 pub(crate) fn execute_workspace(
@@ -126,111 +129,102 @@ fn render_workspace_dashboard(
     pending_approvals: usize,
     color: bool,
 ) -> String {
-    let cyan = style(color, "36;1");
-    let blue = style(color, "34;1");
-    let green = style(color, "32;1");
-    let yellow = style(color, "33;1");
-    let red = style(color, "31;1");
-    let dim = style(color, "2");
-    let reset = if color { "\x1b[0m" } else { "" };
-
     let mut output = String::new();
+    output.push_str(&brand_header(
+        "ESSENCE AGENT // STAR OFFICE",
+        "multi-agent control room",
+        color,
+    ));
+    let _ = writeln!(output, "{}", row(color, tiny_logo(color)));
+    let _ = writeln!(output, "{}", mid(color));
     let _ = writeln!(
         output,
-        "{cyan}+======================================================================+{reset}"
+        "{}",
+        row(
+            color,
+            key_value(color, "session", &session_id.0.to_string())
+        )
     );
     let _ = writeln!(
         output,
-        "{cyan}|{reset} {blue}ESSENCE AGENT // STAR OFFICE{reset}        multi-agent control room      {cyan}|{reset}"
+        "{}",
+        row(
+            color,
+            format!(
+                "{}   {}   {}   {}",
+                key_value(color, "events", &events_applied.to_string()),
+                key_value(color, "tasks", &task_count.to_string()),
+                key_value(color, "approvals", &pending_approvals.to_string()),
+                key_value(color, "agents", &shell.agents.len().to_string())
+            )
+        )
     );
+    let _ = writeln!(output, "{}", top(color));
     let _ = writeln!(
         output,
-        "{cyan}|{reset} session {dim}{}{reset}",
-        session_id.0
+        "{}",
+        row(
+            color,
+            "desk                 lane             state        current work"
+        )
     );
-    let _ = writeln!(
-        output,
-        "{cyan}|{reset} events {events_applied:<5} tasks {task_count:<5} pending approvals {pending_approvals:<5}"
-    );
-    let _ = writeln!(
-        output,
-        "{cyan}+======================================================================+{reset}"
-    );
-    let _ = writeln!(
-        output,
-        "{cyan}|{reset} WOLF SIGNAL  /\\_/\\\\   agents online: {:<3}",
-        shell.agents.len()
-    );
-    let _ = writeln!(
-        output,
-        "{cyan}|{reset}             ( o.o )  ledger-backed swarm presence"
-    );
-    let _ = writeln!(output, "{cyan}|{reset}              > ^ <");
-    let _ = writeln!(
-        output,
-        "{cyan}+----------------------+----------------+----------+------------------+{reset}"
-    );
-    let _ = writeln!(
-        output,
-        "{cyan}|{reset} agent                lane             status     current work"
-    );
-    let _ = writeln!(
-        output,
-        "{cyan}+----------------------+----------------+----------+------------------+{reset}"
-    );
+    let _ = writeln!(output, "{}", mid(color));
 
     if shell.agents.is_empty() {
         let _ = writeln!(
             output,
-            "{cyan}|{reset} {dim}no agents registered yet; use `agent register` to open desks{reset}"
+            "{}",
+            row(
+                color,
+                format!(
+                    "{}no agents registered yet; use `agent register` to open desks{}",
+                    style(color, "dim"),
+                    reset(color)
+                )
+            )
         );
     } else {
         for tile in &shell.agents {
-            let status_color = match tile.status {
-                LifecycleStatus::Running => green,
-                LifecycleStatus::WaitingTool | LifecycleStatus::WaitingApproval => yellow,
+            let tone = match tile.status {
+                LifecycleStatus::Running => "green",
+                LifecycleStatus::WaitingTool | LifecycleStatus::WaitingApproval => "yellow",
                 LifecycleStatus::Failed
                 | LifecycleStatus::Cancelled
-                | LifecycleStatus::TimedOut => red,
-                _ => blue,
+                | LifecycleStatus::TimedOut => "red",
+                _ => "moon",
             };
             let task = tile.current_task_title.as_deref().unwrap_or("standby");
             let _ = writeln!(
                 output,
-                "{cyan}|{reset} {agent:<20} {lane:<16} {status_color}{status:<10}{reset} {task}",
-                agent = truncate(&tile.agent_id, 20),
-                lane = truncate(&tile.area, 16),
-                status = lifecycle_label(&tile.status),
-                task = truncate(task, 28),
+                "{}",
+                row(
+                    color,
+                    format!(
+                        "{agent:<20} {lane:<16} {status:<12} {task}",
+                        agent = truncate(&tile.agent_id, 20),
+                        lane = truncate(&tile.area, 16),
+                        status = status_chip(color, lifecycle_label(&tile.status), tone),
+                        task = truncate(task, 24),
+                    )
+                )
             );
         }
     }
 
+    let _ = writeln!(output, "{}", mid(color));
     let _ = writeln!(
         output,
-        "{cyan}+----------------------+----------------+----------+------------------+{reset}"
-    );
-    let _ = writeln!(
-        output,
-        "{dim}tip: `essence agent heartbeat --status running --lane research --note \"indexing\"`{reset}"
+        "{}",
+        row(
+            color,
+            format!(
+                "{}tip:{} `essence agent heartbeat --status running --lane research --note \"indexing\"`",
+                style(color, "dim"),
+                reset(color)
+            )
+        )
     );
     output
-}
-
-fn style(enabled: bool, code: &str) -> &'static str {
-    if !enabled {
-        ""
-    } else {
-        match code {
-            "36;1" => "\x1b[36;1m",
-            "34;1" => "\x1b[34;1m",
-            "32;1" => "\x1b[32;1m",
-            "33;1" => "\x1b[33;1m",
-            "31;1" => "\x1b[31;1m",
-            "2" => "\x1b[2m",
-            _ => "",
-        }
-    }
 }
 
 fn lifecycle_label(status: &LifecycleStatus) -> &'static str {
@@ -249,10 +243,5 @@ fn lifecycle_label(status: &LifecycleStatus) -> &'static str {
 }
 
 fn truncate(value: &str, width: usize) -> String {
-    let mut output = value.chars().take(width).collect::<String>();
-    if value.chars().count() > width && width > 1 {
-        output.truncate(width - 1);
-        output.push('~');
-    }
-    output
+    super::pixel_ui::truncate(value, width)
 }

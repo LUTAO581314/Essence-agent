@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::plugin::PluginManifest;
+use crate::policy::{PolicyDecision, ToolPolicy, ToolPolicyRequest};
 
 #[derive(Debug, thiserror::Error)]
 pub enum HarnessError {
@@ -50,13 +51,75 @@ pub struct CliExecutionResult {
 
 impl RenderedCliCommand {
     pub fn execute(&self) -> HarnessResult<CliExecutionResult> {
-        let output = Command::new(&self.binary).args(&self.args).output()?;
+        self.execute_with_cwd(None)
+    }
+
+    pub fn execute_with_cwd(&self, cwd: Option<&str>) -> HarnessResult<CliExecutionResult> {
+        let mut command = Command::new(&self.binary);
+        command.args(&self.args);
+        if let Some(cwd) = cwd {
+            command.current_dir(cwd);
+        }
+        let output = command.output()?;
         Ok(CliExecutionResult {
             status_code: output.status.code(),
             success: output.status.success(),
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
             writes_workspace: self.writes_workspace,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum PolicyBoundCliOutcome {
+    Executed {
+        command: RenderedCliCommand,
+        result: CliExecutionResult,
+    },
+    RequiresApproval {
+        command: RenderedCliCommand,
+        reason: String,
+    },
+    Denied {
+        command: RenderedCliCommand,
+        reason: String,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct PolicyBoundCliHarness {
+    pub manifest: CliHarnessManifest,
+    pub policy: ToolPolicy,
+}
+
+impl PolicyBoundCliHarness {
+    pub fn new(manifest: CliHarnessManifest, policy: ToolPolicy) -> Self {
+        Self { manifest, policy }
+    }
+
+    pub fn run_tool(
+        &self,
+        tool_name: &str,
+        input: Value,
+        cwd: Option<String>,
+    ) -> HarnessResult<PolicyBoundCliOutcome> {
+        let command = self.manifest.render_tool_command(tool_name, &input)?;
+        let mut request = ToolPolicyRequest::new(tool_name, input);
+        if let Some(cwd) = cwd.clone() {
+            request = request.with_cwd(cwd);
+        }
+
+        Ok(match self.policy.decide(&request) {
+            PolicyDecision::Allow => PolicyBoundCliOutcome::Executed {
+                result: command.execute_with_cwd(cwd.as_deref())?,
+                command,
+            },
+            PolicyDecision::RequireApproval { reason } => {
+                PolicyBoundCliOutcome::RequiresApproval { command, reason }
+            }
+            PolicyDecision::Deny { reason } => PolicyBoundCliOutcome::Denied { command, reason },
         })
     }
 }
@@ -198,9 +261,12 @@ impl CliHarnessManifest {
 #[cfg(test)]
 mod tests {
     use crate::harness::{
-        CliCommandSpec, CliExecutionResult, CliHarnessManifest, HarnessError, RenderedCliCommand,
+        CliCommandSpec, CliExecutionResult, CliHarnessManifest, HarnessError,
+        PolicyBoundCliHarness, PolicyBoundCliOutcome, RenderedCliCommand,
     };
     use crate::plugin::PluginManifest;
+    use crate::policy::ToolPolicy;
+    use crate::protocol::PermissionMode;
     use crate::registry::{ToolPermission, ToolSpec};
 
     #[test]
@@ -304,6 +370,73 @@ mod tests {
     }
 
     #[test]
+    fn policy_bound_harness_executes_allowed_tools() {
+        let tool_name = "code.list";
+        let harness = test_executable_harness(tool_name, ToolPermission::Allow);
+        let policy = harness.plugin.tools.iter().cloned().collect::<Vec<_>>();
+        let mut registry = crate::registry::ToolRegistry::new();
+        for spec in policy {
+            registry.register(spec).unwrap();
+        }
+        let runner =
+            PolicyBoundCliHarness::new(harness, registry.to_policy(PermissionMode::Default));
+
+        let outcome = runner
+            .run_tool(tool_name, serde_json::json!({}), None)
+            .unwrap();
+
+        match outcome {
+            PolicyBoundCliOutcome::Executed { result, .. } => {
+                assert!(result.success);
+                assert!(result
+                    .stdout
+                    .contains("policy_bound_harness_executes_allowed_tools"));
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn policy_bound_harness_returns_approval_without_executing() {
+        let tool_name = "code.list";
+        let harness = test_executable_harness(tool_name, ToolPermission::RequireApproval);
+        let policy = ToolPolicy::new(PermissionMode::Default).with_approval_tool(tool_name);
+        let runner = PolicyBoundCliHarness::new(harness, policy);
+
+        let outcome = runner
+            .run_tool(tool_name, serde_json::json!({}), None)
+            .unwrap();
+
+        match outcome {
+            PolicyBoundCliOutcome::RequiresApproval { command, reason } => {
+                assert_eq!(command.args, vec!["--list"]);
+                assert!(reason.contains("require approval"));
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn policy_bound_harness_returns_denial_without_executing() {
+        let tool_name = "code.list";
+        let harness = test_executable_harness(tool_name, ToolPermission::Deny);
+        let policy = ToolPolicy::new(PermissionMode::Bypass).with_denied_tool(tool_name);
+        let runner = PolicyBoundCliHarness::new(harness, policy);
+
+        let outcome = runner
+            .run_tool(tool_name, serde_json::json!({}), None)
+            .unwrap();
+
+        match outcome {
+            PolicyBoundCliOutcome::Denied { command, reason } => {
+                assert_eq!(command.args, vec!["--list"]);
+                assert!(reason.contains("explicitly denied"));
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+    }
+
+    #[test]
     fn rejects_commands_for_missing_tools() {
         let plugin = PluginManifest::new("code", "Code", "0.1.0", "Code tools.");
         let harness = CliHarnessManifest::new(plugin)
@@ -317,5 +450,18 @@ mod tests {
             HarnessError::MissingToolForCommand { command, tool }
                 if command == "query" && tool == "code.query"
         ));
+    }
+
+    fn test_executable_harness(tool_name: &str, permission: ToolPermission) -> CliHarnessManifest {
+        let binary = std::env::current_exe()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let plugin = PluginManifest::new("code", "Code", "0.1.0", "Code tools.")
+            .with_tool(ToolSpec::new(tool_name, "List tests.", permission));
+
+        CliHarnessManifest::new(plugin)
+            .with_command(CliCommandSpec::new("list", tool_name, binary).with_arg("--list"))
+            .unwrap()
     }
 }

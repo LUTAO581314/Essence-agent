@@ -24,6 +24,7 @@ The implemented layer is the durable local kernel:
   and denials
 - approved CLI harness replay after approval resolution
 - pending approval queue queries by session, run, and tool call
+- CLI commands for listing and resolving approvals
 - GitNexus harness plugin
 - minimal `essence` CLI for session creation, message append, and event tailing
 

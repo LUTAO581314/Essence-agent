@@ -55,6 +55,8 @@ runtime data to `.essence/` by default and can be pointed elsewhere with
 cargo run -- session create --title "First session"
 cargo run -- message send --session-id <session-id> --text "Build the next layer"
 cargo run -- events tail --session-id <session-id> --user-visible
+cargo run -- approval pending --session-id <session-id>
+cargo run -- approval resolve --session-id <session-id> --approval-id <approval-id> --decision deny
 ```
 
 ## Project Notes

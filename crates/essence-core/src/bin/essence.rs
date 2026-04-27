@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use essence_core::{
-    ControlPlane, CreateSessionRequest, EventCursor, EventEnvelope, PermissionMode, SessionId,
-    SessionMode, UiEvent,
+    ApprovalDecision, ApprovalId, ControlPlane, CreateSessionRequest, EventCursor, EventEnvelope,
+    PermissionMode, SessionId, SessionMode, UiEvent,
 };
 use serde::Serialize;
 use uuid::Uuid;
@@ -30,6 +30,7 @@ enum Command {
     Session(SessionArgs),
     Message(MessageArgs),
     Events(EventsArgs),
+    Approval(ApprovalArgs),
 }
 
 #[derive(Debug, Args)]
@@ -82,6 +83,36 @@ struct EventsArgs {
     command: EventsCommand,
 }
 
+#[derive(Debug, Args)]
+struct ApprovalArgs {
+    #[command(subcommand)]
+    command: ApprovalCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum ApprovalCommand {
+    Pending(ApprovalPendingArgs),
+    Resolve(ApprovalResolveArgs),
+}
+
+#[derive(Debug, Args)]
+struct ApprovalPendingArgs {
+    #[arg(long)]
+    session_id: String,
+}
+
+#[derive(Debug, Args)]
+struct ApprovalResolveArgs {
+    #[arg(long)]
+    session_id: String,
+    #[arg(long)]
+    approval_id: String,
+    #[arg(long, value_enum)]
+    decision: CliApprovalDecision,
+    #[arg(long, default_value = "cli")]
+    resolved_by: String,
+}
+
 #[derive(Debug, Subcommand)]
 enum EventsCommand {
     Tail(EventsTailArgs),
@@ -131,6 +162,25 @@ enum CliPermissionMode {
     Readonly,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliApprovalDecision {
+    ApproveOnce,
+    ApproveSession,
+    ApproveAlways,
+    Deny,
+}
+
+impl From<CliApprovalDecision> for ApprovalDecision {
+    fn from(value: CliApprovalDecision) -> Self {
+        match value {
+            CliApprovalDecision::ApproveOnce => ApprovalDecision::ApproveOnce,
+            CliApprovalDecision::ApproveSession => ApprovalDecision::ApproveSession,
+            CliApprovalDecision::ApproveAlways => ApprovalDecision::ApproveAlways,
+            CliApprovalDecision::Deny => ApprovalDecision::Deny,
+        }
+    }
+}
+
 impl From<CliPermissionMode> for PermissionMode {
     fn from(value: CliPermissionMode) -> Self {
         match value {
@@ -155,6 +205,8 @@ enum CliError {
     Uuid(#[from] uuid::Error),
     #[error("path is not valid unicode: {0}")]
     InvalidPath(PathBuf),
+    #[error("approval `{0}` is not recorded")]
+    MissingApproval(String),
 }
 
 fn main() -> ExitCode {
@@ -177,6 +229,7 @@ fn execute(cli: Cli, writer: &mut impl Write) -> Result<(), CliError> {
         Command::Session(args) => execute_session(&control, args, writer),
         Command::Message(args) => execute_message(&control, args, writer),
         Command::Events(args) => execute_events(&control, args, writer),
+        Command::Approval(args) => execute_approval(&control, args, writer),
     }
 }
 
@@ -255,6 +308,32 @@ fn execute_events(
     }
 }
 
+fn execute_approval(
+    control: &ControlPlane,
+    args: ApprovalArgs,
+    writer: &mut impl Write,
+) -> Result<(), CliError> {
+    match args.command {
+        ApprovalCommand::Pending(args) => {
+            let session_id = parse_session_id(&args.session_id)?;
+            let approvals = control.pending_approvals(&session_id)?;
+            write_json_pretty(writer, &approvals)
+        }
+        ApprovalCommand::Resolve(args) => {
+            let session_id = parse_session_id(&args.session_id)?;
+            let approval_id = parse_approval_id(&args.approval_id)?;
+            let projection = control.projection(&session_id)?;
+            let approval = projection
+                .approvals
+                .get(&approval_id)
+                .ok_or_else(|| CliError::MissingApproval(args.approval_id.clone()))?;
+            let resolved =
+                control.resolve_approval(approval, args.decision.into(), args.resolved_by)?;
+            write_json_pretty(writer, &resolved)
+        }
+    }
+}
+
 fn emit_events(writer: &mut impl Write, events: &[EventEnvelope]) -> Result<(), CliError> {
     for event in events {
         write_json_line(writer, event)?;
@@ -285,6 +364,10 @@ fn parse_session_id(raw: &str) -> Result<SessionId, CliError> {
     Ok(SessionId(Uuid::parse_str(raw)?))
 }
 
+fn parse_approval_id(raw: &str) -> Result<ApprovalId, CliError> {
+    Ok(ApprovalId(Uuid::parse_str(raw)?))
+}
+
 fn path_to_string(path: &Path) -> Result<String, CliError> {
     match path.to_str() {
         Some(value) => Ok(value.to_string()),
@@ -301,7 +384,9 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-    use essence_core::{CreateSessionRequest, MessagePayload, MessageRole};
+    use essence_core::{
+        ApprovalDecision, CreateSessionRequest, MessagePayload, MessageRole, RequestApprovalRequest,
+    };
 
     #[test]
     fn creates_session_via_cli() {
@@ -406,6 +491,84 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0]["event_type"], "message_user");
         assert_eq!(events[0]["seq"], 3);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn lists_pending_approvals_via_cli() {
+        let root = temp_root("pending-approvals");
+        let control = ControlPlane::new(&root);
+        let session = control
+            .create_session(CreateSessionRequest::interactive("."))
+            .unwrap();
+        let approval = control
+            .request_approval(RequestApprovalRequest::new(
+                session.session_id.clone(),
+                "shell",
+                serde_json::json!({"command": "cargo test"}),
+                "shell requires approval",
+            ))
+            .unwrap();
+
+        let cli = Cli {
+            root: root.clone(),
+            command: Command::Approval(ApprovalArgs {
+                command: ApprovalCommand::Pending(ApprovalPendingArgs {
+                    session_id: session.session_id.0.to_string(),
+                }),
+            }),
+        };
+
+        let mut out = Vec::new();
+        execute(cli, &mut out).unwrap();
+
+        let approvals: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(approvals.as_array().unwrap().len(), 1);
+        assert_eq!(
+            approvals[0]["approval_id"],
+            approval.approval_id.0.to_string()
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn resolves_approval_via_cli() {
+        let root = temp_root("resolve-approval");
+        let control = ControlPlane::new(&root);
+        let session = control
+            .create_session(CreateSessionRequest::interactive("."))
+            .unwrap();
+        let approval = control
+            .request_approval(RequestApprovalRequest::new(
+                session.session_id.clone(),
+                "shell",
+                serde_json::json!({"command": "cargo test"}),
+                "shell requires approval",
+            ))
+            .unwrap();
+
+        let cli = Cli {
+            root: root.clone(),
+            command: Command::Approval(ApprovalArgs {
+                command: ApprovalCommand::Resolve(ApprovalResolveArgs {
+                    session_id: session.session_id.0.to_string(),
+                    approval_id: approval.approval_id.0.to_string(),
+                    decision: CliApprovalDecision::Deny,
+                    resolved_by: "tester".to_string(),
+                }),
+            }),
+        };
+
+        let mut out = Vec::new();
+        execute(cli, &mut out).unwrap();
+
+        let resolved: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(resolved["decision"], "deny");
+        let projection = control.projection(&session.session_id).unwrap();
+        let projected = projection.approvals.get(&approval.approval_id).unwrap();
+        assert_eq!(projected.decision, Some(ApprovalDecision::Deny));
 
         let _ = fs::remove_dir_all(root);
     }

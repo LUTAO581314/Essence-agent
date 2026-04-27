@@ -27,7 +27,7 @@ use crate::snapshot::{ProjectionSnapshot, SnapshotError, SnapshotStore};
 use crate::stream::{EventCursor, UiEvent, UiEventStream};
 use crate::subagent::{SidechainError, SidechainTranscript};
 use crate::task_store::TaskStore;
-use crate::wal::{JsonlWal, WalError};
+use crate::wal::{JsonlWal, WalAnchor, WalAnchorVerification, WalError, WalIntegrityReport};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ControlError {
@@ -43,10 +43,47 @@ pub enum ControlError {
     Snapshot(#[from] SnapshotError),
     #[error("approval `{0:?}` is not linked to a tool call")]
     ApprovalMissingToolCall(ApprovalId),
+    #[error("approval `{0:?}` is not recorded")]
+    MissingApproval(ApprovalId),
+    #[error("approval decision `{decision:?}` is not allowed for `{approval_id:?}`")]
+    ApprovalDecisionNotAllowed {
+        approval_id: ApprovalId,
+        decision: ApprovalDecision,
+    },
+    #[error("run `{0:?}` is not recorded")]
+    MissingRun(RunId),
     #[error("timed out waiting for WAL lock at {0:?}")]
     WalLockTimeout(PathBuf),
     #[error("tool call `{0:?}` is not recorded")]
     MissingToolCall(ToolCallId),
+    #[error("{entity} `{id}` is {status:?}; expected {expected}")]
+    InvalidLifecycleState {
+        entity: &'static str,
+        id: String,
+        status: LifecycleStatus,
+        expected: &'static str,
+    },
+    #[error("invalid {entity} `{id}` transition from {from:?} to {to:?}")]
+    InvalidLifecycleTransition {
+        entity: &'static str,
+        id: String,
+        from: LifecycleStatus,
+        to: LifecycleStatus,
+    },
+    #[error("run `{run_id:?}` turn mismatch: expected `{expected:?}`, got `{actual:?}`")]
+    RunTurnMismatch {
+        run_id: RunId,
+        expected: TurnId,
+        actual: TurnId,
+    },
+    #[error(
+        "run `{run_id:?}` still has pending work: {pending_tool_calls} tool calls, {pending_approvals} approvals"
+    )]
+    RunHasPendingWork {
+        run_id: RunId,
+        pending_tool_calls: usize,
+        pending_approvals: usize,
+    },
     #[error("io error at {path}: {source}")]
     Io {
         path: PathBuf,
@@ -162,6 +199,19 @@ impl ControlPlane {
         turn_id: Option<&TurnId>,
         text: impl Into<String>,
     ) -> ControlResult<EventEnvelope> {
+        if let Some(run_id) = run_id {
+            let run = self.current_run(session_id, run_id)?;
+            self.ensure_running("run", run_id.0.to_string(), &run.status)?;
+            if let Some(turn_id) = turn_id {
+                if turn_id != &run.turn_id {
+                    return Err(ControlError::RunTurnMismatch {
+                        run_id: run_id.clone(),
+                        expected: run.turn_id,
+                        actual: turn_id.clone(),
+                    });
+                }
+            }
+        }
         let payload = MessagePayload {
             role: MessageRole::Assistant,
             content: vec![ContentBlock::Text { text: text.into() }],
@@ -255,6 +305,10 @@ impl ControlPlane {
         &self,
         request: RequestApprovalRequest,
     ) -> ControlResult<ApprovalRequest> {
+        if let Some(run_id) = &request.run_id {
+            let run = self.current_run(&request.session_id, run_id)?;
+            self.ensure_running("run", run_id.0.to_string(), &run.status)?;
+        }
         let approval = ApprovalRequest {
             approval_id: ApprovalId(Uuid::new_v4()),
             session_id: request.session_id.clone(),
@@ -290,7 +344,21 @@ impl ControlPlane {
         decision: ApprovalDecision,
         resolved_by: impl Into<String>,
     ) -> ControlResult<ApprovalRequest> {
-        let mut resolved = approval.clone();
+        let current = self.current_approval(&approval.session_id, &approval.approval_id)?;
+        self.ensure_state(
+            "approval",
+            approval.approval_id.0.to_string(),
+            &current.status,
+            LifecycleStatus::WaitingApproval,
+        )?;
+        if !current.allowed_decisions.contains(&decision) {
+            return Err(ControlError::ApprovalDecisionNotAllowed {
+                approval_id: approval.approval_id.clone(),
+                decision,
+            });
+        }
+
+        let mut resolved = current;
         resolved.status = match decision {
             ApprovalDecision::Deny => LifecycleStatus::Failed,
             _ => LifecycleStatus::Completed,
@@ -312,6 +380,19 @@ impl ControlPlane {
     }
 
     pub fn start_tool_call(&self, request: StartToolCallRequest) -> ControlResult<ToolCallRecord> {
+        if let Some(run_id) = &request.run_id {
+            let run = self.current_run(&request.session_id, run_id)?;
+            self.ensure_running("run", run_id.0.to_string(), &run.status)?;
+            if let Some(turn_id) = &request.turn_id {
+                if turn_id != &run.turn_id {
+                    return Err(ControlError::RunTurnMismatch {
+                        run_id: run_id.clone(),
+                        expected: run.turn_id,
+                        actual: turn_id.clone(),
+                    });
+                }
+            }
+        }
         let tool_call = ToolCallRecord {
             tool_call_id: ToolCallId(Uuid::new_v4()),
             session_id: request.session_id.clone(),
@@ -412,7 +493,13 @@ impl ControlPlane {
                     )
                     .with_optional_run_id(request.run_id)
                     .for_tool_call(tool_call.tool_call_id.clone())
-                    .with_optional_cwd(request.cwd),
+                    .with_optional_cwd(request.cwd)
+                    .with_allowed_decisions(vec![
+                        ApprovalDecision::ApproveOnce,
+                        ApprovalDecision::ApproveSession,
+                        ApprovalDecision::ApproveAlways,
+                        ApprovalDecision::Deny,
+                    ]),
                 )?;
                 Ok(RecordedCliHarnessOutcome::RequiresApproval {
                     tool_call,
@@ -906,6 +993,36 @@ impl ControlPlane {
         self.wal(session_id).replay().map_err(ControlError::from)
     }
 
+    pub fn verify_session_integrity(
+        &self,
+        session_id: &SessionId,
+    ) -> ControlResult<WalIntegrityReport> {
+        self.wal(session_id)
+            .verify_integrity()
+            .map_err(ControlError::from)
+    }
+
+    pub fn write_session_anchor(
+        &self,
+        session_id: &SessionId,
+        key_id: impl Into<String>,
+        key: &[u8],
+    ) -> ControlResult<WalAnchor> {
+        self.wal(session_id)
+            .write_anchor(key_id, key)
+            .map_err(ControlError::from)
+    }
+
+    pub fn verify_session_anchor(
+        &self,
+        session_id: &SessionId,
+        key: &[u8],
+    ) -> ControlResult<WalAnchorVerification> {
+        self.wal(session_id)
+            .verify_anchor(key)
+            .map_err(ControlError::from)
+    }
+
     pub fn events_after(
         &self,
         session_id: &SessionId,
@@ -1028,9 +1145,8 @@ impl ControlPlane {
     ) -> ControlResult<EventEnvelope> {
         let _lock = SessionWalLock::acquire(self.wal_lock_path(session_id), WAL_LOCK_TIMEOUT)?;
         let wal = self.wal(session_id);
-        let events = wal.replay()?;
-        let previous = events.last();
-        let seq = previous.map_or(1, |event| event.seq + 1);
+        let previous = wal.last()?;
+        let seq = previous.as_ref().map_or(1, |event| event.seq + 1);
         let mut event = EventEnvelope::new(
             seq,
             session_id.clone(),
@@ -1040,13 +1156,84 @@ impl ControlPlane {
             payload,
         );
         if let Some(previous) = previous {
-            event = event.with_prev_event_id(previous.event_id.clone());
+            event = event.with_prev_event(&previous)?;
         }
         if let Some((run_id, turn_id)) = run_context.parts() {
             event = event.with_run(run_id.clone(), turn_id.clone());
         }
+        event = event.seal_hash()?;
         wal.append(&event)?;
         Ok(event)
+    }
+
+    fn current_run(&self, session_id: &SessionId, run_id: &RunId) -> ControlResult<RunMeta> {
+        self.projection(session_id)?
+            .runs
+            .get(run_id)
+            .cloned()
+            .ok_or_else(|| ControlError::MissingRun(run_id.clone()))
+    }
+
+    fn current_tool_call(
+        &self,
+        session_id: &SessionId,
+        tool_call_id: &ToolCallId,
+    ) -> ControlResult<ToolCallRecord> {
+        self.projection(session_id)?
+            .tool_calls
+            .get(tool_call_id)
+            .cloned()
+            .ok_or_else(|| ControlError::MissingToolCall(tool_call_id.clone()))
+    }
+
+    fn current_approval(
+        &self,
+        session_id: &SessionId,
+        approval_id: &ApprovalId,
+    ) -> ControlResult<ApprovalRequest> {
+        self.projection(session_id)?
+            .approvals
+            .get(approval_id)
+            .cloned()
+            .ok_or_else(|| ControlError::MissingApproval(approval_id.clone()))
+    }
+
+    fn ensure_running(
+        &self,
+        entity: &'static str,
+        id: String,
+        status: &LifecycleStatus,
+    ) -> ControlResult<()> {
+        self.ensure_state(entity, id, status, LifecycleStatus::Running)
+    }
+
+    fn ensure_state(
+        &self,
+        entity: &'static str,
+        id: String,
+        status: &LifecycleStatus,
+        expected: LifecycleStatus,
+    ) -> ControlResult<()> {
+        if *status == expected {
+            return Ok(());
+        }
+        Err(ControlError::InvalidLifecycleState {
+            entity,
+            id,
+            status: status.clone(),
+            expected: match expected {
+                LifecycleStatus::Queued => "queued",
+                LifecycleStatus::Active => "active",
+                LifecycleStatus::Idle => "idle",
+                LifecycleStatus::Running => "running",
+                LifecycleStatus::WaitingTool => "waiting_tool",
+                LifecycleStatus::WaitingApproval => "waiting_approval",
+                LifecycleStatus::Completed => "completed",
+                LifecycleStatus::Failed => "failed",
+                LifecycleStatus::Cancelled => "cancelled",
+                LifecycleStatus::TimedOut => "timed_out",
+            },
+        })
     }
 
     fn finish_run(
@@ -1056,7 +1243,20 @@ impl ControlPlane {
         usage: Option<Value>,
         stop_reason: Option<String>,
     ) -> ControlResult<RunMeta> {
-        let mut updated = run.clone();
+        let current = self.current_run(&run.session_id, &run.run_id)?;
+        if current.status != LifecycleStatus::Running {
+            return Err(ControlError::InvalidLifecycleTransition {
+                entity: "run",
+                id: run.run_id.0.to_string(),
+                from: current.status,
+                to: status,
+            });
+        }
+        if status == LifecycleStatus::Completed {
+            self.ensure_run_has_no_pending_work(&run.session_id, &run.run_id)?;
+        }
+
+        let mut updated = current;
         updated.status = status;
         updated.ended_at = Some(OffsetDateTime::now_utc());
         updated.usage = usage;
@@ -1074,6 +1274,40 @@ impl ControlPlane {
         Ok(updated)
     }
 
+    fn ensure_run_has_no_pending_work(
+        &self,
+        session_id: &SessionId,
+        run_id: &RunId,
+    ) -> ControlResult<()> {
+        let projection = self.projection(session_id)?;
+        let pending_tool_calls = projection
+            .tool_calls
+            .values()
+            .filter(|tool_call| {
+                tool_call.run_id.as_ref() == Some(run_id)
+                    && tool_call.status == LifecycleStatus::WaitingTool
+            })
+            .count();
+        let pending_approvals = projection
+            .approvals
+            .values()
+            .filter(|approval| {
+                approval.run_id.as_ref() == Some(run_id)
+                    && approval.status == LifecycleStatus::WaitingApproval
+            })
+            .count();
+
+        if pending_tool_calls == 0 && pending_approvals == 0 {
+            return Ok(());
+        }
+
+        Err(ControlError::RunHasPendingWork {
+            run_id: run_id.clone(),
+            pending_tool_calls,
+            pending_approvals,
+        })
+    }
+
     fn finish_tool_call(
         &self,
         tool_call: &ToolCallRecord,
@@ -1081,7 +1315,17 @@ impl ControlPlane {
         output: Option<Value>,
         error: Option<String>,
     ) -> ControlResult<ToolCallRecord> {
-        let mut updated = tool_call.clone();
+        let current = self.current_tool_call(&tool_call.session_id, &tool_call.tool_call_id)?;
+        if current.status != LifecycleStatus::WaitingTool {
+            return Err(ControlError::InvalidLifecycleTransition {
+                entity: "tool_call",
+                id: tool_call.tool_call_id.0.to_string(),
+                from: current.status,
+                to: status,
+            });
+        }
+
+        let mut updated = current;
         updated.status = status;
         updated.ended_at = Some(OffsetDateTime::now_utc());
         updated.output = output;
@@ -1849,7 +2093,7 @@ mod tests {
     use uuid::Uuid;
 
     use crate::control::{
-        ControlPlane, CreateArtifactRequest, CreateSessionRequest, CreateTaskRequest,
+        ControlError, ControlPlane, CreateArtifactRequest, CreateSessionRequest, CreateTaskRequest,
         ProposeMemoryRequest, RecordedCliHarnessApprovalOutcome, RecordedCliHarnessOutcome,
         RequestApprovalRequest, RunCliHarnessToolRequest, SpawnSubagentRequest,
         StartToolCallRequest, SteerSubagentRequest,
@@ -1886,6 +2130,14 @@ mod tests {
         assert_eq!(events[1].seq, 2);
         assert_eq!(events[0].prev_event_id, None);
         assert_eq!(events[1].prev_event_id, Some(events[0].event_id.clone()));
+        assert_eq!(events[0].prev_hash, None);
+        assert_eq!(events[0].hash, Some(events[0].computed_hash().unwrap()));
+        assert_eq!(events[1].prev_hash.as_deref(), events[0].hash.as_deref());
+        assert_eq!(events[1].hash, Some(events[1].computed_hash().unwrap()));
+        assert!(control
+            .verify_session_integrity(&session.session_id)
+            .unwrap()
+            .is_valid());
         assert_eq!(projection.session.unwrap().status, LifecycleStatus::Active);
         assert_eq!(projection.messages.len(), 1);
         assert_eq!(
@@ -1929,9 +2181,18 @@ mod tests {
             events.iter().map(|event| event.seq).collect::<Vec<_>>(),
             (1..=17).collect::<Vec<_>>()
         );
+        assert_eq!(events[0].prev_hash, None);
         for pair in events.windows(2) {
             assert_eq!(pair[1].prev_event_id, Some(pair[0].event_id.clone()));
+            assert_eq!(pair[1].prev_hash.as_deref(), pair[0].hash.as_deref());
         }
+        for event in &events {
+            assert_eq!(event.hash, Some(event.computed_hash().unwrap()));
+        }
+        assert!(control
+            .verify_session_integrity(&session.session_id)
+            .unwrap()
+            .is_valid());
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -2006,6 +2267,90 @@ mod tests {
     }
 
     #[test]
+    fn rejects_mutations_after_run_and_tool_terminal_states() {
+        let root = std::env::temp_dir().join(format!("essence-control-{}", Uuid::new_v4()));
+        let control = ControlPlane::new(&root);
+        let session = control
+            .create_session(CreateSessionRequest::interactive("."))
+            .unwrap();
+        let run = control
+            .start_run(crate::control::StartRunRequest::user(
+                session.session_id.clone(),
+            ))
+            .unwrap();
+        let tool_call = control
+            .start_tool_call(
+                StartToolCallRequest::new(session.session_id.clone(), "code.list", json!({}))
+                    .for_run(&run),
+            )
+            .unwrap();
+        let completed_tool = control
+            .complete_tool_call(&tool_call, json!({"ok": true}))
+            .unwrap();
+        let completed_run = control.complete_run(&run, None).unwrap();
+
+        let rerun_error = control.complete_run(&completed_run, None).unwrap_err();
+        assert!(matches!(
+            rerun_error,
+            ControlError::InvalidLifecycleTransition {
+                entity: "run",
+                from: LifecycleStatus::Completed,
+                to: LifecycleStatus::Completed,
+                ..
+            }
+        ));
+
+        let message_error = control
+            .append_assistant_message(
+                &session.session_id,
+                Some(&run.run_id),
+                Some(&run.turn_id),
+                "too late",
+            )
+            .unwrap_err();
+        assert!(matches!(
+            message_error,
+            ControlError::InvalidLifecycleState {
+                entity: "run",
+                status: LifecycleStatus::Completed,
+                expected: "running",
+                ..
+            }
+        ));
+
+        let tool_start_error = control
+            .start_tool_call(
+                StartToolCallRequest::new(session.session_id.clone(), "code.list", json!({}))
+                    .for_run(&run),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            tool_start_error,
+            ControlError::InvalidLifecycleState {
+                entity: "run",
+                status: LifecycleStatus::Completed,
+                expected: "running",
+                ..
+            }
+        ));
+
+        let tool_finish_error = control
+            .fail_tool_call(&completed_tool, "duplicate finish")
+            .unwrap_err();
+        assert!(matches!(
+            tool_finish_error,
+            ControlError::InvalidLifecycleTransition {
+                entity: "tool_call",
+                from: LifecycleStatus::Completed,
+                to: LifecycleStatus::Failed,
+                ..
+            }
+        ));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn records_run_cancellation() {
         let root = std::env::temp_dir().join(format!("essence-control-{}", Uuid::new_v4()));
         let control = ControlPlane::new(&root);
@@ -2066,6 +2411,53 @@ mod tests {
         assert_eq!(resolved.status, LifecycleStatus::Completed);
         assert_eq!(projected.decision, Some(ApprovalDecision::ApproveOnce));
         assert_eq!(projected.status, LifecycleStatus::Completed);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rejects_disallowed_or_duplicate_approval_resolution() {
+        let root = std::env::temp_dir().join(format!("essence-control-{}", Uuid::new_v4()));
+        let control = ControlPlane::new(&root);
+        let session = control
+            .create_session(CreateSessionRequest::interactive("."))
+            .unwrap();
+
+        let approval = control
+            .request_approval(RequestApprovalRequest::new(
+                session.session_id.clone(),
+                "shell command",
+                json!({"command": "cargo test"}),
+                "Running project tests touches the local workspace.",
+            ))
+            .unwrap();
+
+        let disallowed = control
+            .resolve_approval(&approval, ApprovalDecision::ApproveAlways, "user")
+            .unwrap_err();
+        assert!(matches!(
+            disallowed,
+            ControlError::ApprovalDecisionNotAllowed {
+                decision: ApprovalDecision::ApproveAlways,
+                ..
+            }
+        ));
+
+        control
+            .resolve_approval(&approval, ApprovalDecision::Deny, "user")
+            .unwrap();
+        let duplicate = control
+            .resolve_approval(&approval, ApprovalDecision::Deny, "user")
+            .unwrap_err();
+        assert!(matches!(
+            duplicate,
+            ControlError::InvalidLifecycleState {
+                entity: "approval",
+                status: LifecycleStatus::Failed,
+                expected: "waiting_approval",
+                ..
+            }
+        ));
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -2194,6 +2586,41 @@ mod tests {
     }
 
     #[test]
+    fn refuses_to_complete_run_with_pending_tool_approval() {
+        let root = std::env::temp_dir().join(format!("essence-control-{}", Uuid::new_v4()));
+        let control = ControlPlane::new(&root);
+        let session = control
+            .create_session(CreateSessionRequest::interactive("."))
+            .unwrap();
+        let run = control
+            .start_run(crate::control::StartRunRequest::user(
+                session.session_id.clone(),
+            ))
+            .unwrap();
+        let runner = test_policy_bound_harness("code.list", ToolPermission::RequireApproval);
+
+        control
+            .run_cli_harness_tool(
+                &runner,
+                RunCliHarnessToolRequest::new(session.session_id.clone(), "code.list", json!({}))
+                    .for_run(&run),
+            )
+            .unwrap();
+
+        let error = control.complete_run(&run, None).unwrap_err();
+        assert!(matches!(
+            error,
+            ControlError::RunHasPendingWork {
+                pending_tool_calls: 1,
+                pending_approvals: 1,
+                ..
+            }
+        ));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn queries_pending_cli_harness_approvals() {
         let root = std::env::temp_dir().join(format!("essence-control-{}", Uuid::new_v4()));
         let control = ControlPlane::new(&root);
@@ -2295,6 +2722,90 @@ mod tests {
             projected_approval.decision,
             Some(ApprovalDecision::ApproveOnce)
         );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn runs_end_to_end_approved_tool_turn_and_seals_ledger() {
+        let root = std::env::temp_dir().join(format!("essence-control-{}", Uuid::new_v4()));
+        let control = ControlPlane::new(&root);
+        let session = control
+            .create_session(CreateSessionRequest::interactive("."))
+            .unwrap();
+        let user_event = control
+            .submit_user_message(&session.session_id, "list available tests")
+            .unwrap();
+        let run = control
+            .start_run(
+                crate::control::StartRunRequest::user(session.session_id.clone())
+                    .with_input_event(user_event.event_id.clone()),
+            )
+            .unwrap();
+        let runner = test_policy_bound_harness("code.list", ToolPermission::RequireApproval);
+
+        let pending = control
+            .run_cli_harness_tool(
+                &runner,
+                RunCliHarnessToolRequest::new(session.session_id.clone(), "code.list", json!({}))
+                    .for_run(&run),
+            )
+            .unwrap();
+        let RecordedCliHarnessOutcome::RequiresApproval { approval, .. } = pending else {
+            panic!("expected approval outcome");
+        };
+
+        let resumed = control
+            .resolve_cli_harness_approval(&approval, ApprovalDecision::ApproveOnce, "test-user")
+            .unwrap();
+        let RecordedCliHarnessApprovalOutcome::Executed {
+            approval: resolved_approval,
+            tool_call: completed_tool,
+            result,
+            ..
+        } = resumed
+        else {
+            panic!("expected executed approval outcome");
+        };
+        control
+            .append_assistant_message(
+                &session.session_id,
+                Some(&run.run_id),
+                Some(&run.turn_id),
+                "The test list is available.",
+            )
+            .unwrap();
+        let completed_run = control
+            .complete_run_with_stop_reason(&run, Some(json!({"tool_calls": 1})), "stop")
+            .unwrap();
+
+        let projection = control.projection(&session.session_id).unwrap();
+        let projected_run = projection.runs.get(&run.run_id).unwrap();
+        let projected_tool = projection
+            .tool_calls
+            .get(&completed_tool.tool_call_id)
+            .unwrap();
+        let projected_approval = projection
+            .approvals
+            .get(&resolved_approval.approval_id)
+            .unwrap();
+
+        assert!(result.success);
+        assert_eq!(projection.messages.len(), 2);
+        assert_eq!(completed_run.status, LifecycleStatus::Completed);
+        assert_eq!(projected_run.status, LifecycleStatus::Completed);
+        assert_eq!(projected_run.usage, Some(json!({"tool_calls": 1})));
+        assert_eq!(projected_tool.status, LifecycleStatus::Completed);
+        assert!(projected_tool.output.is_some());
+        assert_eq!(projected_approval.status, LifecycleStatus::Completed);
+        assert_eq!(
+            projected_approval.decision,
+            Some(ApprovalDecision::ApproveOnce)
+        );
+        assert!(control
+            .verify_session_integrity(&session.session_id)
+            .unwrap()
+            .is_valid());
 
         let _ = std::fs::remove_dir_all(root);
     }

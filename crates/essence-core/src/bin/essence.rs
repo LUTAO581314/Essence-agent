@@ -116,6 +116,9 @@ struct ApprovalResolveArgs {
 #[derive(Debug, Subcommand)]
 enum EventsCommand {
     Tail(EventsTailArgs),
+    Verify(EventsVerifyArgs),
+    AnchorWrite(EventsAnchorWriteArgs),
+    AnchorVerify(EventsAnchorVerifyArgs),
 }
 
 #[derive(Debug, Args)]
@@ -130,6 +133,30 @@ struct EventsTailArgs {
     follow: bool,
     #[arg(long, default_value_t = 500)]
     interval_ms: u64,
+}
+
+#[derive(Debug, Args)]
+struct EventsVerifyArgs {
+    #[arg(long)]
+    session_id: String,
+}
+
+#[derive(Debug, Args)]
+struct EventsAnchorWriteArgs {
+    #[arg(long)]
+    session_id: String,
+    #[arg(long)]
+    key_id: String,
+    #[arg(long, default_value = "ESSENCE_ANCHOR_KEY")]
+    key_env: String,
+}
+
+#[derive(Debug, Args)]
+struct EventsAnchorVerifyArgs {
+    #[arg(long)]
+    session_id: String,
+    #[arg(long, default_value = "ESSENCE_ANCHOR_KEY")]
+    key_env: String,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -207,6 +234,8 @@ enum CliError {
     InvalidPath(PathBuf),
     #[error("approval `{0}` is not recorded")]
     MissingApproval(String),
+    #[error("anchor key env var `{0}` is not set")]
+    MissingAnchorKeyEnv(String),
 }
 
 fn main() -> ExitCode {
@@ -305,6 +334,23 @@ fn execute_events(
             }
             Ok(())
         }
+        EventsCommand::Verify(args) => {
+            let session_id = parse_session_id(&args.session_id)?;
+            let report = control.verify_session_integrity(&session_id)?;
+            write_json_pretty(writer, &report)
+        }
+        EventsCommand::AnchorWrite(args) => {
+            let session_id = parse_session_id(&args.session_id)?;
+            let key = anchor_key_from_env(&args.key_env)?;
+            let anchor = control.write_session_anchor(&session_id, args.key_id, key.as_bytes())?;
+            write_json_pretty(writer, &anchor)
+        }
+        EventsCommand::AnchorVerify(args) => {
+            let session_id = parse_session_id(&args.session_id)?;
+            let key = anchor_key_from_env(&args.key_env)?;
+            let verification = control.verify_session_anchor(&session_id, key.as_bytes())?;
+            write_json_pretty(writer, &verification)
+        }
     }
 }
 
@@ -366,6 +412,10 @@ fn parse_session_id(raw: &str) -> Result<SessionId, CliError> {
 
 fn parse_approval_id(raw: &str) -> Result<ApprovalId, CliError> {
     Ok(ApprovalId(Uuid::parse_str(raw)?))
+}
+
+fn anchor_key_from_env(env_name: &str) -> Result<String, CliError> {
+    std::env::var(env_name).map_err(|_| CliError::MissingAnchorKeyEnv(env_name.to_string()))
 }
 
 fn path_to_string(path: &Path) -> Result<String, CliError> {
@@ -492,6 +542,88 @@ mod tests {
         assert_eq!(events[0]["event_type"], "message_user");
         assert_eq!(events[0]["seq"], 3);
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn verifies_event_integrity_via_cli() {
+        let root = temp_root("verify-events");
+        let control = ControlPlane::new(&root);
+        let session = control
+            .create_session(CreateSessionRequest::interactive("."))
+            .unwrap();
+        control
+            .submit_user_message(&session.session_id, "verify me")
+            .unwrap();
+
+        let cli = Cli {
+            root: root.clone(),
+            command: Command::Events(EventsArgs {
+                command: EventsCommand::Verify(EventsVerifyArgs {
+                    session_id: session.session_id.0.to_string(),
+                }),
+            }),
+        };
+
+        let mut out = Vec::new();
+        execute(cli, &mut out).unwrap();
+
+        let report: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(report["event_count"], 2);
+        assert_eq!(report["latest_seq"], 2);
+        assert!(report["latest_hash"].as_str().unwrap().len() >= 64);
+        assert_eq!(report["findings"].as_array().unwrap().len(), 0);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn writes_and_verifies_event_anchor_via_cli() {
+        let root = temp_root("anchor-events");
+        let control = ControlPlane::new(&root);
+        let session = control
+            .create_session(CreateSessionRequest::interactive("."))
+            .unwrap();
+        control
+            .submit_user_message(&session.session_id, "anchor me")
+            .unwrap();
+        let key_env = format!("ESSENCE_ANCHOR_KEY_{}", Uuid::new_v4().simple());
+        std::env::set_var(&key_env, "test-anchor-secret");
+
+        let write_cli = Cli {
+            root: root.clone(),
+            command: Command::Events(EventsArgs {
+                command: EventsCommand::AnchorWrite(EventsAnchorWriteArgs {
+                    session_id: session.session_id.0.to_string(),
+                    key_id: "test-key".to_string(),
+                    key_env: key_env.clone(),
+                }),
+            }),
+        };
+        let mut out = Vec::new();
+        execute(write_cli, &mut out).unwrap();
+        let anchor: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(anchor["algorithm"], "hmac_sha256");
+        assert_eq!(anchor["key_id"], "test-key");
+        assert!(anchor["signature"].as_str().unwrap().len() >= 64);
+
+        let verify_cli = Cli {
+            root: root.clone(),
+            command: Command::Events(EventsArgs {
+                command: EventsCommand::AnchorVerify(EventsAnchorVerifyArgs {
+                    session_id: session.session_id.0.to_string(),
+                    key_env: key_env.clone(),
+                }),
+            }),
+        };
+        let mut out = Vec::new();
+        execute(verify_cli, &mut out).unwrap();
+        let verification: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(verification["integrity_valid"], true);
+        assert_eq!(verification["latest_hash_matches"], true);
+        assert_eq!(verification["signature_valid"], true);
+
+        std::env::remove_var(key_env);
         let _ = fs::remove_dir_all(root);
     }
 

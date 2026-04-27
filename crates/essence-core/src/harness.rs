@@ -1,8 +1,12 @@
 use std::collections::BTreeMap;
-use std::process::Command;
+use std::io::Read;
+use std::path::Path;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use uuid::Uuid;
 
 use crate::plugin::PluginManifest;
 use crate::policy::{PolicyDecision, ToolPolicy, ToolPolicyRequest};
@@ -46,7 +50,27 @@ pub struct CliExecutionResult {
     pub success: bool,
     pub stdout: String,
     pub stderr: String,
+    pub timed_out: bool,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
     pub writes_workspace: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CliExecutionLimits {
+    pub timeout: Duration,
+    pub max_stdout_bytes: usize,
+    pub max_stderr_bytes: usize,
+}
+
+impl Default for CliExecutionLimits {
+    fn default() -> Self {
+        Self {
+            timeout: Duration::from_secs(30),
+            max_stdout_bytes: 1024 * 1024,
+            max_stderr_bytes: 1024 * 1024,
+        }
+    }
 }
 
 impl RenderedCliCommand {
@@ -55,20 +79,67 @@ impl RenderedCliCommand {
     }
 
     pub fn execute_with_cwd(&self, cwd: Option<&str>) -> HarnessResult<CliExecutionResult> {
+        self.execute_with_cwd_and_limits(cwd, CliExecutionLimits::default())
+    }
+
+    pub fn execute_with_cwd_and_limits(
+        &self,
+        cwd: Option<&str>,
+        limits: CliExecutionLimits,
+    ) -> HarnessResult<CliExecutionResult> {
         let mut command = Command::new(&self.binary);
         command.args(&self.args);
         if let Some(cwd) = cwd {
             command.current_dir(cwd);
         }
-        let output = command.output()?;
+
+        let temp_id = Uuid::new_v4();
+        let stdout_path = std::env::temp_dir().join(format!("essence-cli-{temp_id}.stdout"));
+        let stderr_path = std::env::temp_dir().join(format!("essence-cli-{temp_id}.stderr"));
+        let stdout_file = std::fs::File::create(&stdout_path)?;
+        let stderr_file = std::fs::File::create(&stderr_path)?;
+        command.stdout(Stdio::from(stdout_file));
+        command.stderr(Stdio::from(stderr_file));
+
+        let mut child = command.spawn()?;
+        let started = Instant::now();
+        let (status, timed_out) = loop {
+            if let Some(status) = child.try_wait()? {
+                break (status, false);
+            }
+            if started.elapsed() >= limits.timeout {
+                child.kill()?;
+                let status = child.wait()?;
+                break (status, true);
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        let (stdout, stdout_truncated) = read_limited_lossy(&stdout_path, limits.max_stdout_bytes)?;
+        let (stderr, stderr_truncated) = read_limited_lossy(&stderr_path, limits.max_stderr_bytes)?;
+        let _ = std::fs::remove_file(&stdout_path);
+        let _ = std::fs::remove_file(&stderr_path);
+
         Ok(CliExecutionResult {
-            status_code: output.status.code(),
-            success: output.status.success(),
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            status_code: if timed_out { None } else { status.code() },
+            success: !timed_out && status.success(),
+            stdout,
+            stderr,
+            timed_out,
+            stdout_truncated,
+            stderr_truncated,
             writes_workspace: self.writes_workspace,
         })
     }
+}
+
+fn read_limited_lossy(path: &Path, limit: usize) -> HarnessResult<(String, bool)> {
+    let mut file = std::fs::File::open(path)?;
+    let mut bytes = Vec::new();
+    let take = limit.saturating_add(1) as u64;
+    file.by_ref().take(take).read_to_end(&mut bytes)?;
+    let truncated = bytes.len() > limit;
+    bytes.truncate(limit);
+    Ok((String::from_utf8_lossy(&bytes).into_owned(), truncated))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -261,7 +332,7 @@ impl CliHarnessManifest {
 #[cfg(test)]
 mod tests {
     use crate::harness::{
-        CliCommandSpec, CliExecutionResult, CliHarnessManifest, HarnessError,
+        CliCommandSpec, CliExecutionLimits, CliExecutionResult, CliHarnessManifest, HarnessError,
         PolicyBoundCliHarness, PolicyBoundCliOutcome, RenderedCliCommand,
     };
     use crate::plugin::PluginManifest;
@@ -366,7 +437,74 @@ mod tests {
         assert!(result
             .stdout
             .contains("executes_rendered_cli_commands_and_captures_output"));
+        assert!(!result.timed_out);
+        assert!(!result.stdout_truncated);
         assert!(!result.writes_workspace);
+    }
+
+    #[test]
+    fn truncates_rendered_cli_command_output_when_limit_is_reached() {
+        let command = RenderedCliCommand {
+            binary: std::env::current_exe()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            args: vec!["--list".to_string()],
+            writes_workspace: false,
+        };
+
+        let result = command
+            .execute_with_cwd_and_limits(
+                None,
+                CliExecutionLimits {
+                    timeout: std::time::Duration::from_secs(5),
+                    max_stdout_bytes: 16,
+                    max_stderr_bytes: 16,
+                },
+            )
+            .unwrap();
+
+        assert!(result.success);
+        assert_eq!(result.stdout.len(), 16);
+        assert!(result.stdout_truncated);
+        assert!(!result.stderr_truncated);
+    }
+
+    #[test]
+    fn times_out_rendered_cli_command_execution() {
+        let command = RenderedCliCommand {
+            binary: std::env::current_exe()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            args: vec![
+                "harness::tests::ignored_helper_sleeps_for_timeout".to_string(),
+                "--exact".to_string(),
+                "--ignored".to_string(),
+            ],
+            writes_workspace: false,
+        };
+
+        let result = command
+            .execute_with_cwd_and_limits(
+                None,
+                CliExecutionLimits {
+                    timeout: std::time::Duration::from_millis(25),
+                    max_stdout_bytes: 1024,
+                    max_stderr_bytes: 1024,
+                },
+            )
+            .unwrap();
+
+        assert!(!result.success);
+        assert!(result.timed_out);
+        assert_eq!(result.status_code, None);
+    }
+
+    #[test]
+    #[ignore]
+    fn ignored_helper_sleeps_for_timeout() {
+        std::thread::sleep(std::time::Duration::from_secs(5));
     }
 
     #[test]

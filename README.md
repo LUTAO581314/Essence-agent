@@ -1,4 +1,10 @@
+<p align="center">
+  <img src="assets/logo/silver-snow-wolf-pixel.png" alt="Essence Agent silver snow wolf pixel logo" width="180" />
+</p>
+
 # Essence Agent
+
+**不止单智能体助手，而是多智能体协作的典范。**
 
 Swarm-native agent kernel research and implementation.
 

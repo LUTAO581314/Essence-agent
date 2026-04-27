@@ -8,8 +8,9 @@ use crate::control::{
     SpawnSubagentRequest, StartRunRequest,
 };
 use crate::protocol::{
-    AgentHeartbeat, AgentId, AgentRecord, LaneId, LifecycleStatus, RunMeta, SessionId,
-    SubagentBudget, SubagentMeta, SubagentResult, TaskId, TaskPatch, TaskRecord, TriggerKind,
+    AgentHeartbeat, AgentId, AgentRecord, ApprovalDecision, LaneId, LifecycleStatus, RunId,
+    RunMeta, SessionId, SubagentBudget, SubagentMeta, SubagentResult, TaskId, TaskPatch,
+    TaskRecord, TriggerKind,
 };
 use crate::swarm_scheduler::SwarmSchedulerHandle;
 
@@ -308,6 +309,11 @@ impl SwarmRuntime {
             .control
             .complete_subagent_with_result(&dispatched.subagent, result)?;
         let task_patch = self.control.complete_task(&dispatched.task)?;
+        self.close_pending_run_work(
+            &dispatched.run.session_id,
+            &dispatched.run.run_id,
+            "task completed before pending work finished",
+        )?;
         let run = self.control.complete_run(&dispatched.run, None)?;
         let agent_id = dispatched
             .run
@@ -350,6 +356,7 @@ impl SwarmRuntime {
         };
         self.control
             .update_task(&dispatched.task.session_id, task_patch.clone())?;
+        self.close_pending_run_work(&dispatched.run.session_id, &dispatched.run.run_id, &reason)?;
         let run = self.control.cancel_run(&dispatched.run, reason)?;
         let agent_id = dispatched
             .run
@@ -371,6 +378,44 @@ impl SwarmRuntime {
             run,
             subagent,
         })
+    }
+
+    fn close_pending_run_work(
+        &self,
+        session_id: &SessionId,
+        run_id: &RunId,
+        reason: &str,
+    ) -> ControlResult<()> {
+        let projection = self.control.projection(session_id)?;
+        let approvals = projection
+            .approvals
+            .values()
+            .filter(|approval| {
+                approval.run_id.as_ref() == Some(run_id)
+                    && approval.status == LifecycleStatus::WaitingApproval
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let tool_calls = projection
+            .tool_calls
+            .values()
+            .filter(|tool_call| {
+                tool_call.run_id.as_ref() == Some(run_id)
+                    && tool_call.status == LifecycleStatus::WaitingTool
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+
+        for approval in approvals {
+            self.control
+                .resolve_approval(&approval, ApprovalDecision::Deny, "swarm-runtime")?;
+        }
+        for tool_call in tool_calls {
+            self.control
+                .fail_tool_call(&tool_call, reason.to_string())?;
+        }
+
+        Ok(())
     }
 }
 

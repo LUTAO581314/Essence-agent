@@ -8,7 +8,7 @@ use crate::protocol::{
     ContentBlock, EventEnvelope, EventSource, EventType, EventVisibility, LifecycleStatus,
     MessagePayload, MessageRole, SubagentMeta,
 };
-use crate::wal::{JsonlWal, WalError};
+use crate::wal::{JsonlWal, WalError, WalIntegrityReport};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SidechainError {
@@ -91,9 +91,9 @@ impl SidechainTranscript {
         visibility: EventVisibility,
         payload: Value,
     ) -> SidechainResult<EventEnvelope> {
-        let events = self.wal.replay()?;
-        let seq = events.last().map_or(1, |event| event.seq + 1);
-        let event = EventEnvelope::new(
+        let previous = self.wal.last()?;
+        let seq = previous.as_ref().map_or(1, |event| event.seq + 1);
+        let mut event = EventEnvelope::new(
             seq,
             self.subagent.session_id.clone(),
             event_type,
@@ -101,6 +101,10 @@ impl SidechainTranscript {
             visibility,
             payload,
         );
+        if let Some(previous) = previous {
+            event = event.with_prev_event(&previous)?;
+        }
+        event = event.seal_hash()?;
         self.wal.append(&event)?;
         Ok(event)
     }
@@ -112,6 +116,10 @@ impl SidechainTranscript {
     pub fn projection(&self) -> SidechainResult<LedgerProjection> {
         let events = self.events()?;
         LedgerProjection::replay(&events).map_err(SidechainError::from)
+    }
+
+    pub fn verify_integrity(&self) -> SidechainResult<WalIntegrityReport> {
+        self.wal.verify_integrity().map_err(SidechainError::from)
     }
 
     fn append_typed_event<T: Serialize>(
@@ -199,12 +207,18 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].seq, 1);
         assert_eq!(events[0].event_type, EventType::MessageAssistantFinal);
+        assert_eq!(events[0].prev_hash, None);
+        assert_eq!(events[0].hash, Some(events[0].computed_hash().unwrap()));
         assert_eq!(events[1].event_type, EventType::SubagentProgress);
+        assert_eq!(events[1].prev_event_id, Some(events[0].event_id.clone()));
+        assert_eq!(events[1].prev_hash.as_deref(), events[0].hash.as_deref());
+        assert_eq!(events[1].hash, Some(events[1].computed_hash().unwrap()));
         assert_eq!(projection.messages.len(), 1);
         assert_eq!(
             projection.subagents.get("researcher-1").unwrap().status,
             LifecycleStatus::WaitingTool
         );
+        assert!(sidechain.verify_integrity().unwrap().is_valid());
         assert!(sidechain.path().exists());
 
         let _ = std::fs::remove_dir_all(root);

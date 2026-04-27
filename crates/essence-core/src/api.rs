@@ -10,6 +10,7 @@ use crate::protocol::{ApprovalRequest, EventEnvelope, SessionId, SessionMeta};
 use crate::snapshot::ProjectionSnapshot;
 #[cfg(feature = "swarm")]
 use crate::swarm::{SwarmAgentSpec, SwarmRuntime, SwarmTick};
+use crate::wal::WalIntegrityReport;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ApiCreateSessionRequest {
@@ -63,6 +64,11 @@ pub struct ApiSendMessageRequest {
 pub struct ApiEventsAfterRequest {
     pub session_id: SessionId,
     pub after_seq: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ApiVerifyIntegrityRequest {
+    pub session_id: SessionId,
 }
 
 #[cfg(feature = "swarm")]
@@ -130,6 +136,13 @@ impl ControlApi {
             .events_after(&request.session_id, request.after_seq)
     }
 
+    pub fn verify_integrity(
+        &self,
+        request: ApiVerifyIntegrityRequest,
+    ) -> ControlResult<WalIntegrityReport> {
+        self.control.verify_session_integrity(&request.session_id)
+    }
+
     pub fn pending_approvals(&self, session_id: &SessionId) -> ControlResult<Vec<ApprovalRequest>> {
         self.control.pending_approvals(session_id)
     }
@@ -192,6 +205,12 @@ impl ControlApi {
             )
             .with_capability("read_only"),
             crate::registry::ToolSpec::new(
+                "essence_verify_integrity",
+                "Verify the session ledger hash chain and sequence continuity.",
+                crate::registry::ToolPermission::Allow,
+            )
+            .with_capability("read_only"),
+            crate::registry::ToolSpec::new(
                 "essence_swarm_tick",
                 "Advance one scheduler tick for a session.",
                 crate::registry::ToolPermission::RequireApproval,
@@ -216,7 +235,8 @@ mod tests {
     #[cfg(feature = "swarm")]
     use crate::api::{ApiAgentHeartbeatRequest, ApiRegisterAgentRequest, ApiSwarmTickRequest};
     use crate::api::{
-        ApiCreateSessionRequest, ApiEventsAfterRequest, ApiSendMessageRequest, ControlApi,
+        ApiCreateSessionRequest, ApiEventsAfterRequest, ApiSendMessageRequest,
+        ApiVerifyIntegrityRequest, ControlApi,
     };
     use crate::control::ControlPlane;
     use crate::protocol::EventType;
@@ -245,6 +265,12 @@ mod tests {
 
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event_type, EventType::MessageUser);
+        assert!(api
+            .verify_integrity(ApiVerifyIntegrityRequest {
+                session_id: session.session_id.clone(),
+            })
+            .unwrap()
+            .is_valid());
 
         let _ = std::fs::remove_dir_all(root);
     }

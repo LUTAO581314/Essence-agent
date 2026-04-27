@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::api::{ApiEventsAfterRequest, ApiMemorySearchRequest, ApiSwarmTickRequest, ControlApi};
+use crate::api::{
+    ApiEventsAfterRequest, ApiMemorySearchRequest, ApiSwarmTickRequest, ApiVerifyIntegrityRequest,
+    ControlApi,
+};
 use crate::control::ControlError;
 use crate::registry::ToolSpec;
 
@@ -137,6 +140,13 @@ impl EssenceMcpServer {
                     decode_tool_input::<ApiEventsAfterRequest>(&request.name, request.arguments)?;
                 McpToolCallResponse::structured(&request.name, self.api.events_after(input)?)
             }
+            "essence_verify_integrity" => {
+                let input = decode_tool_input::<ApiVerifyIntegrityRequest>(
+                    &request.name,
+                    request.arguments,
+                )?;
+                McpToolCallResponse::structured(&request.name, self.api.verify_integrity(input)?)
+            }
             "essence_swarm_tick" => {
                 let input =
                     decode_tool_input::<ApiSwarmTickRequest>(&request.name, request.arguments)?;
@@ -206,7 +216,7 @@ mod tests {
             .call_tool(McpToolCallRequest::new(
                 "essence_events_after",
                 json!({
-                    "session_id": session.session_id,
+                    "session_id": session.session_id.clone(),
                     "after_seq": 1
                 }),
             ))
@@ -215,11 +225,31 @@ mod tests {
 
         assert!(!response.is_error);
         assert_eq!(events.len(), 1);
+        let report = server
+            .call_tool(McpToolCallRequest::new(
+                "essence_verify_integrity",
+                json!({
+                    "session_id": session.session_id.clone()
+                }),
+            ))
+            .unwrap();
+        assert_eq!(
+            report.structured_content["findings"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
         assert!(server
             .manifest()
             .tools
             .iter()
             .any(|tool| tool.name == "essence_memory_search"));
+        assert!(server
+            .manifest()
+            .tools
+            .iter()
+            .any(|tool| tool.name == "essence_verify_integrity" && tool.read_only));
 
         let _ = std::fs::remove_dir_all(root);
     }

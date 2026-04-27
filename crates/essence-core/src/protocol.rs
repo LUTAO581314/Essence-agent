@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -71,6 +72,15 @@ pub enum LifecycleStatus {
     Failed,
     Cancelled,
     TimedOut,
+}
+
+impl LifecycleStatus {
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            Self::Completed | Self::Failed | Self::Cancelled | Self::TimedOut
+        )
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -254,6 +264,32 @@ impl EventEnvelope {
     pub fn with_prev_event_id(mut self, event_id: EventId) -> Self {
         self.prev_event_id = Some(event_id);
         self
+    }
+
+    pub fn with_prev_event(mut self, previous: &EventEnvelope) -> Result<Self, serde_json::Error> {
+        self.prev_event_id = Some(previous.event_id.clone());
+        self.prev_hash = Some(previous.stored_or_computed_hash()?);
+        Ok(self)
+    }
+
+    pub fn seal_hash(mut self) -> Result<Self, serde_json::Error> {
+        self.hash = Some(self.computed_hash()?);
+        Ok(self)
+    }
+
+    pub fn stored_or_computed_hash(&self) -> Result<String, serde_json::Error> {
+        match &self.hash {
+            Some(hash) => Ok(hash.clone()),
+            None => self.computed_hash(),
+        }
+    }
+
+    pub fn computed_hash(&self) -> Result<String, serde_json::Error> {
+        let mut hash_input = self.clone();
+        hash_input.hash = None;
+        let encoded = serde_json::to_vec(&hash_input)?;
+        let digest = Sha256::digest(&encoded);
+        Ok(format!("{digest:x}"))
     }
 }
 

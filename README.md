@@ -44,6 +44,8 @@ Current Rust crate status:
 - `essence-core::scheduler`: task scheduling primitives for queued work
 - `essence-core::snapshot`: JSON projection snapshots for persistent replay
   checkpoints
+- `essence-core::api`: local JSON-friendly Control API façade for future
+  HTTP/MCP adapters
 
 The long-term shape is:
 

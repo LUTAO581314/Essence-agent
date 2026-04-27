@@ -32,6 +32,7 @@ The implemented layer is the durable local kernel:
 - minimal model execution loop abstraction
 - task scheduler primitives for claiming queued work
 - JSON projection snapshots for persistent replay checkpoints
+- local Control API adapter primitives for future HTTP/MCP servers
 - minimal `essence` CLI for session creation, message append, and event tailing
 
 ## Verification

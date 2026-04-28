@@ -174,10 +174,30 @@ kernel by default.
 
 ## Installation
 
-For local development:
+From the repository root, install the `essence` CLI into Cargo's binary
+directory:
 
 ```bash
 cargo install --path crates/essence-core --bin essence
+```
+
+On Windows this installs:
+
+```powershell
+C:\Users\<you>\.cargo\bin\essence.exe
+```
+
+If `essence` is not found after installation, open a new terminal so PATH is
+reloaded, or run it by full path:
+
+```powershell
+C:\Users\<you>\.cargo\bin\essence.exe --help
+```
+
+Verify the CLI is available:
+
+```bash
+essence --help
 ```
 
 Release tags named `v*` publish portable `essence` CLI archives for:
@@ -193,6 +213,33 @@ Each archive includes the binary, README, LICENSE, and a SHA-256 checksum file.
 
 There is now a v0 `essence` CLI over the local control plane. It writes runtime
 data to `.essence/` by default and can be pointed elsewhere with `--root`.
+
+Quick start after installation:
+
+```bash
+essence setup --save
+essence chat
+```
+
+For one-shot prompts instead of interactive chat:
+
+```bash
+essence ask --text "Build the next layer"
+```
+
+Useful first commands:
+
+```bash
+essence session create --title "First session"
+essence session list
+essence doctor --strict
+essence theme set pixel
+essence completion powershell
+essence completion install powershell
+```
+
+When developing from source without installing, prefix commands with
+`cargo run -p essence-core --bin essence --`:
 
 ```bash
 cargo run -p essence-core --bin essence -- session create --title "First session"

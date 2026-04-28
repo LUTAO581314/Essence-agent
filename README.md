@@ -172,6 +172,23 @@ Feature groups are opt-in:
 Default build keeps `full` enabled, so the current repo still ships the whole
 kernel by default.
 
+## Installation
+
+For local development:
+
+```bash
+cargo install --path crates/essence-core --bin essence
+```
+
+Release tags named `v*` publish portable `essence` CLI archives for:
+
+- Linux `x86_64-unknown-linux-gnu`
+- Windows `x86_64-pc-windows-msvc`
+- macOS `x86_64-apple-darwin`
+- macOS `aarch64-apple-darwin`
+
+Each archive includes the binary, README, LICENSE, and a SHA-256 checksum file.
+
 ## CLI
 
 There is now a minimal `essence` CLI over the local control plane. It writes
@@ -192,11 +209,23 @@ cargo run -p essence-core --bin essence -- completion powershell
 cargo run -p essence-core --bin essence -- completion install powershell
 ```
 
+The Rust CI gate runs formatting, strict clippy, and tests on Ubuntu, Windows,
+and macOS. macOS support is therefore a compatibility target, not only a best
+effort path.
+
 By default, data commands print compact human-readable text. Use `--json` for
 single structured responses, `--output jsonl` for event streams, `--quiet` for
 primary ids or status only, and `-v`/`--version` for the CLI version. Mutating
 commands accept global `--dry-run` to preview the write without changing
 `.essence/` state or installing files.
+
+## API Compatibility
+
+The crate is still in v0. Public API type-shape changes, especially enums and
+records exported from `essence_core`, should be treated as compatibility
+decisions rather than lint cleanup. Prefer additive changes in patch/minor
+releases; reserve breaking public type reshapes for an explicit version-boundary
+release.
 
 Interactive chat and the Star Office-style agent board are available from the
 same CLI:
@@ -317,3 +346,5 @@ cargo run -p essence-core --bin essence -- workspace watch --session-id <session
 - [Current status](docs/status.md)
 - [Reference synthesis](docs/reference-synthesis.md)
 - [v0 architecture draft](docs/v0-architecture.md)
+- [Release process](docs/releasing.md)
+- [API compatibility policy](docs/api-compatibility.md)

@@ -55,6 +55,12 @@ The implemented layer is the durable local kernel:
   heartbeat commands, model config get/set, doctor checks, shell completions,
   completion install, global dry-run previews, non-interactive chat detection,
   and bounded model-command chat adapters
+- three-platform CI gate over Ubuntu, Windows, and macOS for formatting,
+  strict clippy, and tests
+- tag-driven release workflow that publishes Linux, Windows, macOS Intel, and
+  macOS Apple Silicon portable CLI binary archives with SHA-256 checksums
+- documented v0 API compatibility policy for public Rust and structured CLI
+  output changes
 - split CLI implementation modules for args, chat/model adapters, control
   commands, workspace rendering, shared support, and tests
 
@@ -63,15 +69,19 @@ The implemented layer is the durable local kernel:
 Current proof command:
 
 ```bash
-cargo test --workspace
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test
 ```
 
-Expected result: all library and CLI tests pass.
+Expected result: all formatting, lint, library, and CLI tests pass. CI runs the
+same gate on `ubuntu-latest`, `windows-latest`, and `macos-latest`.
 
 Latest local proof for the CLI/built-in-tools polish:
 
 ```bash
 cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
 cargo test -p essence-core
 cargo build -p essence-core --bin essence
 ```
@@ -92,6 +102,7 @@ cargo test -p essence-core --no-default-features
 - executable browser daemon plugin
 - research radar plugins
 - visual multi-agent workspace shell UI
+- native package-manager installers such as MSI, Homebrew, Debian, or RPM
 - evolution asset store
 
 ## Architecture Direction

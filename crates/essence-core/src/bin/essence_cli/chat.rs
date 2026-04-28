@@ -10,17 +10,185 @@ use essence_core::{
     LifecycleStatus, MessagePayload, MessageRole, ModelClient, ModelExecutionLoop, ModelRequest,
     ModelResponse, RegisterAgentRequest, SessionId,
 };
+use serde::Serialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
 use super::agent_profile::{
     read_agent_profile, read_agent_profile_if_exists, read_prompt_file, StoredAgentProfile,
 };
-use super::args::{ChatArgs, CliModelProvider};
+use super::args::{AskArgs, ChatArgs, CliModelProvider};
 use super::model_config::{read_model_config, DEFAULT_OPENAI_COMPATIBLE_BASE_URL};
-use super::pixel_ui::{brand_header, key_value, mid, reset, row, status_chip, style};
-use super::support::{parse_session_id, path_to_string, CliError};
+use super::pixel_ui::{brand_header, key_value, mid, panel, reset, row, status_chip, style};
+use super::support::{
+    parse_session_id, path_to_string, write_json_line, write_json_pretty, write_text_line,
+    CliError, OutputMode,
+};
 use super::workspace_view::render_workspace_dashboard_from_control;
+
+#[derive(Debug, Serialize)]
+struct AskResponse {
+    session_id: SessionId,
+    run_id: essence_core::RunId,
+    text: String,
+}
+
+pub(crate) fn execute_ask(
+    control: &ControlPlane,
+    args: AskArgs,
+    output: OutputMode,
+    writer: &mut impl Write,
+) -> Result<(), CliError> {
+    if output.dry_run {
+        return write_text_line(writer, "dry run: would run one-shot ask");
+    }
+
+    let agent_profile = match non_empty(args.agent) {
+        Some(agent_id) => Some(read_agent_profile(control.root(), &agent_id)?),
+        None => None,
+    };
+    let stored_config = read_model_config(control.root())?.unwrap_or_default();
+    let configured_model = non_empty(args.model)
+        .or_else(|| env_var_non_empty("ESSENCE_MODEL"))
+        .or_else(|| {
+            agent_profile
+                .as_ref()
+                .and_then(|profile| non_empty(profile.model.clone()))
+        })
+        .or_else(|| non_empty(stored_config.model.clone()));
+    let session_id = match args.session_id {
+        Some(raw) => parse_session_id(&raw)?,
+        None => {
+            let cwd = match args.cwd {
+                Some(path) => path,
+                None => std::env::current_dir()?,
+            };
+            let mut request = CreateSessionRequest::interactive(path_to_string(&cwd)?);
+            request.permission_mode = args.permission_mode.into();
+            if let Some(title) = args.title {
+                request = request.with_title(title);
+            }
+            if let Some(model) = configured_model.clone() {
+                request = request.with_model(model);
+            }
+            control.create_session(request)?.session_id
+        }
+    };
+    let model_name = match configured_model {
+        Some(model) => Some(model),
+        None => projected_session_model(control, &session_id)?,
+    };
+    let system_prompt = resolve_system_prompt(
+        args.system_prompt,
+        args.system_prompt_file,
+        agent_profile.as_ref(),
+    )?;
+    if let Some(profile) = &agent_profile {
+        let agent = ChatAgentConfig {
+            agent_id: profile.agent_id.clone(),
+            lane: profile.lane.clone(),
+            role: profile.role.clone(),
+        };
+        ensure_chat_agent(control, &session_id, &agent)?;
+    }
+
+    let cli_model_command = non_empty(args.model_command);
+    let env_model_command = env_var_non_empty("ESSENCE_CHAT_MODEL_CMD");
+    let model_command = cli_model_command
+        .clone()
+        .or(env_model_command)
+        .or_else(|| {
+            agent_profile
+                .as_ref()
+                .and_then(|profile| non_empty(profile.command.clone()))
+        })
+        .or_else(|| non_empty(stored_config.command.clone()));
+    let provider = resolve_model_provider(
+        args.model_provider,
+        cli_model_command.as_deref(),
+        agent_profile
+            .as_ref()
+            .and_then(|profile| profile.provider.as_deref()),
+        stored_config.provider.as_deref(),
+        model_command.as_deref(),
+    )
+    .map_err(CliError::ModelConfig)?;
+    let limits = ModelAdapterLimits {
+        timeout: Duration::from_millis(args.model_timeout_ms),
+        max_response_bytes: args.model_max_response_bytes,
+        max_stdout_bytes: args.model_max_stdout_bytes,
+        max_stderr_bytes: args.model_max_stderr_bytes,
+    };
+    let openai_config = if matches!(provider, CliModelProvider::OpenaiCompatible) {
+        OpenAiCompatibleConfig {
+            model: model_name.clone(),
+            base_url: non_empty(args.model_base_url)
+                .or_else(|| env_var_non_empty("ESSENCE_MODEL_BASE_URL"))
+                .or_else(|| {
+                    agent_profile
+                        .as_ref()
+                        .and_then(|profile| non_empty(profile.base_url.clone()))
+                })
+                .or_else(|| non_empty(stored_config.base_url.clone()))
+                .unwrap_or_else(|| DEFAULT_OPENAI_COMPATIBLE_BASE_URL.to_string()),
+            api_key: resolve_model_api_key(
+                args.model_api_key_env
+                    .or_else(|| {
+                        agent_profile
+                            .as_ref()
+                            .and_then(|profile| non_empty(profile.api_key_env.clone()))
+                    })
+                    .or_else(|| non_empty(stored_config.api_key_env.clone())),
+            )
+            .map_err(CliError::ModelConfig)?,
+        }
+    } else {
+        OpenAiCompatibleConfig {
+            model: None,
+            base_url: String::new(),
+            api_key: None,
+        }
+    };
+    let runtime = ModelExecutionLoop::new(
+        control.clone(),
+        ChatModel::new(
+            provider,
+            model_command,
+            openai_config,
+            limits,
+            system_prompt,
+        )
+        .map_err(CliError::ModelConfig)?,
+    );
+    let turn = runtime.run_user_turn(session_id.clone(), args.text)?;
+    let text = event_message_text(&turn.assistant_event)
+        .unwrap_or_else(|| "local assistant: recorded turn".to_string());
+    let response = AskResponse {
+        session_id,
+        run_id: turn.run.run_id,
+        text,
+    };
+
+    if output.is_json() {
+        write_json_pretty(writer, &response)
+    } else if output.is_jsonl() {
+        write_json_line(writer, &response)
+    } else if output.quiet {
+        write_text_line(writer, &response.text)
+    } else if output.is_pixel() {
+        write_text_line(
+            writer,
+            panel(
+                "ESSENCE ASK",
+                "one-shot model turn",
+                &response.text,
+                output.color,
+            ),
+        )
+    } else {
+        write_text_line(writer, &response.text)
+    }
+}
 
 pub(crate) fn execute_chat(
     control: &ControlPlane,

@@ -472,6 +472,329 @@ fn resolves_approval_via_cli() {
 }
 
 #[test]
+fn ledger_resource_commands_cover_core_views() {
+    let root = temp_root("ledger-resource-commands");
+    let control = ControlPlane::new(&root);
+    let session = control
+        .create_session(CreateSessionRequest::interactive("."))
+        .unwrap();
+    let session_id = session.session_id.0.to_string();
+
+    let run = run_json_cli(
+        root.clone(),
+        Command::Run(RunArgs {
+            command: RunCommand::Start(RunStartArgs {
+                session_id: session_id.clone(),
+                trigger: CliTriggerKind::User,
+                parent_run_id: None,
+                lane: Some("main".to_string()),
+                agent_id: Some("main".to_string()),
+                model: Some("local".to_string()),
+                input_events: Vec::new(),
+            }),
+        }),
+    );
+    let run_id = run["run_id"].as_str().unwrap().to_string();
+
+    let tool = run_json_cli(
+        root.clone(),
+        Command::Tool(ToolArgs {
+            command: ToolCommand::Start(ToolStartArgs {
+                session_id: session_id.clone(),
+                name: "essence.test".to_string(),
+                input_json: r#"{"ok":true}"#.to_string(),
+                run_id: Some(run_id.clone()),
+            }),
+        }),
+    );
+    let tool_call_id = tool["tool_call_id"].as_str().unwrap().to_string();
+    run_json_cli(
+        root.clone(),
+        Command::Tool(ToolArgs {
+            command: ToolCommand::Complete(ToolCompleteArgs {
+                session_id: session_id.clone(),
+                tool_call_id,
+                output_json: r#"{"done":true}"#.to_string(),
+            }),
+        }),
+    );
+
+    let task = run_json_cli(
+        root.clone(),
+        Command::Task(TaskArgs {
+            command: TaskCommand::Create(TaskCreateArgs {
+                session_id: session_id.clone(),
+                title: "Claim me".to_string(),
+                status: CliLifecycleStatus::Queued,
+                lane: Some("main".to_string()),
+                assignee: None,
+            }),
+        }),
+    );
+    let task_id = task["task_id"].as_str().unwrap().to_string();
+    let claimed = run_json_cli(
+        root.clone(),
+        Command::Task(TaskArgs {
+            command: TaskCommand::Claim(TaskClaimArgs {
+                session_id: session_id.clone(),
+                assignee: "main".to_string(),
+            }),
+        }),
+    );
+    assert_eq!(claimed["task_id"], task_id);
+    run_json_cli(
+        root.clone(),
+        Command::Task(TaskArgs {
+            command: TaskCommand::Complete(TaskCompleteArgs {
+                session_id: session_id.clone(),
+                task_id: task_id.clone(),
+            }),
+        }),
+    );
+
+    let memory = run_json_cli(
+        root.clone(),
+        Command::Memory(MemoryArgs {
+            command: MemoryCommand::Remember(MemoryRememberArgs {
+                session_id: session_id.clone(),
+                kind: "decision".to_string(),
+                text: "JSONL stays canonical for CLI resources.".to_string(),
+                run_id: Some(run_id.clone()),
+                source_events: Vec::new(),
+                confidence: Some(0.9),
+            }),
+        }),
+    );
+    assert_eq!(memory["status"], "completed");
+    let search = run_json_cli(
+        root.clone(),
+        Command::Memory(MemoryArgs {
+            command: MemoryCommand::Search(MemorySearchArgs {
+                session_id: session_id.clone(),
+                query: "canonical jsonl".to_string(),
+                limit: 3,
+            }),
+        }),
+    );
+    assert_eq!(search.as_array().unwrap().len(), 1);
+
+    let artifact = run_json_cli(
+        root.clone(),
+        Command::Artifact(ArtifactArgs {
+            command: ArtifactCommand::Create(ArtifactCreateArgs {
+                session_id: session_id.clone(),
+                uri: "artifact://notes.md".to_string(),
+                kind: "markdown".to_string(),
+                task_id: Some(task_id),
+                run_id: Some(run_id.clone()),
+            }),
+        }),
+    );
+    assert_eq!(artifact["kind"], "markdown");
+
+    let subagent = run_json_cli(
+        root.clone(),
+        Command::Subagent(SubagentArgs {
+            command: SubagentCommand::Spawn(SubagentSpawnArgs {
+                session_id: session_id.clone(),
+                run_id: run_id.clone(),
+                lane: "research".to_string(),
+                goal: "Map resources".to_string(),
+                subagent_id: Some("researcher".to_string()),
+                isolation: CliIsolationMode::Worktree,
+                context_refs: vec!["event://1".to_string()],
+                toolsets: vec!["filesystem".to_string()],
+                max_turns: Some(2),
+                max_tool_calls: None,
+                max_tokens: None,
+            }),
+        }),
+    );
+    assert_eq!(subagent["subagent_id"], "researcher");
+    run_json_cli(
+        root.clone(),
+        Command::Subagent(SubagentArgs {
+            command: SubagentCommand::Complete(SubagentCompleteArgs {
+                session_id: session_id.clone(),
+                subagent_id: "researcher".to_string(),
+                summary: Some("done".to_string()),
+                artifact_refs: vec!["artifact://notes.md".to_string()],
+                usage_json: None,
+            }),
+        }),
+    );
+
+    let completed_run = run_json_cli(
+        root.clone(),
+        Command::Run(RunArgs {
+            command: RunCommand::Complete(RunCompleteArgs {
+                session_id: session_id.clone(),
+                run_id: run_id.clone(),
+                usage_json: Some(r#"{"tokens":1}"#.to_string()),
+                stop_reason: Some("test".to_string()),
+            }),
+        }),
+    );
+    assert_eq!(completed_run["status"], "completed");
+
+    let snapshot = run_json_cli(
+        root.clone(),
+        Command::Snapshot(SnapshotArgs {
+            command: SnapshotCommand::Write(SnapshotWriteArgs {
+                session_id: session_id.clone(),
+            }),
+        }),
+    );
+    assert!(snapshot["latest_seq"].as_u64().unwrap() > 1);
+
+    let projection = control.projection(&session.session_id).unwrap();
+    assert_eq!(projection.tool_calls.len(), 1);
+    assert_eq!(
+        projection.tasks.values().next().unwrap().status,
+        LifecycleStatus::Completed
+    );
+    assert_eq!(
+        projection.memories.values().next().unwrap().status,
+        LifecycleStatus::Completed
+    );
+    assert_eq!(projection.artifacts.len(), 1);
+    assert_eq!(
+        projection.subagents["researcher"].status,
+        LifecycleStatus::Completed
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ask_records_one_shot_model_turn() {
+    let root = temp_root("ask");
+    let cli = test_cli(
+        root.clone(),
+        Command::Ask(AskArgs {
+            session_id: None,
+            text: "hello ask".to_string(),
+            cwd: None,
+            title: Some("Ask".to_string()),
+            system_prompt: None,
+            system_prompt_file: None,
+            agent: None,
+            model: None,
+            model_provider: Some(CliModelProvider::Local),
+            model_base_url: None,
+            model_api_key_env: None,
+            model_command: None,
+            permission_mode: CliPermissionMode::Default,
+            model_timeout_ms: 30_000,
+            model_max_response_bytes: 1_048_576,
+            model_max_stdout_bytes: 1_048_576,
+            model_max_stderr_bytes: 65_536,
+        }),
+    );
+    let mut out = Vec::new();
+    execute(cli, &mut out).unwrap();
+
+    let response: Value = serde_json::from_slice(&out).unwrap();
+    assert!(response["text"]
+        .as_str()
+        .unwrap()
+        .contains("local assistant"));
+    let session_id = response["session_id"].as_str().unwrap();
+    let projection = ControlPlane::new(&root)
+        .projection(&essence_core::SessionId(
+            Uuid::parse_str(session_id).unwrap(),
+        ))
+        .unwrap();
+    assert_eq!(projection.messages.len(), 2);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(all(feature = "mcp", feature = "gitnexus"))]
+#[test]
+fn plugin_mcp_harness_and_theme_commands_are_scriptable() {
+    let root = temp_root("plugin-mcp-harness-theme");
+
+    let install = run_json_cli(
+        root.clone(),
+        Command::Plugin(PluginArgs {
+            command: PluginCommand::Install(PluginInstallArgs {
+                id: "memory-index".to_string(),
+            }),
+        }),
+    );
+    assert_eq!(install["plugin"]["id"], "memory-index");
+
+    let tools = run_json_cli(
+        root.clone(),
+        Command::Plugin(PluginArgs {
+            command: PluginCommand::Tools(PluginToolsArgs {}),
+        }),
+    );
+    assert!(tools
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|tool| tool["name"] == "essence.memory_search"));
+
+    let manifest = run_json_cli(
+        root.clone(),
+        Command::Mcp(McpArgs {
+            command: McpCommand::Manifest(McpManifestArgs {}),
+        }),
+    );
+    assert_eq!(manifest["server_name"], "essence");
+
+    let dry = dry_cli(
+        root.clone(),
+        Command::Harness(HarnessArgs {
+            command: HarnessCommand::Run(HarnessRunArgs {
+                harness: "gitnexus".to_string(),
+                session_id: Uuid::new_v4().to_string(),
+                tool: "gitnexus.query".to_string(),
+                input_json: r#"{"query":"ControlPlane"}"#.to_string(),
+                run_id: None,
+                cwd: None,
+                permission_mode: CliPermissionMode::Default,
+            }),
+        }),
+    );
+    let mut out = Vec::new();
+    execute(dry, &mut out).unwrap();
+    assert!(String::from_utf8(out).unwrap().contains("dry run"));
+
+    let pixel = Cli {
+        root: root.clone(),
+        output: CliOutputFormat::Text,
+        json: false,
+        quiet: false,
+        verbose: 0,
+        dry_run: false,
+        theme: CliTheme::Pixel,
+        no_color: true,
+        version: false,
+        command: Command::Theme(ThemeArgs {
+            command: ThemeCommand::Preview(ThemePreviewArgs {
+                theme: Some(CliTheme::Pixel),
+            }),
+        }),
+    };
+    let mut out = Vec::new();
+    execute(pixel, &mut out).unwrap();
+    assert!(String::from_utf8(out).unwrap().contains("+"));
+
+    let json_clean = run_json_cli(
+        root.clone(),
+        Command::Theme(ThemeArgs {
+            command: ThemeCommand::Get(ThemeGetArgs {}),
+        }),
+    );
+    assert!(json_clean.get("theme").is_some());
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn chat_records_turns_and_renders_office_board() {
     let root = temp_root("chat");
     let control = ControlPlane::new(&root);
@@ -1178,6 +1501,13 @@ fn temp_root(label: &str) -> PathBuf {
     std::env::temp_dir().join(format!("essence-cli-{label}-{}", Uuid::new_v4()))
 }
 
+fn run_json_cli(root: PathBuf, command: Command) -> Value {
+    let cli = test_cli(root, command);
+    let mut out = Vec::new();
+    execute(cli, &mut out).unwrap();
+    serde_json::from_slice(&out).unwrap()
+}
+
 fn test_cli(root: PathBuf, command: Command) -> Cli {
     Cli {
         root,
@@ -1186,6 +1516,8 @@ fn test_cli(root: PathBuf, command: Command) -> Cli {
         quiet: false,
         verbose: 0,
         dry_run: false,
+        theme: CliTheme::Plain,
+        no_color: true,
         version: false,
         command,
     }
@@ -1199,6 +1531,8 @@ fn text_cli(root: PathBuf, command: Command) -> Cli {
         quiet: false,
         verbose: 0,
         dry_run: false,
+        theme: CliTheme::Plain,
+        no_color: true,
         version: false,
         command,
     }
@@ -1212,6 +1546,8 @@ fn dry_cli(root: PathBuf, command: Command) -> Cli {
         quiet: false,
         verbose: 0,
         dry_run: true,
+        theme: CliTheme::Plain,
+        no_color: true,
         version: false,
         command,
     }

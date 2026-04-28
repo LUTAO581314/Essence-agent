@@ -77,6 +77,51 @@ pub(crate) fn brand_header(title: &str, subtitle: &str, color: bool) -> String {
     output
 }
 
+pub(crate) fn panel(title: &str, subtitle: &str, body: &str, color: bool) -> String {
+    let mut output = brand_header(title, subtitle, color);
+    for line in body.lines() {
+        let _ = writeln!(output, "{}", row(color, line));
+    }
+    if body.is_empty() {
+        let _ = writeln!(output, "{}", row(color, ""));
+    }
+    let _ = writeln!(output, "{}", top(color));
+    output
+}
+
+pub(crate) fn table(
+    title: &str,
+    subtitle: &str,
+    headers: &[&str],
+    rows: &[Vec<String>],
+    color: bool,
+) -> String {
+    let mut output = brand_header(title, subtitle, color);
+    let header = headers.join("  ");
+    let _ = writeln!(output, "{}", row(color, header));
+    let _ = writeln!(output, "{}", mid(color));
+    if rows.is_empty() {
+        let _ = writeln!(
+            output,
+            "{}",
+            row(
+                color,
+                format!("{}empty{}", style(color, "dim"), reset(color))
+            )
+        );
+    } else {
+        for cells in rows {
+            let _ = writeln!(output, "{}", row(color, cells.join("  ")));
+        }
+    }
+    let _ = writeln!(output, "{}", top(color));
+    output
+}
+
+pub(crate) fn error_panel(message: &str, color: bool) -> String {
+    panel("ESSENCE ERROR", "command failed", message, color)
+}
+
 pub(crate) fn pixel_flow(color: bool) -> String {
     let moon = style(color, "moon");
     let ice = style(color, "ice");

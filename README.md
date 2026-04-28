@@ -191,17 +191,33 @@ Each archive includes the binary, README, LICENSE, and a SHA-256 checksum file.
 
 ## CLI
 
-There is now a minimal `essence` CLI over the local control plane. It writes
-runtime data to `.essence/` by default and can be pointed elsewhere with
-`--root`.
+There is now a v0 `essence` CLI over the local control plane. It writes runtime
+data to `.essence/` by default and can be pointed elsewhere with `--root`.
 
 ```bash
 cargo run -p essence-core --bin essence -- session create --title "First session"
-cargo run -p essence-core --bin essence -- session create --title "First session" --json
+cargo run -p essence-core --bin essence -- session list
+cargo run -p essence-core --bin essence -- session show --session-id <session-id> --projection --json
+cargo run -p essence-core --bin essence -- ask --text "Build the next layer"
 cargo run -p essence-core --bin essence -- message send --session-id <session-id> --text "Build the next layer" --json
+cargo run -p essence-core --bin essence -- run start --session-id <session-id> --json
+cargo run -p essence-core --bin essence -- tool specs --plugins
+cargo run -p essence-core --bin essence -- tool run --session-id <session-id> --name essence.fs.list --input-json '{"path":"."}'
 cargo run -p essence-core --bin essence -- events tail --session-id <session-id> --user-visible --output jsonl
+cargo run -p essence-core --bin essence -- task claim --session-id <session-id> --assignee researcher
+cargo run -p essence-core --bin essence -- memory remember --session-id <session-id> --kind decision --text "JSONL is canonical."
+cargo run -p essence-core --bin essence -- memory search --session-id <session-id> --query canonical
+cargo run -p essence-core --bin essence -- artifact create --session-id <session-id> --uri artifact://notes.md --kind markdown
+cargo run -p essence-core --bin essence -- subagent list --session-id <session-id>
+cargo run -p essence-core --bin essence -- snapshot write --session-id <session-id>
 cargo run -p essence-core --bin essence -- approval pending --session-id <session-id>
 cargo run -p essence-core --bin essence -- approval resolve --session-id <session-id> --approval-id <approval-id> --decision deny
+cargo run -p essence-core --bin essence -- plugin catalog
+cargo run -p essence-core --bin essence -- plugin install --id memory-index
+cargo run -p essence-core --bin essence -- mcp manifest --json
+cargo run -p essence-core --bin essence -- harness list
+cargo run -p essence-core --bin essence -- theme set pixel
+cargo run -p essence-core --bin essence -- theme preview pixel
 cargo run -p essence-core --bin essence -- config set model your-model-name
 cargo run -p essence-core --bin essence -- config get
 cargo run -p essence-core --bin essence -- doctor --strict
@@ -213,11 +229,11 @@ The Rust CI gate runs formatting, strict clippy, and tests on Ubuntu, Windows,
 and macOS. macOS support is therefore a compatibility target, not only a best
 effort path.
 
-By default, data commands print compact human-readable text. Use `--json` for
-single structured responses, `--output jsonl` for event streams, `--quiet` for
-primary ids or status only, and `-v`/`--version` for the CLI version. Mutating
-commands accept global `--dry-run` to preview the write without changing
-`.essence/` state or installing files.
+By default, data commands print compact human-readable text. Use `--theme
+auto|pixel|plain` to choose the text renderer and `--no-color` to disable ANSI
+color. `--json`, `--output jsonl`, and `--quiet` remain machine-readable and do
+not include pixel UI framing. Mutating commands accept global `--dry-run` to
+preview the write without changing `.essence/` state or installing files.
 
 ## API Compatibility
 

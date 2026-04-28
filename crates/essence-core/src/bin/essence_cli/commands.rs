@@ -1,31 +1,47 @@
 use std::fmt::Write as FmtWrite;
+use std::fs;
 use std::io::{IsTerminal, Write};
 use std::thread;
 use std::time::Duration;
 
 use essence_core::{
-    AgentHeartbeatRequest, ApprovalRequest, ControlPlane, CreateSessionRequest, CreateTaskRequest,
-    EventCursor, EventEnvelope, RegisterAgentRequest, SessionMeta, UiEvent, WalIntegrityReport,
+    basic_plugin_catalog, builtin_tool_specs, AgentHeartbeatRequest, AgentId, ApprovalDecision,
+    ApprovalRequest, ArtifactRecord, BuiltinToolApprovalOutcome, BuiltinToolExecutor,
+    BuiltinToolOutcome, BuiltinToolRequest, CliHarnessManifest, ControlPlane,
+    CreateArtifactRequest, CreateSessionRequest, CreateTaskRequest, EventCursor, EventEnvelope,
+    LaneId, LedgerProjection, LifecycleStatus, MemoryIndex, MemoryRecord, PermissionMode,
+    PluginHost, PluginKind, PluginManifest, PolicyBoundCliHarness, ProposeMemoryRequest,
+    RecordedCliHarnessApprovalOutcome, RecordedCliHarnessOutcome, RegisterAgentRequest,
+    RequestApprovalRequest, RunMeta, SessionMeta, SessionStatePatch, SpawnSubagentRequest,
+    StartRunRequest, StartToolCallRequest, SteerSubagentRequest, SubagentBudget, SubagentMeta,
+    SubagentResult, TaskPatch, TaskRecord, ToolCallRecord, UiEvent, WalIntegrityReport,
 };
-use serde::Serialize;
-use serde_json::json;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 
 use super::agency_templates::{find_agent_template, search_agent_templates, AgencyAgentTemplate};
 use super::agent_profile::{list_agent_profiles, write_agent_profile, StoredAgentProfile};
 use super::args::{
     AgentArgs, AgentCommand, AgentDefineArgs, AgentTemplatesArgs, ApprovalArgs, ApprovalCommand,
-    CliApprovalDecision, CliConfigKey, ConfigArgs, ConfigCommand, DoctorArgs, EventsArgs,
-    EventsCommand, MessageArgs, MessageCommand, SessionArgs, SessionCommand, TaskArgs, TaskCommand,
+    ArtifactArgs, ArtifactCommand, CliApprovalDecision, CliConfigKey, CliPluginKind, CliTheme,
+    ConfigArgs, ConfigCommand, DoctorArgs, EventsArgs, EventsCommand, HarnessArgs, HarnessCommand,
+    McpArgs, McpCommand, MemoryArgs, MemoryCommand, MessageArgs, MessageCommand, PluginArgs,
+    PluginCommand, RunArgs, RunCommand, SessionArgs, SessionCommand, SnapshotArgs, SnapshotCommand,
+    SubagentArgs, SubagentCommand, TaskArgs, TaskCommand, ThemeArgs, ThemeCommand, ToolArgs,
+    ToolCommand,
 };
 use super::model_config::{
     model_config_path, non_empty, read_model_config, write_model_config, StoredModelConfig,
 };
-use super::pixel_ui::{brand_header, key_value, mid, reset, row, status_chip, style};
+use super::pixel_ui::{
+    brand_header, error_panel, key_value, mid, panel, reset, row, status_chip, style, table,
+};
 use super::setup::provider_slug;
 use super::support::{
-    anchor_key_from_env, emit_events, emit_ui_events, parse_approval_id, parse_run_id,
-    parse_session_id, parse_task_id, path_to_string, write_json_line, write_json_pretty,
-    write_text_line, CliError, OutputMode,
+    anchor_key_from_env, emit_events, emit_ui_events, parse_approval_id, parse_artifact_id,
+    parse_event_id, parse_memory_id, parse_run_id, parse_session_id, parse_task_id,
+    parse_tool_call_id, path_to_string, write_json_line, write_json_pretty, write_text_line,
+    CliError, OutputMode,
 };
 
 fn write_output<T: Serialize>(
@@ -41,6 +57,13 @@ fn write_output<T: Serialize>(
         write_json_line(writer, value)
     } else if output.quiet {
         write_text_line(writer, quiet_text)
+    } else if output.is_pixel() {
+        let rendered = if quiet_text == "failed" {
+            error_panel(&text, output.color)
+        } else {
+            panel("ESSENCE CLI", "local control plane", &text, output.color)
+        };
+        write_text_line(writer, rendered)
     } else {
         write_text_line(writer, text)
     }
@@ -67,6 +90,40 @@ fn write_dry_run(
     )
 }
 
+fn parse_json_arg(raw: &str, name: &str) -> Result<Value, CliError> {
+    serde_json::from_str(raw)
+        .map_err(|error| CliError::Usage(format!("{name} must be valid JSON: {error}")))
+}
+
+fn parse_optional_json_arg(raw: Option<String>, name: &str) -> Result<Option<Value>, CliError> {
+    raw.map(|value| parse_json_arg(&value, name)).transpose()
+}
+
+fn write_list_output<T: Serialize>(
+    writer: &mut impl Write,
+    output: OutputMode,
+    values: &[T],
+    text: String,
+) -> Result<(), CliError> {
+    if output.is_pixel() {
+        let rows = text
+            .lines()
+            .map(|line| vec![line.to_string()])
+            .collect::<Vec<_>>();
+        return write_text_line(
+            writer,
+            table(
+                "ESSENCE CLI",
+                "local control plane",
+                &["items"],
+                &rows,
+                output.color,
+            ),
+        );
+    }
+    write_output(writer, output, &values, text, values.len().to_string())
+}
+
 fn render_session_created(session: &SessionMeta, output: OutputMode) -> String {
     let mut text = format!(
         "created session {}\ncwd: {}\nmode: {}\npermission: {}",
@@ -82,6 +139,153 @@ fn render_session_created(session: &SessionMeta, output: OutputMode) -> String {
         let _ = write!(text, "\ntranscript: {}", session.transcript_uri);
     }
     text
+}
+
+fn render_session_summary(session: &SessionMeta) -> String {
+    format!(
+        "{}  {}  {}",
+        session.session_id.0,
+        json_name(&session.status),
+        session.title.as_deref().unwrap_or("(untitled)")
+    )
+}
+
+fn render_sessions(sessions: &[SessionMeta]) -> String {
+    if sessions.is_empty() {
+        return "no sessions".to_string();
+    }
+    sessions
+        .iter()
+        .map(render_session_summary)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn render_session_state(patch: &SessionStatePatch) -> String {
+    let mut text = format!("session is {}", json_name(&patch.status));
+    if let Some(title) = &patch.title {
+        let _ = write!(text, "\ntitle: {title}");
+    }
+    text
+}
+
+fn render_runs(runs: &[RunMeta]) -> String {
+    if runs.is_empty() {
+        return "no runs".to_string();
+    }
+    runs.iter()
+        .map(|run| {
+            format!(
+                "{}  {}  {}",
+                run.run_id.0,
+                json_name(&run.status),
+                json_name(&run.trigger)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn render_tool_calls(tool_calls: &[ToolCallRecord]) -> String {
+    if tool_calls.is_empty() {
+        return "no tool calls".to_string();
+    }
+    tool_calls
+        .iter()
+        .map(|tool_call| {
+            format!(
+                "{}  {}  {}",
+                tool_call.tool_call_id.0,
+                json_name(&tool_call.status),
+                tool_call.name
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn render_tasks(tasks: &[TaskRecord]) -> String {
+    if tasks.is_empty() {
+        return "no tasks".to_string();
+    }
+    tasks
+        .iter()
+        .map(|task| {
+            let lane = task
+                .lane_id
+                .as_ref()
+                .map(|lane| lane.0.as_str())
+                .unwrap_or("-");
+            let assignee = task
+                .assignee
+                .as_ref()
+                .map(|agent| agent.0.as_str())
+                .unwrap_or("-");
+            format!(
+                "{}  {}  {}  {}  {}",
+                task.task_id.0,
+                json_name(&task.status),
+                lane,
+                assignee,
+                task.title
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn render_artifacts(artifacts: &[essence_core::ArtifactRecord]) -> String {
+    if artifacts.is_empty() {
+        return "no artifacts".to_string();
+    }
+    artifacts
+        .iter()
+        .map(|artifact| {
+            format!(
+                "{}  {}  {}",
+                artifact.artifact_id.0, artifact.kind, artifact.uri
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn render_memories(memories: &[MemoryRecord]) -> String {
+    if memories.is_empty() {
+        return "no memories".to_string();
+    }
+    memories
+        .iter()
+        .map(|memory| {
+            format!(
+                "{}  {}  {}  {}",
+                memory.memory_id.0,
+                json_name(&memory.status),
+                memory.kind,
+                super::pixel_ui::truncate(&memory.text, 72)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn render_subagents(subagents: &[SubagentMeta]) -> String {
+    if subagents.is_empty() {
+        return "no subagents".to_string();
+    }
+    subagents
+        .iter()
+        .map(|subagent| {
+            format!(
+                "{}  {}  {}  {}",
+                subagent.subagent_id.0,
+                json_name(&subagent.status),
+                subagent.lane_id.0,
+                subagent.goal
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn emit_event_summaries(
@@ -181,6 +385,181 @@ fn cli_approval_decision_name(value: CliApprovalDecision) -> &'static str {
     }
 }
 
+const THEME_FILE: &str = "theme.json";
+const PLUGINS_FILE: &str = "plugins.json";
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct StoredTheme {
+    theme: Option<CliTheme>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct StoredPlugins {
+    #[serde(default)]
+    installed: Vec<String>,
+}
+
+pub(crate) fn configured_theme(root: &std::path::Path) -> Option<CliTheme> {
+    fs::read_to_string(root.join(THEME_FILE))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<StoredTheme>(&raw).ok())
+        .and_then(|stored| stored.theme)
+}
+
+fn write_theme(root: &std::path::Path, theme: CliTheme) -> Result<std::path::PathBuf, CliError> {
+    fs::create_dir_all(root)?;
+    let path = root.join(THEME_FILE);
+    let encoded = serde_json::to_vec_pretty(&StoredTheme { theme: Some(theme) })?;
+    fs::write(&path, encoded)?;
+    Ok(path)
+}
+
+fn read_plugins(root: &std::path::Path) -> Result<StoredPlugins, CliError> {
+    let path = root.join(PLUGINS_FILE);
+    if !path.exists() {
+        return Ok(StoredPlugins::default());
+    }
+    Ok(serde_json::from_str(&fs::read_to_string(path)?)?)
+}
+
+fn write_plugins(
+    root: &std::path::Path,
+    plugins: &StoredPlugins,
+) -> Result<std::path::PathBuf, CliError> {
+    fs::create_dir_all(root)?;
+    let path = root.join(PLUGINS_FILE);
+    fs::write(&path, serde_json::to_vec_pretty(plugins)?)?;
+    Ok(path)
+}
+
+fn installed_plugin_manifests(root: &std::path::Path) -> Result<Vec<PluginManifest>, CliError> {
+    let catalog = basic_plugin_catalog();
+    read_plugins(root)?
+        .installed
+        .iter()
+        .map(|id| catalog.plugin(id).cloned().map_err(CliError::from))
+        .collect()
+}
+
+fn plugin_kind_matches(plugin: &PluginManifest, kind: CliPluginKind) -> bool {
+    matches!(
+        (kind, &plugin.kind),
+        (CliPluginKind::ToolProvider, PluginKind::ToolProvider)
+            | (CliPluginKind::CliHarness, PluginKind::CliHarness)
+            | (CliPluginKind::BrowserDaemon, PluginKind::BrowserDaemon)
+            | (CliPluginKind::ResearchRadar, PluginKind::ResearchRadar)
+            | (CliPluginKind::MemoryBackend, PluginKind::MemoryBackend)
+            | (CliPluginKind::UiShell, PluginKind::UiShell)
+            | (CliPluginKind::RolePack, PluginKind::RolePack)
+    )
+}
+
+fn list_sessions(control: &ControlPlane) -> Result<Vec<SessionMeta>, CliError> {
+    let sessions_dir = control.root().join("sessions");
+    if !sessions_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut sessions = Vec::new();
+    for entry in fs::read_dir(sessions_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        let Ok(session_id) = parse_session_id(stem) else {
+            continue;
+        };
+        let projection = control.projection(&session_id)?;
+        if let Some(session) = projection.session {
+            sessions.push(session);
+        }
+    }
+    sessions.sort_by_key(|session| session.created_at);
+    Ok(sessions)
+}
+
+fn projection_session(
+    projection: &LedgerProjection,
+    raw_session_id: &str,
+) -> Result<SessionMeta, CliError> {
+    projection
+        .session
+        .clone()
+        .ok_or_else(|| CliError::MissingSession(raw_session_id.to_string()))
+}
+
+fn projection_run(projection: &LedgerProjection, raw_run_id: &str) -> Result<RunMeta, CliError> {
+    let run_id = parse_run_id(raw_run_id)?;
+    projection
+        .runs
+        .get(&run_id)
+        .cloned()
+        .ok_or_else(|| CliError::MissingRun(raw_run_id.to_string()))
+}
+
+fn projection_tool_call(
+    projection: &LedgerProjection,
+    raw_tool_call_id: &str,
+) -> Result<ToolCallRecord, CliError> {
+    let tool_call_id = parse_tool_call_id(raw_tool_call_id)?;
+    projection
+        .tool_calls
+        .get(&tool_call_id)
+        .cloned()
+        .ok_or_else(|| CliError::MissingToolCall(raw_tool_call_id.to_string()))
+}
+
+fn projection_task(
+    projection: &LedgerProjection,
+    raw_task_id: &str,
+) -> Result<TaskRecord, CliError> {
+    let task_id = parse_task_id(raw_task_id)?;
+    projection
+        .tasks
+        .get(&task_id)
+        .cloned()
+        .ok_or_else(|| CliError::MissingTask(raw_task_id.to_string()))
+}
+
+fn projection_artifact(
+    projection: &LedgerProjection,
+    raw_artifact_id: &str,
+) -> Result<ArtifactRecord, CliError> {
+    let artifact_id = parse_artifact_id(raw_artifact_id)?;
+    projection
+        .artifacts
+        .get(&artifact_id)
+        .cloned()
+        .ok_or_else(|| CliError::MissingArtifact(raw_artifact_id.to_string()))
+}
+
+fn projection_memory(
+    projection: &LedgerProjection,
+    raw_memory_id: &str,
+) -> Result<MemoryRecord, CliError> {
+    let memory_id = parse_memory_id(raw_memory_id)?;
+    projection
+        .memories
+        .get(&memory_id)
+        .cloned()
+        .ok_or_else(|| CliError::MissingMemory(raw_memory_id.to_string()))
+}
+
+fn projection_subagent(
+    projection: &LedgerProjection,
+    raw_subagent_id: &str,
+) -> Result<SubagentMeta, CliError> {
+    projection
+        .subagents
+        .get(raw_subagent_id)
+        .cloned()
+        .ok_or_else(|| CliError::MissingSubagent(raw_subagent_id.to_string()))
+}
+
 pub(crate) fn execute_session(
     control: &ControlPlane,
     args: SessionArgs,
@@ -219,6 +598,81 @@ pub(crate) fn execute_session(
                 session.session_id.0.to_string(),
             )
         }
+        SessionCommand::List(args) => {
+            let mut sessions = list_sessions(control)?;
+            if let Some(status) = args.status {
+                let status: LifecycleStatus = status.into();
+                sessions.retain(|session| session.status == status);
+            }
+            write_list_output(writer, output, &sessions, render_sessions(&sessions))
+        }
+        SessionCommand::Show(args) => {
+            let session_id = parse_session_id(&args.session_id)?;
+            let projection = control.projection(&session_id)?;
+            if args.projection {
+                write_output(
+                    writer,
+                    output,
+                    &projection,
+                    format!(
+                        "projection {}: {} messages, {} tasks, {} runs",
+                        session_id.0,
+                        projection.messages.len(),
+                        projection.tasks.len(),
+                        projection.runs.len()
+                    ),
+                    projection.latest_seq.to_string(),
+                )
+            } else {
+                let session = projection_session(&projection, &args.session_id)?;
+                write_output(
+                    writer,
+                    output,
+                    &session,
+                    render_session_created(&session, output),
+                    session.session_id.0.to_string(),
+                )
+            }
+        }
+        SessionCommand::Update(args) => {
+            let session_id = parse_session_id(&args.session_id)?;
+            let status: LifecycleStatus = args.status.into();
+            if output.dry_run {
+                return write_dry_run(
+                    writer,
+                    output,
+                    "session.update",
+                    format!("update session {} to {}", session_id.0, json_name(&status)),
+                );
+            }
+            let patch = control.update_session_state(&session_id, status, args.title)?;
+            write_output(
+                writer,
+                output,
+                &patch,
+                render_session_state(&patch),
+                json_name(&patch.status),
+            )
+        }
+        SessionCommand::Cancel(args) => {
+            let session_id = parse_session_id(&args.session_id)?;
+            if output.dry_run {
+                return write_dry_run(
+                    writer,
+                    output,
+                    "session.cancel",
+                    format!("cancel session {}", session_id.0),
+                );
+            }
+            let patch = control.cancel_session(&session_id)?;
+            write_output(
+                writer,
+                output,
+                &patch,
+                render_session_state(&patch),
+                json_name(&patch.status),
+            )
+        }
     }
 }
 
@@ -249,6 +703,128 @@ pub(crate) fn execute_message(
                     event.event_id.0, event.seq
                 ),
                 event.event_id.0.to_string(),
+            )
+        }
+    }
+}
+
+pub(crate) fn execute_run(
+    control: &ControlPlane,
+    args: RunArgs,
+    output: OutputMode,
+    writer: &mut impl Write,
+) -> Result<(), CliError> {
+    match args.command {
+        RunCommand::Start(args) => {
+            let session_id = parse_session_id(&args.session_id)?;
+            let mut request = StartRunRequest::user(session_id.clone());
+            request.trigger = args.trigger.into();
+            request.parent_run_id = args
+                .parent_run_id
+                .as_deref()
+                .map(parse_run_id)
+                .transpose()?;
+            request.lane_id = args.lane.map(LaneId);
+            request.agent_id = args.agent_id.map(AgentId);
+            request.model = args.model;
+            request.input_message_ids = args
+                .input_events
+                .iter()
+                .map(|event_id| parse_event_id(event_id))
+                .collect::<Result<Vec<_>, _>>()?;
+            if output.dry_run {
+                return write_dry_run(
+                    writer,
+                    output,
+                    "run.start",
+                    format!("start run for session {}", session_id.0),
+                );
+            }
+            let run = control.start_run(request)?;
+            write_output(
+                writer,
+                output,
+                &run,
+                format!("started run {} ({})", run.run_id.0, json_name(&run.trigger)),
+                run.run_id.0.to_string(),
+            )
+        }
+        RunCommand::List(args) => {
+            let session_id = parse_session_id(&args.session_id)?;
+            let projection = control.projection(&session_id)?;
+            let mut runs = projection.runs.values().cloned().collect::<Vec<_>>();
+            if let Some(status) = args.status {
+                let status: LifecycleStatus = status.into();
+                runs.retain(|run| run.status == status);
+            }
+            runs.sort_by_key(|run| run.started_at);
+            write_list_output(writer, output, &runs, render_runs(&runs))
+        }
+        RunCommand::Complete(args) => {
+            let session_id = parse_session_id(&args.session_id)?;
+            let projection = control.projection(&session_id)?;
+            let run = projection_run(&projection, &args.run_id)?;
+            let usage = parse_optional_json_arg(args.usage_json, "--usage-json")?;
+            if output.dry_run {
+                return write_dry_run(
+                    writer,
+                    output,
+                    "run.complete",
+                    format!("complete run {}", run.run_id.0),
+                );
+            }
+            let completed = match args.stop_reason {
+                Some(stop_reason) => {
+                    control.complete_run_with_stop_reason(&run, usage, stop_reason)?
+                }
+                None => control.complete_run(&run, usage)?,
+            };
+            write_output(
+                writer,
+                output,
+                &completed,
+                format!("completed run {}", completed.run_id.0),
+                json_name(&completed.status),
+            )
+        }
+        RunCommand::Fail(args) => {
+            let session_id = parse_session_id(&args.session_id)?;
+            let run = projection_run(&control.projection(&session_id)?, &args.run_id)?;
+            if output.dry_run {
+                return write_dry_run(
+                    writer,
+                    output,
+                    "run.fail",
+                    format!("fail run {}", run.run_id.0),
+                );
+            }
+            let failed = control.fail_run(&run, args.reason)?;
+            write_output(
+                writer,
+                output,
+                &failed,
+                format!("failed run {}", failed.run_id.0),
+                json_name(&failed.status),
+            )
+        }
+        RunCommand::Cancel(args) => {
+            let session_id = parse_session_id(&args.session_id)?;
+            let run = projection_run(&control.projection(&session_id)?, &args.run_id)?;
+            if output.dry_run {
+                return write_dry_run(
+                    writer,
+                    output,
+                    "run.cancel",
+                    format!("cancel run {}", run.run_id.0),
+                );
+            }
+            let cancelled = control.cancel_run(&run, args.reason)?;
+            write_output(
+                writer,
+                output,
+                &cancelled,
+                format!("cancelled run {}", cancelled.run_id.0),
+                json_name(&cancelled.status),
             )
         }
     }
@@ -366,6 +942,334 @@ pub(crate) fn execute_events(
     }
 }
 
+fn builtin_tool_outcome_value(outcome: BuiltinToolOutcome) -> (Value, String, String) {
+    match outcome {
+        BuiltinToolOutcome::Executed { tool_call, output } => {
+            let text = format!("executed tool {}", tool_call.tool_call_id.0);
+            (
+                json!({"status": "executed", "tool_call": tool_call, "output": output}),
+                text,
+                "executed".to_string(),
+            )
+        }
+        BuiltinToolOutcome::RequiresApproval {
+            tool_call,
+            approval,
+        } => {
+            let text = format!(
+                "tool {} requires approval {}",
+                tool_call.tool_call_id.0, approval.approval_id.0
+            );
+            (
+                json!({
+                    "status": "requires_approval",
+                    "tool_call": tool_call,
+                    "approval": approval
+                }),
+                text,
+                "requires-approval".to_string(),
+            )
+        }
+        BuiltinToolOutcome::Denied { tool_call, reason } => {
+            let text = format!("denied tool {}: {reason}", tool_call.tool_call_id.0);
+            (
+                json!({"status": "denied", "tool_call": tool_call, "reason": reason}),
+                text,
+                "denied".to_string(),
+            )
+        }
+        BuiltinToolOutcome::Failed { tool_call, reason } => {
+            let text = format!("failed tool {}: {reason}", tool_call.tool_call_id.0);
+            (
+                json!({"status": "failed", "tool_call": tool_call, "reason": reason}),
+                text,
+                "failed".to_string(),
+            )
+        }
+    }
+}
+
+fn builtin_approval_outcome_value(outcome: BuiltinToolApprovalOutcome) -> (Value, String, String) {
+    match outcome {
+        BuiltinToolApprovalOutcome::Executed {
+            approval,
+            tool_call,
+            output,
+        } => (
+            json!({
+                "status": "executed",
+                "approval": approval,
+                "tool_call": tool_call,
+                "output": output
+            }),
+            "resolved approval and executed tool".to_string(),
+            "executed".to_string(),
+        ),
+        BuiltinToolApprovalOutcome::Denied {
+            approval,
+            tool_call,
+            reason,
+        } => (
+            json!({
+                "status": "denied",
+                "approval": approval,
+                "tool_call": tool_call,
+                "reason": reason
+            }),
+            "resolved approval and denied tool".to_string(),
+            "denied".to_string(),
+        ),
+        BuiltinToolApprovalOutcome::Failed {
+            approval,
+            tool_call,
+            reason,
+        } => (
+            json!({
+                "status": "failed",
+                "approval": approval,
+                "tool_call": tool_call,
+                "reason": reason
+            }),
+            "resolved approval but tool failed".to_string(),
+            "failed".to_string(),
+        ),
+    }
+}
+
+fn cli_harness_outcome_value(outcome: RecordedCliHarnessOutcome) -> (Value, String, String) {
+    match outcome {
+        RecordedCliHarnessOutcome::Executed {
+            tool_call,
+            command,
+            result,
+        } => (
+            json!({
+                "status": "executed",
+                "tool_call": tool_call,
+                "command": command,
+                "result": result
+            }),
+            "executed harness tool".to_string(),
+            "executed".to_string(),
+        ),
+        RecordedCliHarnessOutcome::RequiresApproval {
+            tool_call,
+            approval,
+            command,
+        } => (
+            json!({
+                "status": "requires_approval",
+                "tool_call": tool_call,
+                "approval": approval,
+                "command": command
+            }),
+            "harness tool requires approval".to_string(),
+            "requires-approval".to_string(),
+        ),
+        RecordedCliHarnessOutcome::Denied {
+            tool_call,
+            command,
+            reason,
+        } => (
+            json!({
+                "status": "denied",
+                "tool_call": tool_call,
+                "command": command,
+                "reason": reason
+            }),
+            "denied harness tool".to_string(),
+            "denied".to_string(),
+        ),
+    }
+}
+
+fn cli_harness_approval_outcome_value(
+    outcome: RecordedCliHarnessApprovalOutcome,
+) -> (Value, String, String) {
+    match outcome {
+        RecordedCliHarnessApprovalOutcome::Executed {
+            approval,
+            tool_call,
+            command,
+            result,
+        } => (
+            json!({
+                "status": "executed",
+                "approval": approval,
+                "tool_call": tool_call,
+                "command": command,
+                "result": result
+            }),
+            "resolved approval and executed harness tool".to_string(),
+            "executed".to_string(),
+        ),
+        RecordedCliHarnessApprovalOutcome::Denied {
+            approval,
+            tool_call,
+            command,
+            reason,
+        } => (
+            json!({
+                "status": "denied",
+                "approval": approval,
+                "tool_call": tool_call,
+                "command": command,
+                "reason": reason
+            }),
+            "resolved approval and denied harness tool".to_string(),
+            "denied".to_string(),
+        ),
+    }
+}
+
+fn is_builtin_tool_subject(subject: &str) -> bool {
+    builtin_tool_specs().iter().any(|tool| tool.name == subject)
+}
+
+fn is_gitnexus_tool_subject(subject: &str) -> bool {
+    subject.starts_with("gitnexus.")
+}
+
+pub(crate) fn execute_tool(
+    control: &ControlPlane,
+    args: ToolArgs,
+    output: OutputMode,
+    writer: &mut impl Write,
+) -> Result<(), CliError> {
+    match args.command {
+        ToolCommand::Specs(args) => {
+            let mut specs = builtin_tool_specs();
+            if args.plugins {
+                for plugin in installed_plugin_manifests(control.root())? {
+                    specs.extend(plugin.tools);
+                }
+            }
+            write_list_output(
+                writer,
+                output,
+                &specs,
+                if specs.is_empty() {
+                    "no tool specs".to_string()
+                } else {
+                    specs
+                        .iter()
+                        .map(|spec| format!("{}  {:?}", spec.name, spec.permission))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                },
+            )
+        }
+        ToolCommand::Start(args) => {
+            let session_id = parse_session_id(&args.session_id)?;
+            let input = parse_json_arg(&args.input_json, "--input-json")?;
+            let mut request = StartToolCallRequest::new(session_id.clone(), args.name, input);
+            if let Some(run_id) = args.run_id {
+                let run = projection_run(&control.projection(&session_id)?, &run_id)?;
+                request = request.for_run(&run);
+            }
+            if output.dry_run {
+                return write_dry_run(
+                    writer,
+                    output,
+                    "tool.start",
+                    format!("start tool call for session {}", session_id.0),
+                );
+            }
+            let tool_call = control.start_tool_call(request)?;
+            write_output(
+                writer,
+                output,
+                &tool_call,
+                format!(
+                    "started tool {} {}",
+                    tool_call.name, tool_call.tool_call_id.0
+                ),
+                tool_call.tool_call_id.0.to_string(),
+            )
+        }
+        ToolCommand::List(args) => {
+            let session_id = parse_session_id(&args.session_id)?;
+            let projection = control.projection(&session_id)?;
+            let mut tool_calls = projection.tool_calls.values().cloned().collect::<Vec<_>>();
+            if let Some(status) = args.status {
+                let status: LifecycleStatus = status.into();
+                tool_calls.retain(|tool_call| tool_call.status == status);
+            }
+            tool_calls.sort_by_key(|tool_call| tool_call.started_at);
+            write_list_output(writer, output, &tool_calls, render_tool_calls(&tool_calls))
+        }
+        ToolCommand::Complete(args) => {
+            let session_id = parse_session_id(&args.session_id)?;
+            let projection = control.projection(&session_id)?;
+            let tool_call = projection_tool_call(&projection, &args.tool_call_id)?;
+            let value = parse_json_arg(&args.output_json, "--output-json")?;
+            if output.dry_run {
+                return write_dry_run(
+                    writer,
+                    output,
+                    "tool.complete",
+                    format!("complete tool call {}", tool_call.tool_call_id.0),
+                );
+            }
+            let completed = control.complete_tool_call(&tool_call, value)?;
+            write_output(
+                writer,
+                output,
+                &completed,
+                format!("completed tool call {}", completed.tool_call_id.0),
+                json_name(&completed.status),
+            )
+        }
+        ToolCommand::Fail(args) => {
+            let session_id = parse_session_id(&args.session_id)?;
+            let projection = control.projection(&session_id)?;
+            let tool_call = projection_tool_call(&projection, &args.tool_call_id)?;
+            if output.dry_run {
+                return write_dry_run(
+                    writer,
+                    output,
+                    "tool.fail",
+                    format!("fail tool call {}", tool_call.tool_call_id.0),
+                );
+            }
+            let failed = control.fail_tool_call(&tool_call, args.error)?;
+            write_output(
+                writer,
+                output,
+                &failed,
+                format!("failed tool call {}", failed.tool_call_id.0),
+                json_name(&failed.status),
+            )
+        }
+        ToolCommand::Run(args) => {
+            let session_id = parse_session_id(&args.session_id)?;
+            let input = parse_json_arg(&args.input_json, "--input-json")?;
+            let mut request = BuiltinToolRequest::new(session_id.clone(), args.name, input);
+            if let Some(run_id) = args.run_id {
+                let run = projection_run(&control.projection(&session_id)?, &run_id)?;
+                request = request.for_run(&run);
+            }
+            if let Some(cwd) = args.cwd {
+                request = request.with_cwd(cwd);
+            }
+            if output.dry_run {
+                return write_dry_run(
+                    writer,
+                    output,
+                    "tool.run",
+                    format!("run built-in tool for session {}", session_id.0),
+                );
+            }
+            let executor = BuiltinToolExecutor::for_mode(
+                control.clone(),
+                PermissionMode::from(args.permission_mode),
+            );
+            let (value, text, quiet) = builtin_tool_outcome_value(executor.run_tool(request)?);
+            write_output(writer, output, &value, text, quiet)
+        }
+    }
+}
+
 pub(crate) fn execute_approval(
     control: &ControlPlane,
     args: ApprovalArgs,
@@ -373,6 +1277,45 @@ pub(crate) fn execute_approval(
     writer: &mut impl Write,
 ) -> Result<(), CliError> {
     match args.command {
+        ApprovalCommand::Request(args) => {
+            let session_id = parse_session_id(&args.session_id)?;
+            let input = parse_json_arg(&args.input_json, "--input-json")?;
+            let mut request =
+                RequestApprovalRequest::new(session_id.clone(), args.subject, input, args.reason);
+            if let Some(run_id) = args.run_id {
+                request = request.for_run(parse_run_id(&run_id)?);
+            }
+            if let Some(tool_call_id) = args.tool_call_id {
+                request = request.for_tool_call(parse_tool_call_id(&tool_call_id)?);
+            }
+            if let Some(cwd) = args.cwd {
+                request = request.with_cwd(cwd);
+            }
+            if !args.allowed_decisions.is_empty() {
+                request = request.with_allowed_decisions(
+                    args.allowed_decisions
+                        .into_iter()
+                        .map(ApprovalDecision::from)
+                        .collect(),
+                );
+            }
+            if output.dry_run {
+                return write_dry_run(
+                    writer,
+                    output,
+                    "approval.request",
+                    format!("request approval for session {}", session_id.0),
+                );
+            }
+            let approval = control.request_approval(request)?;
+            write_output(
+                writer,
+                output,
+                &approval,
+                format!("requested approval {}", approval.approval_id.0),
+                approval.approval_id.0.to_string(),
+            )
+        }
         ApprovalCommand::Pending(args) => {
             let session_id = parse_session_id(&args.session_id)?;
             let approvals = control.pending_approvals(&session_id)?;
@@ -404,6 +1347,23 @@ pub(crate) fn execute_approval(
                 .approvals
                 .get(&approval_id)
                 .ok_or_else(|| CliError::MissingApproval(args.approval_id.clone()))?;
+            if is_builtin_tool_subject(&approval.subject) && approval.tool_call_id.is_some() {
+                let executor =
+                    BuiltinToolExecutor::for_mode(control.clone(), PermissionMode::Default);
+                let (value, text, quiet) = builtin_approval_outcome_value(
+                    executor.resolve_approval(approval, args.decision.into(), args.resolved_by)?,
+                );
+                return write_output(writer, output, &value, text, quiet);
+            }
+            if is_gitnexus_tool_subject(&approval.subject) && approval.tool_call_id.is_some() {
+                let (value, text, quiet) =
+                    cli_harness_approval_outcome_value(control.resolve_cli_harness_approval(
+                        approval,
+                        args.decision.into(),
+                        args.resolved_by,
+                    )?);
+                return write_output(writer, output, &value, text, quiet);
+            }
             let resolved =
                 control.resolve_approval(approval, args.decision.into(), args.resolved_by)?;
             write_output(
@@ -501,12 +1461,12 @@ pub(crate) fn execute_agent(
         AgentCommand::Define(args) => execute_agent_define(control, args, output, writer),
         AgentCommand::Profiles(args) => {
             let profiles = list_agent_profiles(control.root())?;
-            let rendered = render_agent_profiles(&profiles, !args.no_color);
+            let rendered = render_agent_profiles(&profiles, output.color && !args.no_color);
             writer.write_all(rendered.as_bytes())?;
             Ok(())
         }
         AgentCommand::Templates(args) => {
-            let rendered = render_agent_templates(&args, !args.no_color)?;
+            let rendered = render_agent_templates(&args, output.color && !args.no_color)?;
             writer.write_all(rendered.as_bytes())?;
             Ok(())
         }
@@ -519,7 +1479,7 @@ fn execute_agent_define(
     output: OutputMode,
     writer: &mut impl Write,
 ) -> Result<(), CliError> {
-    let color = !args.no_color;
+    let color = output.color && !args.no_color;
     let requested_save = args.save;
     if output.dry_run {
         args.save = false;
@@ -859,6 +1819,831 @@ pub(crate) fn execute_task(
                 format!("created task {}: {}", task.task_id.0, task.title),
                 task.task_id.0.to_string(),
             )
+        }
+        TaskCommand::List(args) => {
+            let session_id = parse_session_id(&args.session_id)?;
+            let store = control.task_store(&session_id)?;
+            let mut tasks = store.iter().cloned().collect::<Vec<_>>();
+            if let Some(status) = args.status {
+                let status: LifecycleStatus = status.into();
+                tasks.retain(|task| task.status == status);
+            }
+            if let Some(lane) = args.lane {
+                tasks.retain(|task| task.lane_id.as_ref().is_some_and(|value| value.0 == lane));
+            }
+            if let Some(assignee) = args.assignee {
+                tasks.retain(|task| {
+                    task.assignee
+                        .as_ref()
+                        .is_some_and(|value| value.0 == assignee)
+                });
+            }
+            tasks.sort_by_key(|task| task.created_at);
+            write_list_output(writer, output, &tasks, render_tasks(&tasks))
+        }
+        TaskCommand::Update(args) => {
+            let session_id = parse_session_id(&args.session_id)?;
+            let task_id = parse_task_id(&args.task_id)?;
+            let patch = TaskPatch {
+                task_id,
+                title: args.title,
+                status: args.status.map(LifecycleStatus::from),
+                updated_at: Some(time::OffsetDateTime::now_utc()),
+                assignee: args.assignee.map(AgentId),
+                metadata: Default::default(),
+            };
+            if output.dry_run {
+                return write_dry_run(
+                    writer,
+                    output,
+                    "task.update",
+                    format!("update task {}", patch.task_id.0),
+                );
+            }
+            let patch = control.update_task(&session_id, patch)?;
+            write_output(
+                writer,
+                output,
+                &patch,
+                format!("updated task {}", patch.task_id.0),
+                patch.task_id.0.to_string(),
+            )
+        }
+        TaskCommand::Complete(args) => {
+            let session_id = parse_session_id(&args.session_id)?;
+            let task = projection_task(&control.projection(&session_id)?, &args.task_id)?;
+            if output.dry_run {
+                return write_dry_run(
+                    writer,
+                    output,
+                    "task.complete",
+                    format!("complete task {}", task.task_id.0),
+                );
+            }
+            let patch = control.complete_task(&task)?;
+            write_output(
+                writer,
+                output,
+                &patch,
+                format!("completed task {}", patch.task_id.0),
+                patch.task_id.0.to_string(),
+            )
+        }
+        TaskCommand::Claim(args) => {
+            let session_id = parse_session_id(&args.session_id)?;
+            if output.dry_run {
+                return write_dry_run(
+                    writer,
+                    output,
+                    "task.claim",
+                    format!("claim next task for {}", args.assignee),
+                );
+            }
+            let patch = control.claim_next_task(&session_id, args.assignee)?;
+            write_output(
+                writer,
+                output,
+                &patch,
+                match &patch {
+                    Some(patch) => format!("claimed task {}", patch.task_id.0),
+                    None => "no queued tasks".to_string(),
+                },
+                patch
+                    .as_ref()
+                    .map(|patch| patch.task_id.0.to_string())
+                    .unwrap_or_else(|| "none".to_string()),
+            )
+        }
+    }
+}
+
+pub(crate) fn execute_artifact(
+    control: &ControlPlane,
+    args: ArtifactArgs,
+    output: OutputMode,
+    writer: &mut impl Write,
+) -> Result<(), CliError> {
+    match args.command {
+        ArtifactCommand::Create(args) => {
+            let session_id = parse_session_id(&args.session_id)?;
+            let mut request = CreateArtifactRequest::new(session_id.clone(), args.uri, args.kind);
+            if let Some(task_id) = args.task_id {
+                request = request.for_task(parse_task_id(&task_id)?);
+            }
+            if let Some(run_id) = args.run_id {
+                request = request.for_run(parse_run_id(&run_id)?);
+            }
+            if output.dry_run {
+                return write_dry_run(
+                    writer,
+                    output,
+                    "artifact.create",
+                    format!("create artifact for session {}", session_id.0),
+                );
+            }
+            let artifact = control.create_artifact(request)?;
+            write_output(
+                writer,
+                output,
+                &artifact,
+                format!(
+                    "created artifact {}: {}",
+                    artifact.artifact_id.0, artifact.uri
+                ),
+                artifact.artifact_id.0.to_string(),
+            )
+        }
+        ArtifactCommand::List(args) => {
+            let session_id = parse_session_id(&args.session_id)?;
+            let projection = control.projection(&session_id)?;
+            let mut artifacts = projection.artifacts.values().cloned().collect::<Vec<_>>();
+            if let Some(kind) = args.kind {
+                artifacts.retain(|artifact| artifact.kind == kind);
+            }
+            artifacts.sort_by_key(|artifact| artifact.created_at);
+            write_list_output(writer, output, &artifacts, render_artifacts(&artifacts))
+        }
+        ArtifactCommand::Show(args) => {
+            let session_id = parse_session_id(&args.session_id)?;
+            let artifact =
+                projection_artifact(&control.projection(&session_id)?, &args.artifact_id)?;
+            write_output(
+                writer,
+                output,
+                &artifact,
+                format!("artifact {}: {}", artifact.artifact_id.0, artifact.uri),
+                artifact.artifact_id.0.to_string(),
+            )
+        }
+    }
+}
+
+fn build_memory_request(
+    session_id: essence_core::SessionId,
+    kind: String,
+    text: String,
+    run_id: Option<String>,
+    source_events: Vec<String>,
+    confidence: Option<f32>,
+) -> Result<ProposeMemoryRequest, CliError> {
+    let mut request = ProposeMemoryRequest::new(session_id, kind, text);
+    if let Some(run_id) = run_id {
+        request = request.for_run(parse_run_id(&run_id)?);
+    }
+    for event_id in source_events {
+        request = request.with_source_event(parse_event_id(&event_id)?);
+    }
+    if let Some(confidence) = confidence {
+        request = request.with_confidence(confidence);
+    }
+    Ok(request)
+}
+
+pub(crate) fn execute_memory(
+    control: &ControlPlane,
+    args: MemoryArgs,
+    output: OutputMode,
+    writer: &mut impl Write,
+) -> Result<(), CliError> {
+    match args.command {
+        MemoryCommand::Propose(args) => {
+            let session_id = parse_session_id(&args.session_id)?;
+            let request = build_memory_request(
+                session_id.clone(),
+                args.kind,
+                args.text,
+                args.run_id,
+                args.source_events,
+                args.confidence,
+            )?;
+            if output.dry_run {
+                return write_dry_run(
+                    writer,
+                    output,
+                    "memory.propose",
+                    format!("propose memory for session {}", session_id.0),
+                );
+            }
+            let memory = control.propose_memory(request)?;
+            write_output(
+                writer,
+                output,
+                &memory,
+                format!("proposed memory {}", memory.memory_id.0),
+                memory.memory_id.0.to_string(),
+            )
+        }
+        MemoryCommand::Save(args) => {
+            let session_id = parse_session_id(&args.session_id)?;
+            let memory = projection_memory(&control.projection(&session_id)?, &args.memory_id)?;
+            if output.dry_run {
+                return write_dry_run(
+                    writer,
+                    output,
+                    "memory.save",
+                    format!("save memory {}", memory.memory_id.0),
+                );
+            }
+            let saved = control.save_memory(&memory)?;
+            write_output(
+                writer,
+                output,
+                &saved,
+                format!("saved memory {}", saved.memory_id.0),
+                saved.memory_id.0.to_string(),
+            )
+        }
+        MemoryCommand::Remember(args) => {
+            let session_id = parse_session_id(&args.session_id)?;
+            let request = build_memory_request(
+                session_id.clone(),
+                args.kind,
+                args.text,
+                args.run_id,
+                args.source_events,
+                args.confidence,
+            )?;
+            if output.dry_run {
+                return write_dry_run(
+                    writer,
+                    output,
+                    "memory.remember",
+                    format!("save new memory for session {}", session_id.0),
+                );
+            }
+            let candidate = control.propose_memory(request)?;
+            let saved = control.save_memory(&candidate)?;
+            write_output(
+                writer,
+                output,
+                &saved,
+                format!("remembered memory {}", saved.memory_id.0),
+                saved.memory_id.0.to_string(),
+            )
+        }
+        MemoryCommand::List(args) => {
+            let session_id = parse_session_id(&args.session_id)?;
+            let store = control.memory_store(&session_id)?;
+            let mut memories = if args.saved {
+                store.saved().cloned().collect::<Vec<_>>()
+            } else {
+                store.iter().cloned().collect::<Vec<_>>()
+            };
+            if let Some(kind) = args.kind {
+                memories.retain(|memory| memory.kind == kind);
+            }
+            memories.sort_by_key(|memory| memory.created_at);
+            write_list_output(writer, output, &memories, render_memories(&memories))
+        }
+        MemoryCommand::Search(args) => {
+            let session_id = parse_session_id(&args.session_id)?;
+            let store = control.memory_store(&session_id)?;
+            let index = MemoryIndex::from_store(&store);
+            let hits = index.search(&args.query, args.limit);
+            let text = if hits.is_empty() {
+                "no memory hits".to_string()
+            } else {
+                hits.iter()
+                    .map(|hit| {
+                        format!(
+                            "{:.3}  {}  {}",
+                            hit.score,
+                            hit.memory.memory_id.0,
+                            super::pixel_ui::truncate(&hit.memory.text, 64)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
+            write_list_output(writer, output, &hits, text)
+        }
+    }
+}
+
+pub(crate) fn execute_subagent(
+    control: &ControlPlane,
+    args: SubagentArgs,
+    output: OutputMode,
+    writer: &mut impl Write,
+) -> Result<(), CliError> {
+    match args.command {
+        SubagentCommand::Spawn(args) => {
+            let session_id = parse_session_id(&args.session_id)?;
+            let run = projection_run(&control.projection(&session_id)?, &args.run_id)?;
+            let mut request =
+                SpawnSubagentRequest::native(session_id.clone(), &run, args.lane, args.goal)
+                    .with_isolation(args.isolation.into());
+            if let Some(subagent_id) = args.subagent_id {
+                request = request.with_subagent_id(subagent_id);
+            }
+            for context_ref in args.context_refs {
+                request = request.with_context_ref(context_ref);
+            }
+            for toolset in args.toolsets {
+                request = request.with_toolset(toolset);
+            }
+            if args.max_turns.is_some()
+                || args.max_tool_calls.is_some()
+                || args.max_tokens.is_some()
+            {
+                request = request.with_budget(SubagentBudget {
+                    max_turns: args.max_turns,
+                    max_tool_calls: args.max_tool_calls,
+                    max_tokens: args.max_tokens,
+                });
+            }
+            if output.dry_run {
+                return write_dry_run(
+                    writer,
+                    output,
+                    "subagent.spawn",
+                    format!("spawn subagent for run {}", run.run_id.0),
+                );
+            }
+            let subagent = control.spawn_subagent(request)?;
+            write_output(
+                writer,
+                output,
+                &subagent,
+                format!("spawned subagent {}", subagent.subagent_id.0),
+                subagent.subagent_id.0.to_string(),
+            )
+        }
+        SubagentCommand::List(args) => {
+            let session_id = parse_session_id(&args.session_id)?;
+            let projection = control.projection(&session_id)?;
+            let mut subagents = projection.subagents.values().cloned().collect::<Vec<_>>();
+            if let Some(status) = args.status {
+                let status: LifecycleStatus = status.into();
+                subagents.retain(|subagent| subagent.status == status);
+            }
+            subagents.sort_by_key(|subagent| subagent.subagent_id.clone());
+            write_list_output(writer, output, &subagents, render_subagents(&subagents))
+        }
+        SubagentCommand::Progress(args) => {
+            let session_id = parse_session_id(&args.session_id)?;
+            let subagent =
+                projection_subagent(&control.projection(&session_id)?, &args.subagent_id)?;
+            if output.dry_run {
+                return write_dry_run(
+                    writer,
+                    output,
+                    "subagent.progress",
+                    format!("update subagent {}", subagent.subagent_id.0),
+                );
+            }
+            let updated = control.update_subagent_progress(&subagent, args.status.into())?;
+            write_output(
+                writer,
+                output,
+                &updated,
+                format!(
+                    "subagent {} is {}",
+                    updated.subagent_id.0,
+                    json_name(&updated.status)
+                ),
+                json_name(&updated.status),
+            )
+        }
+        SubagentCommand::Steer(args) => {
+            let session_id = parse_session_id(&args.session_id)?;
+            let subagent =
+                projection_subagent(&control.projection(&session_id)?, &args.subagent_id)?;
+            let mut request = SteerSubagentRequest::new();
+            if let Some(goal) = args.goal {
+                request = request.with_goal(goal);
+            }
+            for context_ref in args.context_refs {
+                request = request.with_context_ref(context_ref);
+            }
+            for toolset in args.toolsets {
+                request = request.with_toolset(toolset);
+            }
+            if output.dry_run {
+                return write_dry_run(
+                    writer,
+                    output,
+                    "subagent.steer",
+                    format!("steer subagent {}", subagent.subagent_id.0),
+                );
+            }
+            let steered = control.steer_subagent(&subagent, request)?;
+            write_output(
+                writer,
+                output,
+                &steered,
+                format!("steered subagent {}", steered.subagent_id.0),
+                steered.subagent_id.0.to_string(),
+            )
+        }
+        SubagentCommand::Complete(args) => {
+            let session_id = parse_session_id(&args.session_id)?;
+            let subagent =
+                projection_subagent(&control.projection(&session_id)?, &args.subagent_id)?;
+            let usage = parse_optional_json_arg(args.usage_json, "--usage-json")?;
+            if output.dry_run {
+                return write_dry_run(
+                    writer,
+                    output,
+                    "subagent.complete",
+                    format!("complete subagent {}", subagent.subagent_id.0),
+                );
+            }
+            let completed =
+                if args.summary.is_some() || !args.artifact_refs.is_empty() || usage.is_some() {
+                    control.complete_subagent_with_result(
+                        &subagent,
+                        SubagentResult {
+                            summary: args.summary.unwrap_or_default(),
+                            artifact_refs: args.artifact_refs,
+                            usage,
+                            error: None,
+                        },
+                    )?
+                } else {
+                    control.complete_subagent(&subagent)?
+                };
+            write_output(
+                writer,
+                output,
+                &completed,
+                format!("completed subagent {}", completed.subagent_id.0),
+                json_name(&completed.status),
+            )
+        }
+        SubagentCommand::Fail(args) => {
+            let session_id = parse_session_id(&args.session_id)?;
+            let subagent =
+                projection_subagent(&control.projection(&session_id)?, &args.subagent_id)?;
+            if output.dry_run {
+                return write_dry_run(
+                    writer,
+                    output,
+                    "subagent.fail",
+                    format!("fail subagent {}", subagent.subagent_id.0),
+                );
+            }
+            let failed = match args.error {
+                Some(error) => control.fail_subagent_with_error(&subagent, error)?,
+                None => control.fail_subagent(&subagent)?,
+            };
+            write_output(
+                writer,
+                output,
+                &failed,
+                format!("failed subagent {}", failed.subagent_id.0),
+                json_name(&failed.status),
+            )
+        }
+        SubagentCommand::Cancel(args) => {
+            let session_id = parse_session_id(&args.session_id)?;
+            let subagent =
+                projection_subagent(&control.projection(&session_id)?, &args.subagent_id)?;
+            if output.dry_run {
+                return write_dry_run(
+                    writer,
+                    output,
+                    "subagent.cancel",
+                    format!("cancel subagent {}", subagent.subagent_id.0),
+                );
+            }
+            let cancelled = control.cancel_subagent(&subagent, args.reason)?;
+            write_output(
+                writer,
+                output,
+                &cancelled,
+                format!("cancelled subagent {}", cancelled.subagent_id.0),
+                json_name(&cancelled.status),
+            )
+        }
+    }
+}
+
+pub(crate) fn execute_snapshot(
+    control: &ControlPlane,
+    args: SnapshotArgs,
+    output: OutputMode,
+    writer: &mut impl Write,
+) -> Result<(), CliError> {
+    match args.command {
+        SnapshotCommand::Write(args) => {
+            let session_id = parse_session_id(&args.session_id)?;
+            if output.dry_run {
+                return write_dry_run(
+                    writer,
+                    output,
+                    "snapshot.write",
+                    format!("write projection snapshot for session {}", session_id.0),
+                );
+            }
+            let snapshot = control.write_projection_snapshot(&session_id)?;
+            write_output(
+                writer,
+                output,
+                &snapshot,
+                format!("wrote snapshot at seq {}", snapshot.latest_seq),
+                snapshot.latest_seq.to_string(),
+            )
+        }
+        SnapshotCommand::Read(args) => {
+            let session_id = parse_session_id(&args.session_id)?;
+            let snapshot = control.read_projection_snapshot(&session_id)?;
+            write_output(
+                writer,
+                output,
+                &snapshot,
+                snapshot
+                    .as_ref()
+                    .map(|snapshot| format!("snapshot at seq {}", snapshot.latest_seq))
+                    .unwrap_or_else(|| "no snapshot".to_string()),
+                snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.latest_seq.to_string())
+                    .unwrap_or_else(|| "none".to_string()),
+            )
+        }
+    }
+}
+
+fn plugin_text(plugins: &[PluginManifest]) -> String {
+    if plugins.is_empty() {
+        return "no plugins".to_string();
+    }
+    plugins
+        .iter()
+        .map(|plugin| format!("{}  {:?}  {}", plugin.id, plugin.kind, plugin.description))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub(crate) fn execute_plugin(
+    control: &ControlPlane,
+    args: PluginArgs,
+    output: OutputMode,
+    writer: &mut impl Write,
+) -> Result<(), CliError> {
+    match args.command {
+        PluginCommand::Catalog(args) => {
+            let catalog = basic_plugin_catalog();
+            let mut plugins = catalog.plugins().cloned().collect::<Vec<_>>();
+            if let Some(capability) = args.capability {
+                plugins.retain(|plugin| plugin.capabilities.contains(&capability));
+            }
+            if let Some(kind) = args.kind {
+                plugins.retain(|plugin| plugin_kind_matches(plugin, kind));
+            }
+            plugins.sort_by_key(|plugin| plugin.id.clone());
+            write_list_output(writer, output, &plugins, plugin_text(&plugins))
+        }
+        PluginCommand::List(_) => {
+            let mut plugins = installed_plugin_manifests(control.root())?;
+            plugins.sort_by_key(|plugin| plugin.id.clone());
+            write_list_output(writer, output, &plugins, plugin_text(&plugins))
+        }
+        PluginCommand::Install(args) => {
+            let catalog = basic_plugin_catalog();
+            let plugin = catalog.plugin(&args.id)?.clone();
+            let mut stored = read_plugins(control.root())?;
+            if !stored.installed.contains(&plugin.id) {
+                stored.installed.push(plugin.id.clone());
+                stored.installed.sort();
+            }
+            if output.dry_run {
+                return write_dry_run(
+                    writer,
+                    output,
+                    "plugin.install",
+                    format!("install plugin {}", plugin.id),
+                );
+            }
+            let path = write_plugins(control.root(), &stored)?;
+            let value = json!({
+                "plugin": plugin,
+                "path": path.display().to_string(),
+                "installed": stored.installed,
+            });
+            write_output(
+                writer,
+                output,
+                &value,
+                format!("installed plugin {}", args.id),
+                args.id,
+            )
+        }
+        PluginCommand::Tools(_) => {
+            let plugins = installed_plugin_manifests(control.root())?;
+            let tools = plugins
+                .iter()
+                .flat_map(|plugin| plugin.tools.iter().cloned())
+                .collect::<Vec<_>>();
+            let text = if tools.is_empty() {
+                "no plugin tools".to_string()
+            } else {
+                tools
+                    .iter()
+                    .map(|tool| format!("{}  {:?}", tool.name, tool.permission))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
+            write_list_output(writer, output, &tools, text)
+        }
+        PluginCommand::UiSlots(_) => {
+            let plugins = installed_plugin_manifests(control.root())?;
+            let slots = plugins
+                .iter()
+                .flat_map(|plugin| plugin.ui_slots.iter().cloned())
+                .collect::<Vec<_>>();
+            let text = if slots.is_empty() {
+                "no plugin ui slots".to_string()
+            } else {
+                slots
+                    .iter()
+                    .map(|slot| format!("{}  {:?}  {}", slot.slot_id, slot.kind, slot.entry_ref))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
+            write_list_output(writer, output, &slots, text)
+        }
+    }
+}
+
+pub(crate) fn execute_mcp(
+    control: &ControlPlane,
+    args: McpArgs,
+    output: OutputMode,
+    writer: &mut impl Write,
+) -> Result<(), CliError> {
+    match args.command {
+        McpCommand::Manifest(_) => {
+            #[cfg(feature = "mcp")]
+            {
+                let api = essence_core::ControlApi::new(control.clone());
+                let manifest = api.mcp_manifest();
+                write_output(
+                    writer,
+                    output,
+                    &manifest,
+                    format!(
+                        "mcp manifest {} with {} tools",
+                        manifest.server_name,
+                        manifest.tools.len()
+                    ),
+                    manifest.tools.len().to_string(),
+                )
+            }
+            #[cfg(not(feature = "mcp"))]
+            {
+                let _ = (control, output, writer);
+                Err(CliError::Usage(
+                    "mcp support is not enabled in this build".to_string(),
+                ))
+            }
+        }
+    }
+}
+
+fn bundled_harness(id: &str) -> Result<CliHarnessManifest, CliError> {
+    match id {
+        #[cfg(feature = "gitnexus")]
+        "gitnexus" => Ok(essence_core::gitnexus_harness()),
+        other => Err(CliError::Usage(format!(
+            "harness `{other}` is not available in this build"
+        ))),
+    }
+}
+
+fn installed_harnesses() -> Vec<CliHarnessManifest> {
+    let harnesses = Vec::new();
+    #[cfg(feature = "gitnexus")]
+    let harnesses = {
+        let mut harnesses = harnesses;
+        harnesses.push(essence_core::gitnexus_harness());
+        harnesses
+    };
+    harnesses
+}
+
+pub(crate) fn execute_harness(
+    control: &ControlPlane,
+    args: HarnessArgs,
+    output: OutputMode,
+    writer: &mut impl Write,
+) -> Result<(), CliError> {
+    match args.command {
+        HarnessCommand::List(_) => {
+            let harnesses = installed_harnesses();
+            let text = if harnesses.is_empty() {
+                "no bundled harnesses".to_string()
+            } else {
+                harnesses
+                    .iter()
+                    .map(|harness| {
+                        format!(
+                            "{}  {} command(s)",
+                            harness.plugin.id,
+                            harness.commands.len()
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
+            write_list_output(writer, output, &harnesses, text)
+        }
+        HarnessCommand::Run(args) => {
+            let session_id = parse_session_id(&args.session_id)?;
+            let manifest = bundled_harness(&args.harness)?;
+            let input = parse_json_arg(&args.input_json, "--input-json")?;
+            let mut host = PluginHost::new();
+            host.register(manifest.plugin.clone())?;
+            let runner = PolicyBoundCliHarness::new(
+                manifest,
+                host.tools()
+                    .to_policy(PermissionMode::from(args.permission_mode)),
+            );
+            let mut request =
+                essence_core::RunCliHarnessToolRequest::new(session_id.clone(), args.tool, input);
+            if let Some(run_id) = args.run_id {
+                let run = projection_run(&control.projection(&session_id)?, &run_id)?;
+                request = request.for_run(&run);
+            }
+            if let Some(cwd) = args.cwd {
+                request = request.with_cwd(cwd);
+            }
+            if output.dry_run {
+                return write_dry_run(
+                    writer,
+                    output,
+                    "harness.run",
+                    format!("run harness {} for session {}", args.harness, session_id.0),
+                );
+            }
+            let (value, text, quiet) =
+                cli_harness_outcome_value(control.run_cli_harness_tool(&runner, request)?);
+            write_output(writer, output, &value, text, quiet)
+        }
+    }
+}
+
+pub(crate) fn execute_theme(
+    control: &ControlPlane,
+    args: ThemeArgs,
+    output: OutputMode,
+    writer: &mut impl Write,
+) -> Result<(), CliError> {
+    match args.command {
+        ThemeCommand::Get(_) => {
+            let stored = configured_theme(control.root()).unwrap_or(CliTheme::Auto);
+            let value = json!({
+                "theme": stored,
+                "effective": format!("{:?}", output.theme).to_ascii_lowercase(),
+                "color": output.color,
+            });
+            write_output(
+                writer,
+                output,
+                &value,
+                format!(
+                    "theme: {:?}\neffective: {:?}\ncolor: {}",
+                    stored, output.theme, output.color
+                ),
+                format!("{:?}", stored).to_ascii_lowercase(),
+            )
+        }
+        ThemeCommand::Set(args) => {
+            if output.dry_run {
+                return write_dry_run(
+                    writer,
+                    output,
+                    "theme.set",
+                    format!("set theme to {:?}", args.theme),
+                );
+            }
+            let path = write_theme(control.root(), args.theme)?;
+            let value = json!({
+                "theme": args.theme,
+                "path": path.display().to_string(),
+            });
+            write_output(
+                writer,
+                output,
+                &value,
+                format!("set theme {:?} in {}", args.theme, path.display()),
+                format!("{:?}", args.theme).to_ascii_lowercase(),
+            )
+        }
+        ThemeCommand::Preview(args) => {
+            let theme = args.theme.unwrap_or(CliTheme::Pixel);
+            let color = output.color && !matches!(theme, CliTheme::Plain);
+            let rendered = match theme {
+                CliTheme::Plain => "ESSENCE CLI\nstatus: ready\ntheme: plain".to_string(),
+                CliTheme::Auto | CliTheme::Pixel => panel(
+                    "ESSENCE CLI",
+                    "theme preview",
+                    "status: ready\ntheme: pixel\nmachine output stays clean with --json",
+                    color,
+                ),
+            };
+            write_text_line(writer, rendered)
         }
     }
 }

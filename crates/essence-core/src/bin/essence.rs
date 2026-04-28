@@ -36,7 +36,7 @@ use args::{
     Cli, CliCompletionShell, Command, CompletionArgs, CompletionCommand, CompletionGenerateArgs,
     CompletionInstallArgs,
 };
-use support::{CliError, OutputMode};
+use support::{CliError, OutputMode, OutputModeConfig};
 
 fn main() -> ExitCode {
     if root_version_requested() {
@@ -79,11 +79,25 @@ fn exit_clap_error(error: clap::Error) -> ExitCode {
 }
 
 fn execute(cli: Cli, writer: &mut impl Write) -> Result<(), CliError> {
-    let output = OutputMode::new(cli.output, cli.json, cli.quiet, cli.verbose, cli.dry_run);
     let root = cli.root.clone();
+    let stored_theme = commands::configured_theme(&root);
+    let output = OutputMode::new(OutputModeConfig {
+        output: cli.output,
+        json: cli.json,
+        quiet: cli.quiet,
+        verbose: cli.verbose,
+        dry_run: cli.dry_run,
+        requested_theme: cli.theme,
+        stored_theme,
+        no_color: cli.no_color,
+        stdout_is_terminal: io::stdout().is_terminal(),
+    });
     let control = ControlPlane::new(&root);
     match cli.command {
         Command::Setup(mut args) => {
+            if output.no_color {
+                args.no_color = true;
+            }
             let requested_save = args.save;
             if output.dry_run {
                 args.save = false;
@@ -94,6 +108,7 @@ fn execute(cli: Cli, writer: &mut impl Write) -> Result<(), CliError> {
             }
             Ok(())
         }
+        Command::Ask(args) => chat::execute_ask(&control, args, output, writer),
         Command::Chat(args) => {
             if output.dry_run {
                 return Err(CliError::Usage(
@@ -107,15 +122,37 @@ fn execute(cli: Cli, writer: &mut impl Write) -> Result<(), CliError> {
             }
             let stdin = io::stdin();
             let mut reader = stdin.lock();
+            let mut args = args;
+            if output.no_color {
+                args.no_color = true;
+            }
             chat::execute_chat(&control, args, &mut reader, writer)
         }
         Command::Session(args) => commands::execute_session(&control, args, output, writer),
         Command::Message(args) => commands::execute_message(&control, args, output, writer),
+        Command::Run(args) => commands::execute_run(&control, args, output, writer),
         Command::Events(args) => commands::execute_events(&control, args, output, writer),
+        Command::Tool(args) => commands::execute_tool(&control, args, output, writer),
         Command::Approval(args) => commands::execute_approval(&control, args, output, writer),
         Command::Agent(args) => commands::execute_agent(&control, args, output, writer),
         Command::Task(args) => commands::execute_task(&control, args, output, writer),
-        Command::Workspace(args) => workspace_view::execute_workspace(&control, args, writer),
+        Command::Artifact(args) => commands::execute_artifact(&control, args, output, writer),
+        Command::Memory(args) => commands::execute_memory(&control, args, output, writer),
+        Command::Subagent(args) => commands::execute_subagent(&control, args, output, writer),
+        Command::Snapshot(args) => commands::execute_snapshot(&control, args, output, writer),
+        Command::Workspace(mut args) => {
+            if output.no_color {
+                match &mut args.command {
+                    args::WorkspaceCommand::Dashboard(args) => args.no_color = true,
+                    args::WorkspaceCommand::Watch(args) => args.no_color = true,
+                }
+            }
+            workspace_view::execute_workspace(&control, args, writer)
+        }
+        Command::Plugin(args) => commands::execute_plugin(&control, args, output, writer),
+        Command::Mcp(args) => commands::execute_mcp(&control, args, output, writer),
+        Command::Harness(args) => commands::execute_harness(&control, args, output, writer),
+        Command::Theme(args) => commands::execute_theme(&control, args, output, writer),
         Command::Config(args) => commands::execute_config(&control, args, output, writer),
         Command::Doctor(args) => commands::execute_doctor(&control, args, output, writer),
         Command::Completion(args) => execute_completion(args, output, writer),

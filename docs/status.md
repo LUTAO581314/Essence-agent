@@ -50,11 +50,16 @@ The implemented layer is the durable local kernel:
 - browser daemon plugin boundary and workspace shell projection helpers
 - JSON projection snapshots for persistent replay checkpoints
 - local Control API adapter primitives for future HTTP/MCP servers
-- minimal `essence` CLI for session creation, message append, event tailing,
-  interactive chat, Star Office-style terminal workspace watching, agent/task
-  heartbeat commands, model config get/set, doctor checks, shell completions,
-  completion install, global dry-run previews, non-interactive chat detection,
-  and bounded model-command chat adapters
+- v0 `essence` CLI control surface for session, run, message, event,
+  approval, tool, agent, task, artifact, memory, subagent, snapshot, plugin,
+  MCP manifest, harness, config, doctor, completion, and theme commands
+- one-shot `ask` model turns plus interactive chat, both writing assistant
+  replies back to the ledger through the same bounded model adapters
+- built-in tool execution from the CLI with policy decisions, reusable
+  approvals, and approval-resolution replay for built-in tools and CLI
+  harness tools
+- pixel/plain theme selection for human text output while `--json`,
+  `--output jsonl`, and `--quiet` remain machine-readable
 - three-platform CI gate over Ubuntu, Windows, and macOS for formatting,
   strict clippy, and tests
 - tag-driven release workflow that publishes Linux, Windows, macOS Intel, and

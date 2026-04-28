@@ -389,7 +389,7 @@ impl BuiltinToolExecutor {
                 .execute_with_cwd(Some(cwd))
                 .map_err(|source| BuiltinToolError::Io {
                     path: root.clone(),
-                    source: std::io::Error::new(std::io::ErrorKind::Other, source.to_string()),
+                    source: std::io::Error::other(source.to_string()),
                 })?;
         serde_json::to_value(result).map_err(BuiltinToolError::from)
     }
@@ -479,7 +479,7 @@ impl BuiltinToolExecutor {
             .runs
             .get(&run_id)
             .cloned()
-            .ok_or_else(|| BuiltinToolError::MissingRun(run_id.0))?;
+            .ok_or(BuiltinToolError::MissingRun(run_id.0))?;
         let mut spawn =
             SpawnSubagentRequest::native(request.session_id.clone(), &run, input.lane, input.goal);
         if let Some(subagent_id) = input.subagent_id {
@@ -537,6 +537,10 @@ impl BuiltinToolRequest {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "public outcome field types are part of the crate API"
+)]
 pub enum BuiltinToolOutcome {
     Executed {
         tool_call: ToolCallRecord,

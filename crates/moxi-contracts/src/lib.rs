@@ -174,6 +174,19 @@ pub struct RunContract {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+pub struct StateTransition {
+    pub transition_id: String,
+    pub run_id: String,
+    pub from_state: Option<RunStatus>,
+    pub to_state: RunStatus,
+    pub command_source: String,
+    pub reason: String,
+    pub policy_decision_ref: Option<String>,
+    pub ledger_event_ref: Option<String>,
+    pub timestamp: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct DeltaTarget {
     pub resource_type: ResourceType,
     pub resource_ref: String,
@@ -301,6 +314,8 @@ pub struct LedgerEvent {
     pub proof_refs: Vec<String>,
     pub input_hash: String,
     pub output_hash: String,
+    pub previous_event_hash: String,
+    pub event_hash: String,
     pub result: EventResult,
     pub timestamp: DateTime<Utc>,
 }

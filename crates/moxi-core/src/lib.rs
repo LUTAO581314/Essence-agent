@@ -119,9 +119,21 @@ impl Kernel {
         };
 
         self.store
-            .set_run_status(&contract.run_id, RunStatus::Admitted)?;
+            .initialize_run_budget(&contract.run_id, &contract.budget)?;
+        self.store
+            .transition_run_status(&contract.run_id, RunStatus::Admitted)?;
         self.runs.insert(contract.run_id.clone(), contract.clone());
         Ok(contract)
+    }
+
+    pub fn start_heartbeat(&mut self, run_id: &str) -> CoreResult<()> {
+        self.runs
+            .get(run_id)
+            .ok_or_else(|| CoreError::RunNotFound(run_id.into()))?;
+        self.store
+            .transition_run_status(run_id, RunStatus::RunningHeartbeat)?;
+        self.store.record_heartbeat(run_id)?;
+        Ok(())
     }
 
     pub fn propose_delta(
@@ -137,6 +149,8 @@ impl Kernel {
         if delta.run_id != run.run_id {
             return Err(CoreError::RunMismatch);
         }
+
+        self.store.record_step(run_id)?;
 
         let Some(capability) = self.registry.get(&delta.capability_id) else {
             return Err(CoreError::CapabilityNotFound(delta.capability_id));
@@ -197,10 +211,11 @@ impl Kernel {
         };
 
         if policy.decision == Decision::Deny {
-            self.store.set_run_status(run_id, RunStatus::Blocked)?;
+            self.store
+                .transition_run_status(run_id, RunStatus::Blocked)?;
         } else if policy.decision == Decision::RequireApproval {
             self.store
-                .set_run_status(run_id, RunStatus::AwaitingApproval)?;
+                .transition_run_status(run_id, RunStatus::AwaitingApproval)?;
         }
 
         Ok(policy)
@@ -225,7 +240,7 @@ impl Kernel {
             return Err(CoreError::CapabilityNotFound(policy.capability_id.clone()));
         }
 
-        Ok(ExecutionTicket {
+        let ticket = ExecutionTicket {
             ticket_id: format!("ticket_{}", Uuid::new_v4()),
             run_id: policy.run_id.clone(),
             delta_id: policy.delta_id.clone(),
@@ -235,7 +250,9 @@ impl Kernel {
             actor_id: self.actor_id.clone(),
             capability_id: capability.capability_id.clone(),
             expires_at: policy.expires_at,
-        })
+        };
+        self.store.record_ticket(&ticket)?;
+        Ok(ticket)
     }
 
     pub fn execute(
@@ -257,12 +274,14 @@ impl Kernel {
         }
 
         validate_payload("input", &capability.input_schema, &input.payload)?;
+        self.store.consume_ticket(&ticket.ticket_id)?;
+        self.store.record_tool_call(&ticket.run_id)?;
         self.store
-            .set_run_status(&ticket.run_id, RunStatus::Executing)?;
+            .transition_run_status(&ticket.run_id, RunStatus::Executing)?;
         let result = self.sandbox.execute(ticket, input)?;
         validate_payload("output", &capability.output_schema, &result.output)?;
         self.store
-            .set_run_status(&ticket.run_id, RunStatus::Observing)?;
+            .transition_run_status(&ticket.run_id, RunStatus::Observing)?;
         Ok(result)
     }
 
@@ -272,7 +291,7 @@ impl Kernel {
         }
 
         self.store
-            .set_run_status(&result.run_id, RunStatus::Verifying)?;
+            .transition_run_status(&result.run_id, RunStatus::Verifying)?;
 
         Ok(Proof {
             proof_id: format!("proof_{}", Uuid::new_v4()),
@@ -292,11 +311,11 @@ impl Kernel {
         }
 
         self.store
-            .set_run_status(&event.run_id, RunStatus::Persisting)?;
-        self.store.append_ledger_event(&event)?;
+            .transition_run_status(&event.run_id, RunStatus::Persisting)?;
+        let event = self.store.append_ledger_event(event)?;
         if event.result == EventResult::Success {
             self.store
-                .set_run_status(&event.run_id, RunStatus::Completed)?;
+                .transition_run_status(&event.run_id, RunStatus::Completed)?;
         }
         Ok(event)
     }
@@ -372,6 +391,8 @@ pub fn ledger_event_for_success(
         proof_refs: vec![proof.proof_id.clone()],
         input_hash: "".into(),
         output_hash: result.output_hash.clone(),
+        previous_event_hash: String::new(),
+        event_hash: String::new(),
         result: EventResult::Success,
         timestamp: Utc::now(),
     }
@@ -405,11 +426,20 @@ fn hash_json(value: &Value) -> String {
 mod tests {
     use super::*;
     use moxi_contracts::{Budget, DeltaTarget, ResourceType};
+    use moxi_store::StoreError;
     use serde_json::json;
     use std::fs;
     use tempfile::tempdir;
 
     fn intent(root: &std::path::Path, capabilities: Vec<String>) -> Intent {
+        intent_with_budget(root, capabilities, Budget::default())
+    }
+
+    fn intent_with_budget(
+        root: &std::path::Path,
+        capabilities: Vec<String>,
+        budget: Budget,
+    ) -> Intent {
         Intent {
             intent_id: "intent_1".into(),
             tenant_id: "tenant_a".into(),
@@ -418,7 +448,7 @@ mod tests {
             requested_capabilities: capabilities,
             risk_level: RiskLevel::Low,
             workspace_root: root.to_string_lossy().into_owned(),
-            budget: Budget::default(),
+            budget,
         }
     }
 
@@ -589,6 +619,120 @@ mod tests {
             kernel.ledger_events_for_run(&run.run_id).unwrap()[0].ledger_event_id,
             committed.ledger_event_id
         );
+        assert!(!committed.event_hash.is_empty());
+    }
+
+    #[test]
+    fn heartbeat_budget_blocks_extra_heartbeat() {
+        let temp = tempdir().unwrap();
+        let mut kernel = Kernel::new_in_memory(temp.path()).unwrap();
+        let budget = Budget {
+            max_heartbeats: 1,
+            ..Default::default()
+        };
+        let run = kernel
+            .admit(intent_with_budget(
+                temp.path(),
+                vec!["file.read".into()],
+                budget,
+            ))
+            .unwrap();
+
+        kernel.start_heartbeat(&run.run_id).unwrap();
+
+        assert!(matches!(
+            kernel.start_heartbeat(&run.run_id),
+            Err(CoreError::Store(StoreError::BudgetExceeded {
+                counter: "heartbeats",
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn execution_ticket_cannot_be_reused() {
+        let temp = tempdir().unwrap();
+        fs::write(temp.path().join("hello.txt"), "hello").unwrap();
+        let mut kernel = Kernel::new_in_memory(temp.path()).unwrap();
+        kernel.register_capability(file_read_capability()).unwrap();
+        let run = kernel
+            .admit(intent(temp.path(), vec!["file.read".into()]))
+            .unwrap();
+        let policy = kernel
+            .propose_delta(
+                &run.run_id,
+                delta(&run.run_id, "hello.txt", "file.read", RiskLevel::Low),
+            )
+            .unwrap();
+        let capability = kernel.capability("file.read").unwrap().clone();
+        let ticket = kernel.issue_ticket(&policy, &capability).unwrap();
+
+        kernel
+            .execute(
+                &ticket,
+                SandboxInput {
+                    capability_id: "file.read".into(),
+                    payload: json!({ "path": "hello.txt" }),
+                },
+            )
+            .unwrap();
+
+        assert!(matches!(
+            kernel.execute(
+                &ticket,
+                SandboxInput {
+                    capability_id: "file.read".into(),
+                    payload: json!({ "path": "hello.txt" }),
+                },
+            ),
+            Err(CoreError::Store(StoreError::TicketConsumed(_)))
+        ));
+    }
+
+    #[test]
+    fn tool_call_budget_blocks_extra_execution() {
+        let temp = tempdir().unwrap();
+        fs::write(temp.path().join("hello.txt"), "hello").unwrap();
+        let budget = Budget {
+            max_tool_calls: 1,
+            ..Default::default()
+        };
+        let mut kernel = Kernel::new_in_memory(temp.path()).unwrap();
+        kernel.register_capability(file_read_capability()).unwrap();
+        let run = kernel
+            .admit(intent_with_budget(
+                temp.path(),
+                vec!["file.read".into()],
+                budget,
+            ))
+            .unwrap();
+
+        for index in 0..2 {
+            let mut next_delta = delta(&run.run_id, "hello.txt", "file.read", RiskLevel::Low);
+            next_delta.delta_id = format!("delta_{index}");
+            let policy = kernel.propose_delta(&run.run_id, next_delta).unwrap();
+            let capability = kernel.capability("file.read").unwrap().clone();
+            let ticket = kernel.issue_ticket(&policy, &capability).unwrap();
+            let result = kernel.execute(
+                &ticket,
+                SandboxInput {
+                    capability_id: "file.read".into(),
+                    payload: json!({ "path": "hello.txt" }),
+                },
+            );
+
+            if index == 0 {
+                result.unwrap();
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(CoreError::Store(StoreError::BudgetExceeded {
+                        counter: "tool_calls",
+                        ..
+                    }))
+                ));
+            }
+        }
     }
 
     #[test]
@@ -607,6 +751,8 @@ mod tests {
             proof_refs: vec![],
             input_hash: "".into(),
             output_hash: "out".into(),
+            previous_event_hash: String::new(),
+            event_hash: String::new(),
             result: EventResult::Success,
             timestamp: Utc::now(),
         };

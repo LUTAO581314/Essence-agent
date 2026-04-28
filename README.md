@@ -12,7 +12,8 @@ swarm runtime, remote bridge, long-term memory runtime, or auto-evolution.
   `CapabilityContract`, `WorldDelta`, `PolicyDecision`, `ExecutionTicket`,
   `SandboxResult`, `Proof`, `LedgerEvent`, and structured errors.
 - `moxi-core`: trusted kernel API for admission, policy checks, ticket issuing,
-  sandbox execution, verification, and ledger commits.
+  heartbeat accounting, policy checks, ticket issuing, sandbox execution,
+  verification, and ledger commits.
 - `moxi-sandbox`: first local read-only file sandbox with workspace root lock
   and path escape protection.
 - `moxi-store`: SQLite state store and append-only audit ledger.
@@ -35,8 +36,11 @@ Intent
 - Default permission mode is read-only.
 - Network and shell are denied by default.
 - External action requires an `ExecutionTicket`.
+- Execution tickets are issued by the kernel and can be consumed only once.
+- Run budgets track steps, heartbeats, tool calls, and timeout limits.
 - Successful ledger commits require at least one `Proof`.
-- Ledger events are append-only; correction must be a new event.
+- Ledger events are append-only and hash-chained; correction must be a new
+  event.
 
 ## Verify
 

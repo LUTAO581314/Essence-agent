@@ -1,17 +1,26 @@
 [workspace]
-members = ["crates/essence-core"]
+members = [
+    "crates/moxi-contracts",
+    "crates/moxi-core",
+    "crates/moxi-sandbox",
+    "crates/moxi-store",
+]
 resolver = "2"
 
 [workspace.package]
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/LUTAO581314/Essence-agent"
+version = "0.1.0"
 
 [workspace.dependencies]
-hmac = "0.12"
+chrono = { version = "0.4", features = ["serde"] }
+hex = "0.4"
+jsonschema = "0.18"
+rusqlite = { version = "0.31", features = ["bundled"] }
+schemars = { version = "0.8", features = ["chrono", "uuid1"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+tempfile = "3"
 thiserror = "1"
-time = { version = "0.3", features = ["formatting", "parsing", "serde"] }
 uuid = { version = "1", features = ["serde", "v4"] }

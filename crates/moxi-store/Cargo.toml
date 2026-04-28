@@ -1,0 +1,12 @@
+[package]
+name = "moxi-store"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+chrono.workspace = true
+moxi-contracts = { path = "../moxi-contracts" }
+rusqlite.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

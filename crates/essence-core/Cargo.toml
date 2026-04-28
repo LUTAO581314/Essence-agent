@@ -17,6 +17,7 @@ workspace = []
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 hmac.workspace = true
 serde.workspace = true
 serde_json.workspace = true

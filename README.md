@@ -44,6 +44,9 @@ Current Rust crate status:
   assignee
 - `essence-core::stream`: cursor-based UI event stream over ledger events
 - `essence-core::approval_index`: indexed reusable approval grants by subject
+- `essence-core::builtin_tools`: Claude/Codex/Hermes-shaped built-in tool
+  specs and executor for safe file reads/search, approval-gated patch/shell/web,
+  ledger-backed todo/subagent operations, and denied-by-default gateway exec
 - `essence-core::plugin`: minimal plugin manifest host that registers plugin
   tools into the core tool registry, plus a catalog for selectable plugin
   installation
@@ -177,11 +180,23 @@ runtime data to `.essence/` by default and can be pointed elsewhere with
 
 ```bash
 cargo run -p essence-core --bin essence -- session create --title "First session"
-cargo run -p essence-core --bin essence -- message send --session-id <session-id> --text "Build the next layer"
-cargo run -p essence-core --bin essence -- events tail --session-id <session-id> --user-visible
+cargo run -p essence-core --bin essence -- session create --title "First session" --json
+cargo run -p essence-core --bin essence -- message send --session-id <session-id> --text "Build the next layer" --json
+cargo run -p essence-core --bin essence -- events tail --session-id <session-id> --user-visible --output jsonl
 cargo run -p essence-core --bin essence -- approval pending --session-id <session-id>
 cargo run -p essence-core --bin essence -- approval resolve --session-id <session-id> --approval-id <approval-id> --decision deny
+cargo run -p essence-core --bin essence -- config set model your-model-name
+cargo run -p essence-core --bin essence -- config get
+cargo run -p essence-core --bin essence -- doctor --strict
+cargo run -p essence-core --bin essence -- completion powershell
+cargo run -p essence-core --bin essence -- completion install powershell
 ```
+
+By default, data commands print compact human-readable text. Use `--json` for
+single structured responses, `--output jsonl` for event streams, `--quiet` for
+primary ids or status only, and `-v`/`--version` for the CLI version. Mutating
+commands accept global `--dry-run` to preview the write without changing
+`.essence/` state or installing files.
 
 Interactive chat and the Star Office-style agent board are available from the
 same CLI:
@@ -192,7 +207,8 @@ cargo run -p essence-core --bin essence -- chat --title "Desk session"
 
 Inside chat, type `/office` to render the multi-agent board and `/exit` to
 quit. Chat registers itself as the `main` agent, flips to `running` while a turn
-is active, and returns to `idle` when ready.
+is active, and returns to `idle` when ready. `essence chat` refuses to start
+when stdin/stdout or common CI variables indicate a non-interactive environment.
 
 The CLI also includes a pixel-styled setup flow for the full path from install
 to model configuration, chat, and the live board:

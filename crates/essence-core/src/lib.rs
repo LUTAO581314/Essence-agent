@@ -6,6 +6,7 @@
 #[cfg(feature = "api")]
 pub mod api;
 pub mod approval_index;
+pub mod builtin_tools;
 pub mod control;
 #[cfg(feature = "gitnexus")]
 pub mod gitnexus;
@@ -40,6 +41,7 @@ pub mod workspace;
 #[cfg(feature = "api")]
 pub use api::*;
 pub use approval_index::*;
+pub use builtin_tools::*;
 pub use control::*;
 #[cfg(feature = "gitnexus")]
 pub use gitnexus::*;

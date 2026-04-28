@@ -14,6 +14,9 @@ The implemented layer is the durable local kernel:
 - file-backed control plane
 - session and run lifecycle records
 - tool call and approval records
+- Claude/Codex/Hermes-shaped built-in tools for safe file reads/search,
+  approval-gated patch/shell/web calls, ledger-backed todo/subagent operations,
+  and denied-by-default gateway exec
 - task, artifact, and memory events
 - local saved-memory store queries by kind and text
 - native subagent metadata and sidechain transcripts
@@ -49,7 +52,9 @@ The implemented layer is the durable local kernel:
 - local Control API adapter primitives for future HTTP/MCP servers
 - minimal `essence` CLI for session creation, message append, event tailing,
   interactive chat, Star Office-style terminal workspace watching, agent/task
-  heartbeat commands, and bounded model-command chat adapters
+  heartbeat commands, model config get/set, doctor checks, shell completions,
+  completion install, global dry-run previews, non-interactive chat detection,
+  and bounded model-command chat adapters
 - split CLI implementation modules for args, chat/model adapters, control
   commands, workspace rendering, shared support, and tests
 
@@ -62,6 +67,14 @@ cargo test --workspace
 ```
 
 Expected result: all library and CLI tests pass.
+
+Latest local proof for the CLI/built-in-tools polish:
+
+```bash
+cargo fmt --check
+cargo test -p essence-core
+cargo build -p essence-core --bin essence
+```
 
 Core-only proof:
 

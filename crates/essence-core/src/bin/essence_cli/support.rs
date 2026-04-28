@@ -5,6 +5,8 @@ use essence_core::{ApprovalId, EventEnvelope, RunId, SessionId, TaskId, UiEvent}
 use serde::Serialize;
 use uuid::Uuid;
 
+use super::args::CliOutputFormat;
+
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum CliError {
     #[error(transparent)]
@@ -31,6 +33,49 @@ pub(crate) enum CliError {
     MissingAnchorKeyEnv(String),
     #[error("invalid model configuration: {0}")]
     ModelConfig(String),
+    #[error("doctor found {0}")]
+    Doctor(String),
+    #[error("interactive command cannot run in this environment: {0}")]
+    NonInteractive(String),
+    #[error("{0}")]
+    Usage(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct OutputMode {
+    pub(crate) format: CliOutputFormat,
+    pub(crate) quiet: bool,
+    pub(crate) verbose: u8,
+    pub(crate) dry_run: bool,
+}
+
+impl OutputMode {
+    pub(crate) fn new(
+        output: CliOutputFormat,
+        json: bool,
+        quiet: bool,
+        verbose: u8,
+        dry_run: bool,
+    ) -> Self {
+        Self {
+            format: if json { CliOutputFormat::Json } else { output },
+            quiet,
+            verbose,
+            dry_run,
+        }
+    }
+
+    pub(crate) fn is_json(self) -> bool {
+        self.format == CliOutputFormat::Json
+    }
+
+    pub(crate) fn is_jsonl(self) -> bool {
+        self.format == CliOutputFormat::Jsonl
+    }
+
+    pub(crate) fn is_structured(self) -> bool {
+        self.is_json() || self.is_jsonl()
+    }
 }
 
 pub(crate) fn emit_events(
@@ -55,6 +100,15 @@ pub(crate) fn write_json_pretty(
     value: &impl Serialize,
 ) -> Result<(), CliError> {
     serde_json::to_writer_pretty(&mut *writer, value)?;
+    writer.write_all(b"\n")?;
+    Ok(())
+}
+
+pub(crate) fn write_text_line(
+    writer: &mut impl Write,
+    text: impl AsRef<str>,
+) -> Result<(), CliError> {
+    writer.write_all(text.as_ref().as_bytes())?;
     writer.write_all(b"\n")?;
     Ok(())
 }

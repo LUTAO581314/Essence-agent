@@ -28,9 +28,9 @@ fn creates_session_via_cli() {
     let cwd = root.join("workspace");
     fs::create_dir_all(&cwd).unwrap();
 
-    let cli = Cli {
-        root: root.clone(),
-        command: Command::Session(SessionArgs {
+    let cli = test_cli(
+        root.clone(),
+        Command::Session(SessionArgs {
             command: SessionCommand::Create(SessionCreateArgs {
                 cwd: Some(cwd.clone()),
                 title: Some("First session".to_string()),
@@ -39,7 +39,7 @@ fn creates_session_via_cli() {
                 permission_mode: CliPermissionMode::Default,
             }),
         }),
-    };
+    );
 
     let mut out = Vec::new();
     execute(cli, &mut out).unwrap();
@@ -56,6 +56,188 @@ fn creates_session_via_cli() {
 }
 
 #[test]
+fn session_create_defaults_to_human_text_output() {
+    let root = temp_root("create-session-text");
+    let cwd = root.join("workspace");
+    fs::create_dir_all(&cwd).unwrap();
+
+    let cli = text_cli(
+        root.clone(),
+        Command::Session(SessionArgs {
+            command: SessionCommand::Create(SessionCreateArgs {
+                cwd: Some(cwd),
+                title: Some("Text session".to_string()),
+                model: None,
+                mode: CliSessionMode::Interactive,
+                permission_mode: CliPermissionMode::Default,
+            }),
+        }),
+    );
+
+    let mut out = Vec::new();
+    execute(cli, &mut out).unwrap();
+
+    let rendered = String::from_utf8(out).unwrap();
+    assert!(rendered.contains("created session"));
+    assert!(rendered.contains("permission: default"));
+    assert!(serde_json::from_str::<Value>(&rendered).is_err());
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn completion_command_generates_shell_script() {
+    let root = temp_root("completion");
+    let cli = text_cli(
+        root.clone(),
+        Command::Completion(CompletionArgs {
+            command: None,
+            shell: Some(CliCompletionShell::Bash),
+        }),
+    );
+
+    let mut out = Vec::new();
+    execute(cli, &mut out).unwrap();
+
+    let rendered = String::from_utf8(out).unwrap();
+    assert!(rendered.contains("_essence"));
+    assert!(rendered.contains("COMPREPLY"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn completion_install_writes_shell_script() {
+    let root = temp_root("completion-install");
+    let completion_dir = root.join("completions");
+    let cli = text_cli(
+        root.clone(),
+        Command::Completion(CompletionArgs {
+            command: Some(CompletionCommand::Install(CompletionInstallArgs {
+                shell: CliCompletionShell::Bash,
+                dir: Some(completion_dir.clone()),
+            })),
+            shell: None,
+        }),
+    );
+
+    let mut out = Vec::new();
+    execute(cli, &mut out).unwrap();
+
+    let rendered = String::from_utf8(out).unwrap();
+    let completion_path = completion_dir.join("essence");
+    assert!(rendered.contains("installed completion"));
+    assert!(fs::read_to_string(completion_path)
+        .unwrap()
+        .contains("_essence"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn config_set_and_get_model() {
+    let root = temp_root("config-set-get");
+    let set_cli = text_cli(
+        root.clone(),
+        Command::Config(ConfigArgs {
+            command: ConfigCommand::Set(ConfigSetArgs {
+                key: CliConfigKey::Model,
+                value: "gpt-test".to_string(),
+            }),
+        }),
+    );
+
+    let mut out = Vec::new();
+    execute(set_cli, &mut out).unwrap();
+
+    let stored = read_model_config(&root).unwrap().unwrap();
+    assert_eq!(stored.model.as_deref(), Some("gpt-test"));
+
+    let get_cli = text_cli(
+        root.clone(),
+        Command::Config(ConfigArgs {
+            command: ConfigCommand::Get(ConfigGetArgs {
+                key: Some(CliConfigKey::Model),
+            }),
+        }),
+    );
+    let mut out = Vec::new();
+    execute(get_cli, &mut out).unwrap();
+    assert_eq!(String::from_utf8(out).unwrap(), "gpt-test\n");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn dry_run_config_set_does_not_write_config() {
+    let root = temp_root("config-dry-run");
+    let cli = dry_cli(
+        root.clone(),
+        Command::Config(ConfigArgs {
+            command: ConfigCommand::Set(ConfigSetArgs {
+                key: CliConfigKey::Model,
+                value: "gpt-dry".to_string(),
+            }),
+        }),
+    );
+
+    let mut out = Vec::new();
+    execute(cli, &mut out).unwrap();
+
+    let rendered = String::from_utf8(out).unwrap();
+    assert!(rendered.contains("dry run"));
+    assert!(read_model_config(&root).unwrap().is_none());
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn dry_run_session_create_does_not_write_wal() {
+    let root = temp_root("session-dry-run");
+    let cwd = root.join("workspace");
+    fs::create_dir_all(&cwd).unwrap();
+    let cli = dry_cli(
+        root.clone(),
+        Command::Session(SessionArgs {
+            command: SessionCommand::Create(SessionCreateArgs {
+                cwd: Some(cwd),
+                title: Some("Dry session".to_string()),
+                model: None,
+                mode: CliSessionMode::Interactive,
+                permission_mode: CliPermissionMode::Default,
+            }),
+        }),
+    );
+
+    let mut out = Vec::new();
+    execute(cli, &mut out).unwrap();
+
+    let rendered = String::from_utf8(out).unwrap();
+    assert!(rendered.contains("dry run"));
+    assert!(!root.join("sessions").exists());
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn doctor_reports_invalid_model_config_in_strict_mode() {
+    let root = temp_root("doctor-invalid-config");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("model.json"), r#"{"provider":"bad"}"#).unwrap();
+
+    let cli = text_cli(root.clone(), Command::Doctor(DoctorArgs { strict: true }));
+    let mut out = Vec::new();
+    let error = execute(cli, &mut out).unwrap_err();
+
+    assert!(error.to_string().contains("doctor found"));
+    let rendered = String::from_utf8(out).unwrap();
+    assert!(rendered.contains("doctor failed"));
+    assert!(rendered.contains("unsupported provider `bad`"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn sends_message_via_cli() {
     let root = temp_root("send-message");
     let control = ControlPlane::new(&root);
@@ -63,15 +245,15 @@ fn sends_message_via_cli() {
         .create_session(CreateSessionRequest::interactive("."))
         .unwrap();
 
-    let cli = Cli {
-        root: root.clone(),
-        command: Command::Message(MessageArgs {
+    let cli = test_cli(
+        root.clone(),
+        Command::Message(MessageArgs {
             command: MessageCommand::Send(MessageSendArgs {
                 session_id: session.session_id.0.to_string(),
                 text: "hello from cli".to_string(),
             }),
         }),
-    };
+    );
 
     let mut out = Vec::new();
     execute(cli, &mut out).unwrap();
@@ -101,9 +283,9 @@ fn tails_events_after_cursor() {
         .submit_user_message(&session.session_id, "second")
         .unwrap();
 
-    let cli = Cli {
-        root: root.clone(),
-        command: Command::Events(EventsArgs {
+    let cli = test_cli(
+        root.clone(),
+        Command::Events(EventsArgs {
             command: EventsCommand::Tail(EventsTailArgs {
                 session_id: session.session_id.0.to_string(),
                 after: 2,
@@ -112,7 +294,7 @@ fn tails_events_after_cursor() {
                 interval_ms: 1,
             }),
         }),
-    };
+    );
 
     let mut out = Vec::new();
     execute(cli, &mut out).unwrap();
@@ -140,14 +322,14 @@ fn verifies_event_integrity_via_cli() {
         .submit_user_message(&session.session_id, "verify me")
         .unwrap();
 
-    let cli = Cli {
-        root: root.clone(),
-        command: Command::Events(EventsArgs {
+    let cli = test_cli(
+        root.clone(),
+        Command::Events(EventsArgs {
             command: EventsCommand::Verify(EventsVerifyArgs {
                 session_id: session.session_id.0.to_string(),
             }),
         }),
-    };
+    );
 
     let mut out = Vec::new();
     execute(cli, &mut out).unwrap();
@@ -174,16 +356,16 @@ fn writes_and_verifies_event_anchor_via_cli() {
     let key_env = format!("ESSENCE_ANCHOR_KEY_{}", Uuid::new_v4().simple());
     std::env::set_var(&key_env, "test-anchor-secret");
 
-    let write_cli = Cli {
-        root: root.clone(),
-        command: Command::Events(EventsArgs {
+    let write_cli = test_cli(
+        root.clone(),
+        Command::Events(EventsArgs {
             command: EventsCommand::AnchorWrite(EventsAnchorWriteArgs {
                 session_id: session.session_id.0.to_string(),
                 key_id: "test-key".to_string(),
                 key_env: key_env.clone(),
             }),
         }),
-    };
+    );
     let mut out = Vec::new();
     execute(write_cli, &mut out).unwrap();
     let anchor: Value = serde_json::from_slice(&out).unwrap();
@@ -191,15 +373,15 @@ fn writes_and_verifies_event_anchor_via_cli() {
     assert_eq!(anchor["key_id"], "test-key");
     assert!(anchor["signature"].as_str().unwrap().len() >= 64);
 
-    let verify_cli = Cli {
-        root: root.clone(),
-        command: Command::Events(EventsArgs {
+    let verify_cli = test_cli(
+        root.clone(),
+        Command::Events(EventsArgs {
             command: EventsCommand::AnchorVerify(EventsAnchorVerifyArgs {
                 session_id: session.session_id.0.to_string(),
                 key_env: key_env.clone(),
             }),
         }),
-    };
+    );
     let mut out = Vec::new();
     execute(verify_cli, &mut out).unwrap();
     let verification: Value = serde_json::from_slice(&out).unwrap();
@@ -227,14 +409,14 @@ fn lists_pending_approvals_via_cli() {
         ))
         .unwrap();
 
-    let cli = Cli {
-        root: root.clone(),
-        command: Command::Approval(ApprovalArgs {
+    let cli = test_cli(
+        root.clone(),
+        Command::Approval(ApprovalArgs {
             command: ApprovalCommand::Pending(ApprovalPendingArgs {
                 session_id: session.session_id.0.to_string(),
             }),
         }),
-    };
+    );
 
     let mut out = Vec::new();
     execute(cli, &mut out).unwrap();
@@ -265,9 +447,9 @@ fn resolves_approval_via_cli() {
         ))
         .unwrap();
 
-    let cli = Cli {
-        root: root.clone(),
-        command: Command::Approval(ApprovalArgs {
+    let cli = test_cli(
+        root.clone(),
+        Command::Approval(ApprovalArgs {
             command: ApprovalCommand::Resolve(ApprovalResolveArgs {
                 session_id: session.session_id.0.to_string(),
                 approval_id: approval.approval_id.0.to_string(),
@@ -275,7 +457,7 @@ fn resolves_approval_via_cli() {
                 resolved_by: "tester".to_string(),
             }),
         }),
-    };
+    );
 
     let mut out = Vec::new();
     execute(cli, &mut out).unwrap();
@@ -621,9 +803,9 @@ fn setup_rejects_bad_main_agent_inputs_before_writing_config() {
 #[test]
 fn agent_define_rejects_unknown_template() {
     let root = temp_root("agent-unknown-template");
-    let cli = Cli {
-        root: root.clone(),
-        command: Command::Agent(AgentArgs {
+    let cli = test_cli(
+        root.clone(),
+        Command::Agent(AgentArgs {
             command: AgentCommand::Define(AgentDefineArgs {
                 agent_id: "researcher".to_string(),
                 template: Some("missing-template".to_string()),
@@ -640,7 +822,7 @@ fn agent_define_rejects_unknown_template() {
                 no_color: true,
             }),
         }),
-    };
+    );
 
     let mut out = Vec::new();
     let error = execute(cli, &mut out).unwrap_err();
@@ -655,9 +837,9 @@ fn agent_define_rejects_unknown_template() {
 #[test]
 fn agent_templates_hint_includes_required_agent_id() {
     let root = temp_root("agent-templates-hint");
-    let cli = Cli {
-        root: root.clone(),
-        command: Command::Agent(AgentArgs {
+    let cli = test_cli(
+        root.clone(),
+        Command::Agent(AgentArgs {
             command: AgentCommand::Templates(AgentTemplatesArgs {
                 query: Some("research".to_string()),
                 category: None,
@@ -665,7 +847,7 @@ fn agent_templates_hint_includes_required_agent_id() {
                 no_color: true,
             }),
         }),
-    };
+    );
 
     let mut out = Vec::new();
     execute(cli, &mut out).unwrap();
@@ -698,9 +880,9 @@ fn agent_profile_saves_prompt_and_chat_uses_it() {
             .to_string(),
     );
 
-    let define_cli = Cli {
-        root: root.clone(),
-        command: Command::Agent(AgentArgs {
+    let define_cli = test_cli(
+        root.clone(),
+        Command::Agent(AgentArgs {
             command: AgentCommand::Define(AgentDefineArgs {
                 agent_id: "researcher".to_string(),
                 template: None,
@@ -717,7 +899,7 @@ fn agent_profile_saves_prompt_and_chat_uses_it() {
                 no_color: true,
             }),
         }),
-    };
+    );
     let mut define_out = Vec::new();
     execute(define_cli, &mut define_out).unwrap();
     let define_rendered = String::from_utf8(define_out).unwrap();
@@ -726,12 +908,12 @@ fn agent_profile_saves_prompt_and_chat_uses_it() {
     assert!(define_rendered.contains("PROMPT READY"));
     assert!(define_rendered.contains("saved"));
 
-    let profiles_cli = Cli {
-        root: root.clone(),
-        command: Command::Agent(AgentArgs {
+    let profiles_cli = test_cli(
+        root.clone(),
+        Command::Agent(AgentArgs {
             command: AgentCommand::Profiles(AgentProfilesArgs { no_color: true }),
         }),
-    };
+    );
     let mut profiles_out = Vec::new();
     execute(profiles_cli, &mut profiles_out).unwrap();
     let profiles_rendered = String::from_utf8(profiles_out).unwrap();
@@ -994,6 +1176,45 @@ fn workspace_watch_renders_registered_agent_once() {
 
 fn temp_root(label: &str) -> PathBuf {
     std::env::temp_dir().join(format!("essence-cli-{label}-{}", Uuid::new_v4()))
+}
+
+fn test_cli(root: PathBuf, command: Command) -> Cli {
+    Cli {
+        root,
+        output: CliOutputFormat::Json,
+        json: false,
+        quiet: false,
+        verbose: 0,
+        dry_run: false,
+        version: false,
+        command,
+    }
+}
+
+fn text_cli(root: PathBuf, command: Command) -> Cli {
+    Cli {
+        root,
+        output: CliOutputFormat::Text,
+        json: false,
+        quiet: false,
+        verbose: 0,
+        dry_run: false,
+        version: false,
+        command,
+    }
+}
+
+fn dry_cli(root: PathBuf, command: Command) -> Cli {
+    Cli {
+        root,
+        output: CliOutputFormat::Text,
+        json: false,
+        quiet: false,
+        verbose: 0,
+        dry_run: true,
+        version: false,
+        command,
+    }
 }
 
 fn assert_message_contains(message: &MessagePayload, expected: &str) {

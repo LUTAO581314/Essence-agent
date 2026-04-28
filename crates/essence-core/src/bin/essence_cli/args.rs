@@ -1,17 +1,79 @@
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use essence_core::{ApprovalDecision, LifecycleStatus, PermissionMode, SessionMode};
+
+const CLI_LONG_ABOUT: &str = "\
+Essence Agent local control plane.
+
+Examples:
+  essence setup --save
+  essence chat
+  essence session create --cwd . --json
+  essence events tail --session-id <session-id> --follow --output jsonl
+  essence approval pending --session-id <session-id> --json
+
+Use `essence <command> --help` for command-specific examples and flags.
+Docs: https://github.com/essence-agent/essence-agent
+Issues: https://github.com/essence-agent/essence-agent/issues";
 
 #[derive(Debug, Parser)]
 #[command(
     name = "essence",
     version,
-    about = "Minimal v0 CLI for the Essence Agent control plane."
+    about = "Essence Agent local control plane.",
+    long_about = CLI_LONG_ABOUT,
+    arg_required_else_help = true,
+    disable_version_flag = true,
+    infer_subcommands = true,
+    subcommand_required = true
 )]
 pub(crate) struct Cli {
     #[arg(long, global = true, default_value = ".essence")]
     pub(crate) root: PathBuf,
+    #[arg(
+        long,
+        global = true,
+        value_enum,
+        default_value_t = CliOutputFormat::Text,
+        help = "Select stdout format for data commands"
+    )]
+    pub(crate) output: CliOutputFormat,
+    #[arg(
+        long,
+        global = true,
+        conflicts_with = "output",
+        help = "Shortcut for --output json"
+    )]
+    pub(crate) json: bool,
+    #[arg(
+        short = 'q',
+        long,
+        global = true,
+        help = "Reduce text output to the primary id, count, or status"
+    )]
+    pub(crate) quiet: bool,
+    #[arg(
+        long,
+        global = true,
+        action = ArgAction::Count,
+        help = "Increase diagnostic detail in text output"
+    )]
+    pub(crate) verbose: u8,
+    #[arg(
+        long,
+        global = true,
+        help = "Preview mutating commands without writing state"
+    )]
+    pub(crate) dry_run: bool,
+    #[arg(
+        short = 'v',
+        long = "version",
+        action = ArgAction::SetTrue,
+        default_value_t = false,
+        help = "Print version"
+    )]
+    pub(crate) version: bool,
     #[command(subcommand)]
     pub(crate) command: Command,
 }
@@ -27,6 +89,94 @@ pub(crate) enum Command {
     Agent(AgentArgs),
     Task(TaskArgs),
     Workspace(WorkspaceArgs),
+    Config(ConfigArgs),
+    Doctor(DoctorArgs),
+    Completion(CompletionArgs),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum CliOutputFormat {
+    Text,
+    Json,
+    Jsonl,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct CompletionArgs {
+    #[command(subcommand)]
+    pub(crate) command: Option<CompletionCommand>,
+    #[arg(value_enum, help = "Shell to generate completions for")]
+    pub(crate) shell: Option<CliCompletionShell>,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum CompletionCommand {
+    Generate(CompletionGenerateArgs),
+    Install(CompletionInstallArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct CompletionGenerateArgs {
+    #[arg(value_enum)]
+    pub(crate) shell: CliCompletionShell,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct CompletionInstallArgs {
+    #[arg(value_enum)]
+    pub(crate) shell: CliCompletionShell,
+    #[arg(long)]
+    pub(crate) dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub(crate) enum CliCompletionShell {
+    Bash,
+    Zsh,
+    Fish,
+    #[value(name = "powershell", alias = "power-shell")]
+    PowerShell,
+    Elvish,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ConfigArgs {
+    #[command(subcommand)]
+    pub(crate) command: ConfigCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum ConfigCommand {
+    Get(ConfigGetArgs),
+    Set(ConfigSetArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ConfigGetArgs {
+    #[arg(value_enum)]
+    pub(crate) key: Option<CliConfigKey>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ConfigSetArgs {
+    #[arg(value_enum)]
+    pub(crate) key: CliConfigKey,
+    pub(crate) value: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum CliConfigKey {
+    Provider,
+    Model,
+    BaseUrl,
+    ApiKeyEnv,
+    Command,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct DoctorArgs {
+    #[arg(long, help = "Exit with an error if any doctor check fails")]
+    pub(crate) strict: bool,
 }
 
 #[derive(Debug, Args)]

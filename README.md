@@ -77,6 +77,13 @@ The long-term shape is:
 Essence Agent uses other agent systems as architecture references, not as code
 to copy. The core idea is to absorb durable patterns, then re-express them as a
 small, auditable Rust kernel with an append-only ledger as the source of truth.
+The project keeps reference influence explicit so readers can see what was
+borrowed as a concept, what was bundled as an asset, and where the boundary is:
+
+| Reference | Upstream | Essence usage | Boundary |
+| --- | --- | --- | --- |
+| Agency Agents | https://github.com/msitarzewski/agency-agents | Bundled as MIT role-packet prompt templates in `assets/agency-agents/templates.json` for `essence agent templates` and `essence agent define --template`. | Prompt templates only; no upstream runtime code is used as the kernel. |
+| Other reference systems | Listed below and expanded in `docs/reference-synthesis.md`. | Design influence for ledgers, subagents, plugin boundaries, memory, research, browser isolation, and visual workspaces. | Ideas are reimplemented behind Essence protocol boundaries; incompatible or tightly coupled code is not copied. |
 
 - Claude Code: the main backbone reference for a query-style execution loop,
   JSONL transcript/session storage, headless and interactive control-plane

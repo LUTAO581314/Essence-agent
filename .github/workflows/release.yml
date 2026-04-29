@@ -59,9 +59,9 @@ jobs:
       run: |
         set -euo pipefail
         if gh release view "${TAG}" >/dev/null 2>&1; then
-          gh release upload "${TAG}" dist/* --clobber
+          gh release upload "${TAG}" dist/*.tar.gz dist/*.sha256 --clobber
         else
-          gh release create "${TAG}" dist/* \
+          gh release create "${TAG}" dist/*.tar.gz dist/*.sha256 \
             --title "${TAG}" \
             --notes "MOXI Agent ${TAG}: core contracts, policy, sandbox, and ledger source bundle."
         fi

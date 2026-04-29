@@ -1,5 +1,7 @@
 use chrono::Utc;
-use moxi_contracts::{ApprovalGrant, Budget, ExecutionTicket, LedgerEvent, RunStatus};
+use moxi_contracts::{
+    ApprovalGrant, Budget, ExecutionTicket, LedgerEvent, Proof, RunStatus, SandboxResult,
+};
 use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -89,7 +91,42 @@ impl Store {
                 run_id TEXT NOT NULL,
                 capability_id TEXT NOT NULL,
                 expires_at TEXT NOT NULL,
-                consumed_at TEXT
+                consumed_at TEXT,
+                payload_json TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS sandbox_results (
+                ticket_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                capability_id TEXT NOT NULL,
+                policy_decision_ref TEXT NOT NULL,
+                capability_contract_ref TEXT NOT NULL,
+                capability_contract_hash TEXT NOT NULL,
+                executor_ref TEXT NOT NULL,
+                executor_version TEXT NOT NULL,
+                executor_manifest_hash TEXT NOT NULL,
+                gateway_decision_ref TEXT,
+                input_hash TEXT NOT NULL,
+                output_hash TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                finished_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS proofs (
+                proof_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                policy_decision_ref TEXT NOT NULL,
+                capability_contract_ref TEXT NOT NULL,
+                capability_contract_hash TEXT NOT NULL,
+                executor_ref TEXT NOT NULL,
+                executor_version TEXT NOT NULL,
+                executor_manifest_hash TEXT NOT NULL,
+                gateway_decision_ref TEXT,
+                input_hash TEXT NOT NULL,
+                output_hash TEXT NOT NULL,
+                source_ref TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                collected_at TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS approval_grants (
@@ -136,8 +173,47 @@ impl Store {
             BEGIN
                 SELECT RAISE(ABORT, 'approval_grants append only');
             END;
+
+            CREATE TRIGGER IF NOT EXISTS sandbox_results_no_update
+            BEFORE UPDATE ON sandbox_results
+            BEGIN
+                SELECT RAISE(ABORT, 'sandbox_results append only');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS sandbox_results_no_delete
+            BEFORE DELETE ON sandbox_results
+            BEGIN
+                SELECT RAISE(ABORT, 'sandbox_results append only');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS proofs_no_update
+            BEFORE UPDATE ON proofs
+            BEGIN
+                SELECT RAISE(ABORT, 'proofs append only');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS proofs_no_delete
+            BEFORE DELETE ON proofs
+            BEGIN
+                SELECT RAISE(ABORT, 'proofs append only');
+            END;
             "#,
         )?;
+        self.ensure_column("execution_tickets", "payload_json", "TEXT")?;
+        Ok(())
+    }
+
+    fn ensure_column(&self, table: &str, column: &str, definition: &str) -> StoreResult<()> {
+        let mut stmt = self.conn.prepare(&format!("PRAGMA table_info({table})"))?;
+        let columns = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?;
+        if !columns.iter().any(|existing| existing == column) {
+            self.conn.execute(
+                &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
+                [],
+            )?;
+        }
         Ok(())
     }
 
@@ -218,17 +294,35 @@ impl Store {
     pub fn record_ticket(&self, ticket: &ExecutionTicket) -> StoreResult<()> {
         self.conn.execute(
             r#"
-            INSERT INTO execution_tickets (ticket_id, run_id, capability_id, expires_at, consumed_at)
-            VALUES (?1, ?2, ?3, ?4, NULL)
+            INSERT INTO execution_tickets (
+                ticket_id, run_id, capability_id, expires_at, consumed_at, payload_json
+            )
+            VALUES (?1, ?2, ?3, ?4, NULL, ?5)
             "#,
             params![
                 ticket.ticket_id,
                 ticket.run_id,
                 ticket.capability_id,
                 ticket.expires_at.to_rfc3339(),
+                serde_json::to_string(ticket)?,
             ],
         )?;
         Ok(())
+    }
+
+    pub fn execution_ticket(&self, ticket_id: &str) -> StoreResult<Option<ExecutionTicket>> {
+        let payload = self
+            .conn
+            .query_row(
+                "SELECT payload_json FROM execution_tickets WHERE ticket_id = ?1",
+                params![ticket_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten();
+        payload
+            .map(|payload| Ok(serde_json::from_str(&payload)?))
+            .transpose()
     }
 
     pub fn consume_ticket(&self, ticket_id: &str) -> StoreResult<()> {
@@ -281,6 +375,94 @@ impl Store {
             .conn
             .prepare("SELECT payload_json FROM approval_grants WHERE grant_id = ?1")?;
         let mut rows = stmt.query(params![grant_id])?;
+        if let Some(row) = rows.next()? {
+            let payload: String = row.get(0)?;
+            Ok(Some(serde_json::from_str(&payload)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn record_sandbox_result(&self, result: &SandboxResult) -> StoreResult<()> {
+        self.conn.execute(
+            r#"
+            INSERT INTO sandbox_results (
+                ticket_id, run_id, capability_id, policy_decision_ref,
+                capability_contract_ref, capability_contract_hash, executor_ref,
+                executor_version, executor_manifest_hash, gateway_decision_ref,
+                input_hash, output_hash, payload_json, finished_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+            "#,
+            params![
+                result.ticket_id,
+                result.run_id,
+                result.capability_id,
+                result.policy_decision_ref,
+                result.capability_contract_ref,
+                result.capability_contract_hash,
+                result.executor_ref,
+                result.executor_version,
+                result.executor_manifest_hash,
+                result.gateway_decision_ref,
+                result.input_hash,
+                result.output_hash,
+                serde_json::to_string(result)?,
+                result.finished_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn sandbox_result(&self, ticket_id: &str) -> StoreResult<Option<SandboxResult>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT payload_json FROM sandbox_results WHERE ticket_id = ?1")?;
+        let mut rows = stmt.query(params![ticket_id])?;
+        if let Some(row) = rows.next()? {
+            let payload: String = row.get(0)?;
+            Ok(Some(serde_json::from_str(&payload)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn record_proof(&self, proof: &Proof) -> StoreResult<()> {
+        self.conn.execute(
+            r#"
+            INSERT INTO proofs (
+                proof_id, run_id, policy_decision_ref, capability_contract_ref,
+                capability_contract_hash, executor_ref, executor_version,
+                executor_manifest_hash, gateway_decision_ref, input_hash,
+                output_hash, source_ref, payload_json, collected_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+            "#,
+            params![
+                proof.proof_id,
+                proof.run_id,
+                proof.policy_decision_ref,
+                proof.capability_contract_ref,
+                proof.capability_contract_hash,
+                proof.executor_ref,
+                proof.executor_version,
+                proof.executor_manifest_hash,
+                proof.gateway_decision_ref,
+                proof.input_hash,
+                proof.output_hash,
+                proof.source_ref,
+                serde_json::to_string(proof)?,
+                proof.collected_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn proof(&self, proof_id: &str) -> StoreResult<Option<Proof>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT payload_json FROM proofs WHERE proof_id = ?1")?;
+        let mut rows = stmt.query(params![proof_id])?;
         if let Some(row) = rows.next()? {
             let payload: String = row.get(0)?;
             Ok(Some(serde_json::from_str(&payload)?))
@@ -474,6 +656,7 @@ mod tests {
     use super::*;
     use chrono::{Duration, Utc};
     use moxi_contracts::{ApprovalGrant, EventResult};
+    use serde_json::json;
 
     fn ledger_event() -> LedgerEvent {
         LedgerEvent {
@@ -485,6 +668,13 @@ mod tests {
             delta_id: "delta_1".into(),
             capability_id: "file.read".into(),
             policy_decision_ref: "pd_1".into(),
+            execution_ticket_ref: "ticket_1".into(),
+            capability_contract_ref: "file.read".into(),
+            capability_contract_hash: "contract_hash_1".into(),
+            executor_ref: "moxi.builtin.fs.file_read".into(),
+            executor_version: "0.2.0".into(),
+            executor_manifest_hash: "executor_manifest_hash_1".into(),
+            gateway_decision_ref: None,
             proof_refs: vec!["proof_1".into()],
             input_hash: "in".into(),
             output_hash: "out".into(),
@@ -506,6 +696,75 @@ mod tests {
             reason: "approved".into(),
             granted_at: Utc::now(),
             expires_at: Utc::now() + Duration::minutes(5),
+        }
+    }
+
+    fn execution_ticket() -> ExecutionTicket {
+        ExecutionTicket {
+            ticket_id: "ticket_1".into(),
+            run_id: "run_1".into(),
+            delta_id: "delta_1".into(),
+            policy_decision_ref: "pd_1".into(),
+            capability_contract_ref: "file.read".into(),
+            capability_contract_hash: "contract_hash_1".into(),
+            executor_ref: "moxi.builtin.fs.file_read".into(),
+            executor_version: "0.2.0".into(),
+            executor_manifest_hash: "executor_manifest_hash_1".into(),
+            executor_isolation: moxi_contracts::ExecutorIsolation::InProcessTrusted,
+            retry_policy: Default::default(),
+            sandbox_profile_ref: "fs-readonly".into(),
+            actor_id: "kernel".into(),
+            capability_id: "file.read".into(),
+            expires_at: Utc::now() + Duration::minutes(5),
+        }
+    }
+
+    fn proof() -> Proof {
+        Proof {
+            proof_id: "proof_1".into(),
+            run_id: "run_1".into(),
+            policy_decision_ref: "pd_1".into(),
+            capability_contract_ref: "file.read".into(),
+            capability_contract_hash: "contract_hash_1".into(),
+            executor_ref: "moxi.builtin.fs.file_read".into(),
+            executor_version: "0.2.0".into(),
+            executor_manifest_hash: "executor_manifest_hash_1".into(),
+            gateway_decision_ref: Some("gd_1".into()),
+            input_hash: "input_hash_1".into(),
+            output_hash: "output_hash_1".into(),
+            source_type: "tool_output".into(),
+            source_ref: "ticket_1".into(),
+            hash: "proof_hash_1".into(),
+            claim: "file.read completed successfully".into(),
+            confidence: moxi_contracts::Confidence::High,
+            collected_at: Utc::now(),
+        }
+    }
+
+    fn sandbox_result() -> SandboxResult {
+        let output = json!({
+            "path": "file.txt",
+            "content": "hello",
+            "bytes": 5
+        });
+        SandboxResult {
+            ticket_id: "ticket_1".into(),
+            run_id: "run_1".into(),
+            capability_id: "file.read".into(),
+            policy_decision_ref: "pd_1".into(),
+            capability_contract_ref: "file.read".into(),
+            capability_contract_hash: "contract_hash_1".into(),
+            executor_ref: "moxi.builtin.fs.file_read".into(),
+            executor_version: "0.2.0".into(),
+            executor_manifest_hash: "executor_manifest_hash_1".into(),
+            gateway_decision_ref: Some("gd_1".into()),
+            input_hash: "input_hash_1".into(),
+            success: true,
+            output,
+            error: None,
+            started_at: Utc::now(),
+            finished_at: Utc::now(),
+            output_hash: "output_hash_1".into(),
         }
     }
 
@@ -543,6 +802,64 @@ mod tests {
         let delete = store.conn.execute(
             "DELETE FROM approval_grants WHERE grant_id = ?1",
             params![grant.grant_id],
+        );
+        assert!(delete.is_err());
+    }
+
+    #[test]
+    fn execution_ticket_payload_is_persisted() {
+        let store = Store::open_memory().unwrap();
+        let ticket = execution_ticket();
+
+        store.record_ticket(&ticket).unwrap();
+
+        assert_eq!(
+            store.execution_ticket(&ticket.ticket_id).unwrap(),
+            Some(ticket)
+        );
+    }
+
+    #[test]
+    fn sandbox_result_payload_is_persisted_and_append_only() {
+        let store = Store::open_memory().unwrap();
+        let result = sandbox_result();
+        store.record_sandbox_result(&result).unwrap();
+
+        assert_eq!(
+            store.sandbox_result(&result.ticket_id).unwrap(),
+            Some(result.clone())
+        );
+
+        let update = store.conn.execute(
+            "UPDATE sandbox_results SET output_hash = 'tampered' WHERE ticket_id = ?1",
+            params![result.ticket_id],
+        );
+        assert!(update.is_err());
+
+        let delete = store.conn.execute(
+            "DELETE FROM sandbox_results WHERE ticket_id = ?1",
+            params![result.ticket_id],
+        );
+        assert!(delete.is_err());
+    }
+
+    #[test]
+    fn proof_payload_is_persisted_and_append_only() {
+        let store = Store::open_memory().unwrap();
+        let proof = proof();
+        store.record_proof(&proof).unwrap();
+
+        assert_eq!(store.proof(&proof.proof_id).unwrap(), Some(proof.clone()));
+
+        let update = store.conn.execute(
+            "UPDATE proofs SET output_hash = 'tampered' WHERE proof_id = ?1",
+            params![proof.proof_id],
+        );
+        assert!(update.is_err());
+
+        let delete = store.conn.execute(
+            "DELETE FROM proofs WHERE proof_id = ?1",
+            params![proof.proof_id],
         );
         assert!(delete.is_err());
     }

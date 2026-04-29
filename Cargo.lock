@@ -917,6 +917,45 @@ dependencies = [
 ]
 
 [[package]]
+name = "moxi-entry"
+version = "0.2.0"
+dependencies = [
+ "moxi-contracts",
+ "schemars",
+ "serde",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
+name = "moxi-gateway"
+version = "0.2.0"
+dependencies = [
+ "moxi-contracts",
+ "moxi-entry",
+ "schemars",
+ "serde",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
+name = "moxi-intent"
+version = "0.2.0"
+dependencies = [
+ "moxi-contracts",
+ "moxi-core",
+ "moxi-entry",
+ "moxi-gateway",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
 name = "moxi-sandbox"
 version = "0.2.0"
 dependencies = [

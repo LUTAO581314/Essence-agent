@@ -2,6 +2,9 @@
 members = [
     "crates/moxi-contracts",
     "crates/moxi-core",
+    "crates/moxi-entry",
+    "crates/moxi-gateway",
+    "crates/moxi-intent",
     "crates/moxi-sandbox",
     "crates/moxi-store",
 ]

@@ -123,6 +123,17 @@ pub enum ErrorCode {
     SystemError,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutorIsolation {
+    InProcessTrusted,
+    ProcessSandbox,
+    RemoteSandbox,
+    BrowserSandbox,
+    ModelGateway,
+    PluginHost,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct Budget {
     pub max_steps: u32,
@@ -149,6 +160,7 @@ pub struct Intent {
     pub intent_id: String,
     pub tenant_id: String,
     pub user_id: String,
+    pub gateway_decision_ref: Option<String>,
     pub goal: String,
     pub requested_capabilities: Vec<String>,
     pub risk_level: RiskLevel,
@@ -162,6 +174,7 @@ pub struct RunContract {
     pub intent_id: String,
     pub tenant_id: String,
     pub user_id: String,
+    pub gateway_decision_ref: Option<String>,
     pub risk_level: RiskLevel,
     pub permission_mode: PermissionMode,
     pub status_ref: String,
@@ -223,7 +236,11 @@ pub struct RetryPolicy {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct CapabilityContract {
     pub capability_id: String,
+    pub capability_version: String,
     pub provider: String,
+    pub provider_identity: String,
+    pub manifest_ref: Option<String>,
+    pub signature_ref: Option<String>,
     pub input_schema: Value,
     pub output_schema: Value,
     pub error_schema: Value,
@@ -235,6 +252,19 @@ pub struct CapabilityContract {
     pub audit_required: bool,
     pub proof_required: bool,
     pub rollback_required: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+pub struct ExecutorManifest {
+    pub executor_id: String,
+    pub capability_id: String,
+    pub capability_contract_hash: String,
+    pub provider_identity: String,
+    pub executor_version: String,
+    pub isolation: ExecutorIsolation,
+    pub sandbox_profile: String,
+    pub manifest_ref: Option<String>,
+    pub signature_ref: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -277,6 +307,12 @@ pub struct ExecutionTicket {
     pub delta_id: String,
     pub policy_decision_ref: String,
     pub capability_contract_ref: String,
+    pub capability_contract_hash: String,
+    pub executor_ref: String,
+    pub executor_version: String,
+    pub executor_manifest_hash: String,
+    pub executor_isolation: ExecutorIsolation,
+    pub retry_policy: RetryPolicy,
     pub sandbox_profile_ref: String,
     pub actor_id: String,
     pub capability_id: String,
@@ -294,6 +330,14 @@ pub struct SandboxResult {
     pub ticket_id: String,
     pub run_id: String,
     pub capability_id: String,
+    pub policy_decision_ref: String,
+    pub capability_contract_ref: String,
+    pub capability_contract_hash: String,
+    pub executor_ref: String,
+    pub executor_version: String,
+    pub executor_manifest_hash: String,
+    pub gateway_decision_ref: Option<String>,
+    pub input_hash: String,
     pub success: bool,
     pub output: Value,
     pub error: Option<StructuredError>,
@@ -306,6 +350,15 @@ pub struct SandboxResult {
 pub struct Proof {
     pub proof_id: String,
     pub run_id: String,
+    pub policy_decision_ref: String,
+    pub capability_contract_ref: String,
+    pub capability_contract_hash: String,
+    pub executor_ref: String,
+    pub executor_version: String,
+    pub executor_manifest_hash: String,
+    pub gateway_decision_ref: Option<String>,
+    pub input_hash: String,
+    pub output_hash: String,
     pub source_type: String,
     pub source_ref: String,
     pub hash: String,
@@ -324,6 +377,13 @@ pub struct LedgerEvent {
     pub delta_id: String,
     pub capability_id: String,
     pub policy_decision_ref: String,
+    pub execution_ticket_ref: String,
+    pub capability_contract_ref: String,
+    pub capability_contract_hash: String,
+    pub executor_ref: String,
+    pub executor_version: String,
+    pub executor_manifest_hash: String,
+    pub gateway_decision_ref: Option<String>,
     pub proof_refs: Vec<String>,
     pub input_hash: String,
     pub output_hash: String,
@@ -366,6 +426,7 @@ mod tests {
             intent_id: "intent_1".into(),
             tenant_id: "tenant_a".into(),
             user_id: "user_a".into(),
+            gateway_decision_ref: None,
             risk_level: RiskLevel::Low,
             permission_mode: PermissionMode::ReadOnly,
             status_ref: "state_run_1".into(),

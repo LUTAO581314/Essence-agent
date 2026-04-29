@@ -1,0 +1,13 @@
+[package]
+name = "moxi-gateway"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+moxi-contracts = { path = "../moxi-contracts" }
+moxi-entry = { path = "../moxi-entry" }
+schemars.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+uuid.workspace = true

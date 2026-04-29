@@ -1,0 +1,19 @@
+[package]
+name = "moxi-intent"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+moxi-contracts = { path = "../moxi-contracts" }
+moxi-gateway = { path = "../moxi-gateway" }
+schemars.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+moxi-core = { path = "../moxi-core" }
+moxi-entry = { path = "../moxi-entry" }
+serde_json.workspace = true
+tempfile.workspace = true

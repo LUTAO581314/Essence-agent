@@ -1,10 +1,13 @@
 use chrono::Utc;
 use moxi_contracts::{
-    ApprovalGrant, Budget, ExecutionTicket, LedgerEvent, Proof, RunStatus, SandboxResult,
+    ApprovalGrant, Budget, EventResult, ExecutionTicket, LedgerEvent, Proof, RunStatus,
+    SandboxResult,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+
+const CURRENT_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -42,9 +45,52 @@ pub enum StoreError {
         expected_hash: String,
         actual_hash: String,
     },
+    #[error("ledger audit requires at least one proof for successful event {ledger_event_id}")]
+    LedgerAuditProofRequired { ledger_event_id: String },
+    #[error("ledger audit missing execution ticket {ticket_id} referenced by {ledger_event_id}")]
+    LedgerAuditMissingTicket {
+        ledger_event_id: String,
+        ticket_id: String,
+    },
+    #[error("ledger audit missing sandbox result {ticket_id} referenced by {ledger_event_id}")]
+    LedgerAuditMissingSandboxResult {
+        ledger_event_id: String,
+        ticket_id: String,
+    },
+    #[error("ledger audit missing proof {proof_id} referenced by {ledger_event_id}")]
+    LedgerAuditMissingProof {
+        ledger_event_id: String,
+        proof_id: String,
+    },
+    #[error("ledger audit binding mismatch at {ledger_event_id}: {field} expected {expected}, got {actual}")]
+    LedgerAuditBindingMismatch {
+        ledger_event_id: String,
+        field: &'static str,
+        expected: String,
+        actual: String,
+    },
+    #[error("ledger audit proof hash mismatch at {ledger_event_id}/{proof_id}: expected {expected_hash}, got {actual_hash}")]
+    LedgerAuditProofHashMismatch {
+        ledger_event_id: String,
+        proof_id: String,
+        expected_hash: String,
+        actual_hash: String,
+    },
+    #[error("store schema version {found} is newer than supported version {supported}")]
+    SchemaVersionTooNew { found: u32, supported: u32 },
 }
 
 pub type StoreResult<T> = Result<T, StoreError>;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AuditReplayReport {
+    pub ledger_events: usize,
+    pub successful_events: usize,
+    pub execution_tickets: usize,
+    pub sandbox_results: usize,
+    pub proofs: usize,
+    pub last_event_hash: Option<String>,
+}
 
 pub struct Store {
     conn: Connection,
@@ -66,6 +112,61 @@ impl Store {
     }
 
     fn init(&self) -> StoreResult<()> {
+        self.conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS store_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            "#,
+        )?;
+        let version = self.schema_version()?;
+        if version > CURRENT_SCHEMA_VERSION {
+            return Err(StoreError::SchemaVersionTooNew {
+                found: version,
+                supported: CURRENT_SCHEMA_VERSION,
+            });
+        }
+        if version < 1 {
+            self.migrate_to_v1()?;
+        }
+        if version < 2 {
+            self.migrate_to_v2()?;
+        }
+        if version < 3 {
+            self.migrate_to_v3()?;
+        }
+        self.install_append_only_triggers()?;
+        Ok(())
+    }
+
+    pub fn schema_version(&self) -> StoreResult<u32> {
+        let value = self
+            .conn
+            .query_row(
+                "SELECT value FROM store_meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        Ok(value
+            .and_then(|value| value.parse::<u32>().ok())
+            .unwrap_or_default())
+    }
+
+    fn set_schema_version(&self, version: u32) -> StoreResult<()> {
+        self.conn.execute(
+            r#"
+            INSERT INTO store_meta (key, value)
+            VALUES ('schema_version', ?1)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            "#,
+            params![version.to_string()],
+        )?;
+        Ok(())
+    }
+
+    fn migrate_to_v1(&self) -> StoreResult<()> {
         self.conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS run_states (
@@ -104,6 +205,9 @@ impl Store {
                 capability_contract_hash TEXT NOT NULL,
                 executor_ref TEXT NOT NULL,
                 executor_version TEXT NOT NULL,
+                executor_artifact_hash TEXT NOT NULL,
+                executor_signature_ref TEXT NOT NULL,
+                executor_signing_key_ref TEXT NOT NULL,
                 executor_manifest_hash TEXT NOT NULL,
                 gateway_decision_ref TEXT,
                 input_hash TEXT NOT NULL,
@@ -120,6 +224,9 @@ impl Store {
                 capability_contract_hash TEXT NOT NULL,
                 executor_ref TEXT NOT NULL,
                 executor_version TEXT NOT NULL,
+                executor_artifact_hash TEXT NOT NULL,
+                executor_signature_ref TEXT NOT NULL,
+                executor_signing_key_ref TEXT NOT NULL,
                 executor_manifest_hash TEXT NOT NULL,
                 gateway_decision_ref TEXT,
                 input_hash TEXT NOT NULL,
@@ -199,7 +306,146 @@ impl Store {
             END;
             "#,
         )?;
+        self.set_schema_version(1)?;
+        Ok(())
+    }
+
+    fn migrate_to_v2(&self) -> StoreResult<()> {
         self.ensure_column("execution_tickets", "payload_json", "TEXT")?;
+        self.set_schema_version(2)?;
+        Ok(())
+    }
+
+    fn migrate_to_v3(&self) -> StoreResult<()> {
+        self.conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS sandbox_results (
+                ticket_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                capability_id TEXT NOT NULL,
+                policy_decision_ref TEXT NOT NULL,
+                capability_contract_ref TEXT NOT NULL,
+                capability_contract_hash TEXT NOT NULL,
+                executor_ref TEXT NOT NULL,
+                executor_version TEXT NOT NULL,
+                executor_artifact_hash TEXT NOT NULL DEFAULT '',
+                executor_signature_ref TEXT NOT NULL DEFAULT '',
+                executor_signing_key_ref TEXT NOT NULL DEFAULT '',
+                executor_manifest_hash TEXT NOT NULL,
+                gateway_decision_ref TEXT,
+                input_hash TEXT NOT NULL,
+                output_hash TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                finished_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS proofs (
+                proof_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                policy_decision_ref TEXT NOT NULL,
+                capability_contract_ref TEXT NOT NULL,
+                capability_contract_hash TEXT NOT NULL,
+                executor_ref TEXT NOT NULL,
+                executor_version TEXT NOT NULL,
+                executor_artifact_hash TEXT NOT NULL DEFAULT '',
+                executor_signature_ref TEXT NOT NULL DEFAULT '',
+                executor_signing_key_ref TEXT NOT NULL DEFAULT '',
+                executor_manifest_hash TEXT NOT NULL,
+                gateway_decision_ref TEXT,
+                input_hash TEXT NOT NULL,
+                output_hash TEXT NOT NULL,
+                source_ref TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                collected_at TEXT NOT NULL
+            );
+            "#,
+        )?;
+        self.ensure_column(
+            "sandbox_results",
+            "executor_artifact_hash",
+            "TEXT NOT NULL DEFAULT ''",
+        )?;
+        self.ensure_column(
+            "sandbox_results",
+            "executor_signature_ref",
+            "TEXT NOT NULL DEFAULT ''",
+        )?;
+        self.ensure_column(
+            "sandbox_results",
+            "executor_signing_key_ref",
+            "TEXT NOT NULL DEFAULT ''",
+        )?;
+        self.ensure_column(
+            "proofs",
+            "executor_artifact_hash",
+            "TEXT NOT NULL DEFAULT ''",
+        )?;
+        self.ensure_column(
+            "proofs",
+            "executor_signature_ref",
+            "TEXT NOT NULL DEFAULT ''",
+        )?;
+        self.ensure_column(
+            "proofs",
+            "executor_signing_key_ref",
+            "TEXT NOT NULL DEFAULT ''",
+        )?;
+        self.set_schema_version(3)?;
+        Ok(())
+    }
+
+    fn install_append_only_triggers(&self) -> StoreResult<()> {
+        self.conn.execute_batch(
+            r#"
+            CREATE TRIGGER IF NOT EXISTS ledger_events_no_update
+            BEFORE UPDATE ON ledger_events
+            BEGIN
+                SELECT RAISE(ABORT, 'ledger_events append only');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS ledger_events_no_delete
+            BEFORE DELETE ON ledger_events
+            BEGIN
+                SELECT RAISE(ABORT, 'ledger_events append only');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS approval_grants_no_update
+            BEFORE UPDATE ON approval_grants
+            BEGIN
+                SELECT RAISE(ABORT, 'approval_grants append only');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS approval_grants_no_delete
+            BEFORE DELETE ON approval_grants
+            BEGIN
+                SELECT RAISE(ABORT, 'approval_grants append only');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS sandbox_results_no_update
+            BEFORE UPDATE ON sandbox_results
+            BEGIN
+                SELECT RAISE(ABORT, 'sandbox_results append only');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS sandbox_results_no_delete
+            BEFORE DELETE ON sandbox_results
+            BEGIN
+                SELECT RAISE(ABORT, 'sandbox_results append only');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS proofs_no_update
+            BEFORE UPDATE ON proofs
+            BEGIN
+                SELECT RAISE(ABORT, 'proofs append only');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS proofs_no_delete
+            BEFORE DELETE ON proofs
+            BEGIN
+                SELECT RAISE(ABORT, 'proofs append only');
+            END;
+            "#,
+        )?;
         Ok(())
     }
 
@@ -389,10 +635,11 @@ impl Store {
             INSERT INTO sandbox_results (
                 ticket_id, run_id, capability_id, policy_decision_ref,
                 capability_contract_ref, capability_contract_hash, executor_ref,
-                executor_version, executor_manifest_hash, gateway_decision_ref,
+                executor_version, executor_artifact_hash, executor_signature_ref,
+                executor_signing_key_ref, executor_manifest_hash, gateway_decision_ref,
                 input_hash, output_hash, payload_json, finished_at
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
             "#,
             params![
                 result.ticket_id,
@@ -403,6 +650,9 @@ impl Store {
                 result.capability_contract_hash,
                 result.executor_ref,
                 result.executor_version,
+                result.executor_artifact_hash,
+                result.executor_signature_ref,
+                result.executor_signing_key_ref,
                 result.executor_manifest_hash,
                 result.gateway_decision_ref,
                 result.input_hash,
@@ -433,10 +683,11 @@ impl Store {
             INSERT INTO proofs (
                 proof_id, run_id, policy_decision_ref, capability_contract_ref,
                 capability_contract_hash, executor_ref, executor_version,
-                executor_manifest_hash, gateway_decision_ref, input_hash,
+                executor_artifact_hash, executor_signature_ref,
+                executor_signing_key_ref, executor_manifest_hash, gateway_decision_ref, input_hash,
                 output_hash, source_ref, payload_json, collected_at
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
             "#,
             params![
                 proof.proof_id,
@@ -446,6 +697,9 @@ impl Store {
                 proof.capability_contract_hash,
                 proof.executor_ref,
                 proof.executor_version,
+                proof.executor_artifact_hash,
+                proof.executor_signature_ref,
+                proof.executor_signing_key_ref,
                 proof.executor_manifest_hash,
                 proof.gateway_decision_ref,
                 proof.input_hash,
@@ -520,6 +774,17 @@ impl Store {
         Ok(events)
     }
 
+    fn ledger_events_ordered(&self) -> StoreResult<Vec<LedgerEvent>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT payload_json FROM ledger_events ORDER BY rowid ASC")?;
+        let events = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .map(|payload| Ok(serde_json::from_str(&payload?)?))
+            .collect::<StoreResult<Vec<_>>>()?;
+        Ok(events)
+    }
+
     pub fn latest_event_hash(&self) -> StoreResult<Option<String>> {
         let hash = self
             .conn
@@ -530,6 +795,67 @@ impl Store {
             )
             .optional()?;
         Ok(hash)
+    }
+
+    pub fn replay_ledger_audit(&self) -> StoreResult<AuditReplayReport> {
+        self.validate_ledger_hash_chain()?;
+
+        let mut report = AuditReplayReport::default();
+        for event in self.ledger_events_ordered()? {
+            report.ledger_events += 1;
+            report.last_event_hash = Some(event.event_hash.clone());
+
+            if event.result == EventResult::Success {
+                report.successful_events += 1;
+                self.verify_successful_ledger_event(&event, &mut report)?;
+            }
+        }
+
+        Ok(report)
+    }
+
+    fn verify_successful_ledger_event(
+        &self,
+        event: &LedgerEvent,
+        report: &mut AuditReplayReport,
+    ) -> StoreResult<()> {
+        if event.proof_refs.is_empty() {
+            return Err(StoreError::LedgerAuditProofRequired {
+                ledger_event_id: event.ledger_event_id.clone(),
+            });
+        }
+
+        let ticket = self
+            .execution_ticket(&event.execution_ticket_ref)?
+            .ok_or_else(|| StoreError::LedgerAuditMissingTicket {
+                ledger_event_id: event.ledger_event_id.clone(),
+                ticket_id: event.execution_ticket_ref.clone(),
+            })?;
+        report.execution_tickets += 1;
+        verify_event_ticket_binding(event, &ticket)?;
+
+        let result = self
+            .sandbox_result(&event.execution_ticket_ref)?
+            .ok_or_else(|| StoreError::LedgerAuditMissingSandboxResult {
+                ledger_event_id: event.ledger_event_id.clone(),
+                ticket_id: event.execution_ticket_ref.clone(),
+            })?;
+        report.sandbox_results += 1;
+        verify_event_result_binding(event, &result)?;
+
+        for proof_ref in &event.proof_refs {
+            let proof =
+                self.proof(proof_ref)?
+                    .ok_or_else(|| StoreError::LedgerAuditMissingProof {
+                        ledger_event_id: event.ledger_event_id.clone(),
+                        proof_id: proof_ref.clone(),
+                    })?;
+            report.proofs += 1;
+            verify_event_proof_binding(event, &proof)?;
+            verify_proof_evidence_hash(event, &result, &proof)?;
+        }
+
+        Ok(())
     }
 
     pub fn validate_ledger_hash_chain(&self) -> StoreResult<()> {
@@ -626,6 +952,334 @@ impl Store {
     }
 }
 
+fn verify_event_ticket_binding(event: &LedgerEvent, ticket: &ExecutionTicket) -> StoreResult<()> {
+    audit_expect_eq(
+        event,
+        "ticket.ticket_id",
+        &event.execution_ticket_ref,
+        &ticket.ticket_id,
+    )?;
+    audit_expect_eq(event, "ticket.run_id", &event.run_id, &ticket.run_id)?;
+    audit_expect_eq(event, "ticket.delta_id", &event.delta_id, &ticket.delta_id)?;
+    audit_expect_eq(
+        event,
+        "ticket.policy_decision_ref",
+        &event.policy_decision_ref,
+        &ticket.policy_decision_ref,
+    )?;
+    audit_expect_eq(
+        event,
+        "ticket.capability_id",
+        &event.capability_id,
+        &ticket.capability_id,
+    )?;
+    audit_expect_eq(
+        event,
+        "ticket.capability_contract_ref",
+        &event.capability_contract_ref,
+        &ticket.capability_contract_ref,
+    )?;
+    audit_expect_eq(
+        event,
+        "ticket.capability_contract_hash",
+        &event.capability_contract_hash,
+        &ticket.capability_contract_hash,
+    )?;
+    audit_expect_eq(
+        event,
+        "ticket.executor_ref",
+        &event.executor_ref,
+        &ticket.executor_ref,
+    )?;
+    audit_expect_eq(
+        event,
+        "ticket.executor_version",
+        &event.executor_version,
+        &ticket.executor_version,
+    )?;
+    audit_expect_eq(
+        event,
+        "ticket.executor_artifact_hash",
+        &event.executor_artifact_hash,
+        &ticket.executor_artifact_hash,
+    )?;
+    audit_expect_eq(
+        event,
+        "ticket.executor_signature_ref",
+        &event.executor_signature_ref,
+        &ticket.executor_signature_ref,
+    )?;
+    audit_expect_eq(
+        event,
+        "ticket.executor_signing_key_ref",
+        &event.executor_signing_key_ref,
+        &ticket.executor_signing_key_ref,
+    )?;
+    audit_expect_eq(
+        event,
+        "ticket.executor_manifest_hash",
+        &event.executor_manifest_hash,
+        &ticket.executor_manifest_hash,
+    )?;
+    audit_expect_eq(event, "ticket.actor_id", &event.actor_id, &ticket.actor_id)?;
+    Ok(())
+}
+
+fn verify_event_result_binding(event: &LedgerEvent, result: &SandboxResult) -> StoreResult<()> {
+    audit_expect_eq(
+        event,
+        "sandbox_result.ticket_id",
+        &event.execution_ticket_ref,
+        &result.ticket_id,
+    )?;
+    audit_expect_eq(
+        event,
+        "sandbox_result.run_id",
+        &event.run_id,
+        &result.run_id,
+    )?;
+    audit_expect_eq(
+        event,
+        "sandbox_result.capability_id",
+        &event.capability_id,
+        &result.capability_id,
+    )?;
+    audit_expect_eq(
+        event,
+        "sandbox_result.policy_decision_ref",
+        &event.policy_decision_ref,
+        &result.policy_decision_ref,
+    )?;
+    audit_expect_eq(
+        event,
+        "sandbox_result.capability_contract_ref",
+        &event.capability_contract_ref,
+        &result.capability_contract_ref,
+    )?;
+    audit_expect_eq(
+        event,
+        "sandbox_result.capability_contract_hash",
+        &event.capability_contract_hash,
+        &result.capability_contract_hash,
+    )?;
+    audit_expect_eq(
+        event,
+        "sandbox_result.executor_ref",
+        &event.executor_ref,
+        &result.executor_ref,
+    )?;
+    audit_expect_eq(
+        event,
+        "sandbox_result.executor_version",
+        &event.executor_version,
+        &result.executor_version,
+    )?;
+    audit_expect_eq(
+        event,
+        "sandbox_result.executor_artifact_hash",
+        &event.executor_artifact_hash,
+        &result.executor_artifact_hash,
+    )?;
+    audit_expect_eq(
+        event,
+        "sandbox_result.executor_signature_ref",
+        &event.executor_signature_ref,
+        &result.executor_signature_ref,
+    )?;
+    audit_expect_eq(
+        event,
+        "sandbox_result.executor_signing_key_ref",
+        &event.executor_signing_key_ref,
+        &result.executor_signing_key_ref,
+    )?;
+    audit_expect_eq(
+        event,
+        "sandbox_result.executor_manifest_hash",
+        &event.executor_manifest_hash,
+        &result.executor_manifest_hash,
+    )?;
+    audit_expect_eq(
+        event,
+        "sandbox_result.gateway_decision_ref",
+        &event.gateway_decision_ref,
+        &result.gateway_decision_ref,
+    )?;
+    audit_expect_eq(
+        event,
+        "sandbox_result.input_hash",
+        &event.input_hash,
+        &result.input_hash,
+    )?;
+    audit_expect_eq(
+        event,
+        "sandbox_result.output_hash",
+        &event.output_hash,
+        &result.output_hash,
+    )?;
+    audit_expect_eq(event, "sandbox_result.success", &true, &result.success)?;
+
+    let expected_output_hash = hash_json(&result.output);
+    audit_expect_eq(
+        event,
+        "sandbox_result.output_hash",
+        &expected_output_hash,
+        &result.output_hash,
+    )?;
+    Ok(())
+}
+
+fn verify_event_proof_binding(event: &LedgerEvent, proof: &Proof) -> StoreResult<()> {
+    audit_expect_eq(event, "proof.run_id", &event.run_id, &proof.run_id)?;
+    audit_expect_eq(
+        event,
+        "proof.policy_decision_ref",
+        &event.policy_decision_ref,
+        &proof.policy_decision_ref,
+    )?;
+    audit_expect_eq(
+        event,
+        "proof.source_ref",
+        &event.execution_ticket_ref,
+        &proof.source_ref,
+    )?;
+    audit_expect_eq(
+        event,
+        "proof.capability_contract_ref",
+        &event.capability_contract_ref,
+        &proof.capability_contract_ref,
+    )?;
+    audit_expect_eq(
+        event,
+        "proof.capability_contract_hash",
+        &event.capability_contract_hash,
+        &proof.capability_contract_hash,
+    )?;
+    audit_expect_eq(
+        event,
+        "proof.executor_ref",
+        &event.executor_ref,
+        &proof.executor_ref,
+    )?;
+    audit_expect_eq(
+        event,
+        "proof.executor_version",
+        &event.executor_version,
+        &proof.executor_version,
+    )?;
+    audit_expect_eq(
+        event,
+        "proof.executor_artifact_hash",
+        &event.executor_artifact_hash,
+        &proof.executor_artifact_hash,
+    )?;
+    audit_expect_eq(
+        event,
+        "proof.executor_signature_ref",
+        &event.executor_signature_ref,
+        &proof.executor_signature_ref,
+    )?;
+    audit_expect_eq(
+        event,
+        "proof.executor_signing_key_ref",
+        &event.executor_signing_key_ref,
+        &proof.executor_signing_key_ref,
+    )?;
+    audit_expect_eq(
+        event,
+        "proof.executor_manifest_hash",
+        &event.executor_manifest_hash,
+        &proof.executor_manifest_hash,
+    )?;
+    audit_expect_eq(
+        event,
+        "proof.gateway_decision_ref",
+        &event.gateway_decision_ref,
+        &proof.gateway_decision_ref,
+    )?;
+    audit_expect_eq(
+        event,
+        "proof.input_hash",
+        &event.input_hash,
+        &proof.input_hash,
+    )?;
+    audit_expect_eq(
+        event,
+        "proof.output_hash",
+        &event.output_hash,
+        &proof.output_hash,
+    )?;
+    audit_expect_eq(
+        event,
+        "proof.source_type",
+        &String::from("tool_output"),
+        &proof.source_type,
+    )?;
+    Ok(())
+}
+
+fn verify_proof_evidence_hash(
+    event: &LedgerEvent,
+    result: &SandboxResult,
+    proof: &Proof,
+) -> StoreResult<()> {
+    let expected_hash = proof_evidence_hash(result);
+    if proof.hash != expected_hash {
+        return Err(StoreError::LedgerAuditProofHashMismatch {
+            ledger_event_id: event.ledger_event_id.clone(),
+            proof_id: proof.proof_id.clone(),
+            expected_hash,
+            actual_hash: proof.hash.clone(),
+        });
+    }
+    Ok(())
+}
+
+fn audit_expect_eq<T>(
+    event: &LedgerEvent,
+    field: &'static str,
+    expected: &T,
+    actual: &T,
+) -> StoreResult<()>
+where
+    T: PartialEq + std::fmt::Debug,
+{
+    if expected != actual {
+        return Err(StoreError::LedgerAuditBindingMismatch {
+            ledger_event_id: event.ledger_event_id.clone(),
+            field,
+            expected: format!("{expected:?}"),
+            actual: format!("{actual:?}"),
+        });
+    }
+    Ok(())
+}
+
+fn proof_evidence_hash(result: &SandboxResult) -> String {
+    hash_json(&serde_json::json!({
+        "ticket_id": result.ticket_id.clone(),
+        "run_id": result.run_id.clone(),
+        "capability_id": result.capability_id.clone(),
+        "policy_decision_ref": result.policy_decision_ref.clone(),
+        "capability_contract_ref": result.capability_contract_ref.clone(),
+        "capability_contract_hash": result.capability_contract_hash.clone(),
+        "executor_ref": result.executor_ref.clone(),
+        "executor_version": result.executor_version.clone(),
+        "executor_artifact_hash": result.executor_artifact_hash.clone(),
+        "executor_signature_ref": result.executor_signature_ref.clone(),
+        "executor_signing_key_ref": result.executor_signing_key_ref.clone(),
+        "executor_manifest_hash": result.executor_manifest_hash.clone(),
+        "gateway_decision_ref": result.gateway_decision_ref.clone(),
+        "input_hash": result.input_hash.clone(),
+        "output_hash": result.output_hash.clone(),
+    }))
+}
+
+fn hash_json(value: &serde_json::Value) -> String {
+    hex::encode(Sha256::digest(
+        serde_json::to_vec(value).expect("json serialization cannot fail"),
+    ))
+}
+
 fn hash_event(event: &LedgerEvent) -> StoreResult<String> {
     let bytes = serde_json::to_vec(event)?;
     Ok(hex::encode(Sha256::digest(bytes)))
@@ -673,6 +1327,10 @@ mod tests {
             capability_contract_hash: "contract_hash_1".into(),
             executor_ref: "moxi.builtin.fs.file_read".into(),
             executor_version: "0.2.0".into(),
+            executor_artifact_hash:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            executor_signature_ref: "builtin://moxi/file.read/executor/signature".into(),
+            executor_signing_key_ref: "builtin://moxi/signing-key".into(),
             executor_manifest_hash: "executor_manifest_hash_1".into(),
             gateway_decision_ref: None,
             proof_refs: vec!["proof_1".into()],
@@ -709,6 +1367,10 @@ mod tests {
             capability_contract_hash: "contract_hash_1".into(),
             executor_ref: "moxi.builtin.fs.file_read".into(),
             executor_version: "0.2.0".into(),
+            executor_artifact_hash:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            executor_signature_ref: "builtin://moxi/file.read/executor/signature".into(),
+            executor_signing_key_ref: "builtin://moxi/signing-key".into(),
             executor_manifest_hash: "executor_manifest_hash_1".into(),
             executor_isolation: moxi_contracts::ExecutorIsolation::InProcessTrusted,
             retry_policy: Default::default(),
@@ -728,6 +1390,10 @@ mod tests {
             capability_contract_hash: "contract_hash_1".into(),
             executor_ref: "moxi.builtin.fs.file_read".into(),
             executor_version: "0.2.0".into(),
+            executor_artifact_hash:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            executor_signature_ref: "builtin://moxi/file.read/executor/signature".into(),
+            executor_signing_key_ref: "builtin://moxi/signing-key".into(),
             executor_manifest_hash: "executor_manifest_hash_1".into(),
             gateway_decision_ref: Some("gd_1".into()),
             input_hash: "input_hash_1".into(),
@@ -756,6 +1422,10 @@ mod tests {
             capability_contract_hash: "contract_hash_1".into(),
             executor_ref: "moxi.builtin.fs.file_read".into(),
             executor_version: "0.2.0".into(),
+            executor_artifact_hash:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            executor_signature_ref: "builtin://moxi/file.read/executor/signature".into(),
+            executor_signing_key_ref: "builtin://moxi/signing-key".into(),
             executor_manifest_hash: "executor_manifest_hash_1".into(),
             gateway_decision_ref: Some("gd_1".into()),
             input_hash: "input_hash_1".into(),
@@ -766,6 +1436,209 @@ mod tests {
             finished_at: Utc::now(),
             output_hash: "output_hash_1".into(),
         }
+    }
+
+    fn audited_chain() -> (ExecutionTicket, SandboxResult, Proof, LedgerEvent) {
+        let ticket = execution_ticket();
+        let mut result = sandbox_result();
+        result.output_hash = hash_json(&result.output);
+
+        let mut proof = proof();
+        proof.gateway_decision_ref = result.gateway_decision_ref.clone();
+        proof.input_hash = result.input_hash.clone();
+        proof.output_hash = result.output_hash.clone();
+        proof.hash = proof_evidence_hash(&result);
+
+        let event = LedgerEvent {
+            ledger_event_id: "le_1".into(),
+            run_id: result.run_id.clone(),
+            event_type: "tool.executed".into(),
+            actor_id: ticket.actor_id.clone(),
+            resource_ref: "file.txt".into(),
+            delta_id: ticket.delta_id.clone(),
+            capability_id: result.capability_id.clone(),
+            policy_decision_ref: result.policy_decision_ref.clone(),
+            execution_ticket_ref: result.ticket_id.clone(),
+            capability_contract_ref: result.capability_contract_ref.clone(),
+            capability_contract_hash: result.capability_contract_hash.clone(),
+            executor_ref: result.executor_ref.clone(),
+            executor_version: result.executor_version.clone(),
+            executor_artifact_hash: result.executor_artifact_hash.clone(),
+            executor_signature_ref: result.executor_signature_ref.clone(),
+            executor_signing_key_ref: result.executor_signing_key_ref.clone(),
+            executor_manifest_hash: result.executor_manifest_hash.clone(),
+            gateway_decision_ref: result.gateway_decision_ref.clone(),
+            proof_refs: vec![proof.proof_id.clone()],
+            input_hash: result.input_hash.clone(),
+            output_hash: result.output_hash.clone(),
+            previous_event_hash: String::new(),
+            event_hash: String::new(),
+            result: EventResult::Success,
+            timestamp: Utc::now(),
+        };
+
+        (ticket, result, proof, event)
+    }
+
+    fn record_audited_chain(store: &Store) -> LedgerEvent {
+        let (ticket, result, proof, event) = audited_chain();
+        store.record_ticket(&ticket).unwrap();
+        store.record_sandbox_result(&result).unwrap();
+        store.record_proof(&proof).unwrap();
+        store.append_ledger_event(event).unwrap()
+    }
+
+    fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .unwrap();
+        let columns = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        columns.iter().any(|existing| existing == column)
+    }
+
+    fn trigger_exists(conn: &Connection, trigger: &str) -> bool {
+        conn.query_row(
+            "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = ?1",
+            params![trigger],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .unwrap()
+        .is_some()
+    }
+
+    #[test]
+    fn new_store_records_current_schema_version() {
+        let store = Store::open_memory().unwrap();
+
+        assert_eq!(store.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn rejects_newer_schema_version() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE store_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            INSERT INTO store_meta (key, value) VALUES ('schema_version', '999');
+            "#,
+        )
+        .unwrap();
+        let store = Store { conn };
+
+        assert!(matches!(
+            store.init(),
+            Err(StoreError::SchemaVersionTooNew {
+                found: 999,
+                supported: CURRENT_SCHEMA_VERSION
+            })
+        ));
+    }
+
+    #[test]
+    fn migrates_v1_schema_to_current() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE store_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            INSERT INTO store_meta (key, value) VALUES ('schema_version', '1');
+
+            CREATE TABLE execution_tickets (
+                ticket_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                capability_id TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                consumed_at TEXT
+            );
+
+            CREATE TABLE sandbox_results (
+                ticket_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                capability_id TEXT NOT NULL,
+                policy_decision_ref TEXT NOT NULL,
+                capability_contract_ref TEXT NOT NULL,
+                capability_contract_hash TEXT NOT NULL,
+                executor_ref TEXT NOT NULL,
+                executor_version TEXT NOT NULL,
+                executor_manifest_hash TEXT NOT NULL,
+                gateway_decision_ref TEXT,
+                input_hash TEXT NOT NULL,
+                output_hash TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                finished_at TEXT NOT NULL
+            );
+
+            CREATE TABLE proofs (
+                proof_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                policy_decision_ref TEXT NOT NULL,
+                capability_contract_ref TEXT NOT NULL,
+                capability_contract_hash TEXT NOT NULL,
+                executor_ref TEXT NOT NULL,
+                executor_version TEXT NOT NULL,
+                executor_manifest_hash TEXT NOT NULL,
+                gateway_decision_ref TEXT,
+                input_hash TEXT NOT NULL,
+                output_hash TEXT NOT NULL,
+                source_ref TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                collected_at TEXT NOT NULL
+            );
+
+            CREATE TABLE ledger_events (
+                ledger_event_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                event_hash TEXT NOT NULL,
+                previous_event_hash TEXT NOT NULL,
+                timestamp TEXT NOT NULL
+            );
+
+            CREATE TABLE approval_grants (
+                grant_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                delta_id TEXT NOT NULL,
+                policy_decision_ref TEXT NOT NULL,
+                capability_id TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            "#,
+        )
+        .unwrap();
+        let store = Store { conn };
+
+        store.init().unwrap();
+
+        assert_eq!(store.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
+        assert!(column_exists(
+            &store.conn,
+            "execution_tickets",
+            "payload_json"
+        ));
+        for table in ["sandbox_results", "proofs"] {
+            assert!(column_exists(&store.conn, table, "executor_artifact_hash"));
+            assert!(column_exists(&store.conn, table, "executor_signature_ref"));
+            assert!(column_exists(
+                &store.conn,
+                table,
+                "executor_signing_key_ref"
+            ));
+        }
+        assert!(trigger_exists(&store.conn, "sandbox_results_no_update"));
+        assert!(trigger_exists(&store.conn, "proofs_no_update"));
     }
 
     #[test]
@@ -886,6 +1759,79 @@ mod tests {
         store.append_ledger_event(second).unwrap();
 
         store.validate_ledger_hash_chain().unwrap();
+    }
+
+    #[test]
+    fn ledger_audit_replay_accepts_recorded_execution_chain() {
+        let store = Store::open_memory().unwrap();
+        let committed = record_audited_chain(&store);
+
+        let report = store.replay_ledger_audit().unwrap();
+
+        assert_eq!(report.ledger_events, 1);
+        assert_eq!(report.successful_events, 1);
+        assert_eq!(report.execution_tickets, 1);
+        assert_eq!(report.sandbox_results, 1);
+        assert_eq!(report.proofs, 1);
+        assert_eq!(report.last_event_hash, Some(committed.event_hash));
+    }
+
+    #[test]
+    fn ledger_audit_replay_detects_missing_sandbox_result() {
+        let store = Store::open_memory().unwrap();
+        let (ticket, _result, proof, event) = audited_chain();
+        store.record_ticket(&ticket).unwrap();
+        store.record_proof(&proof).unwrap();
+        let event = store.append_ledger_event(event).unwrap();
+
+        assert!(matches!(
+            store.replay_ledger_audit(),
+            Err(StoreError::LedgerAuditMissingSandboxResult {
+                ledger_event_id,
+                ticket_id
+            }) if ledger_event_id == event.ledger_event_id && ticket_id == ticket.ticket_id
+        ));
+    }
+
+    #[test]
+    fn ledger_audit_replay_detects_executor_identity_drift() {
+        let store = Store::open_memory().unwrap();
+        let (ticket, result, mut proof, event) = audited_chain();
+        proof.executor_artifact_hash =
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into();
+        store.record_ticket(&ticket).unwrap();
+        store.record_sandbox_result(&result).unwrap();
+        store.record_proof(&proof).unwrap();
+        let event = store.append_ledger_event(event).unwrap();
+
+        assert!(matches!(
+            store.replay_ledger_audit(),
+            Err(StoreError::LedgerAuditBindingMismatch {
+                ledger_event_id,
+                field: "proof.executor_artifact_hash",
+                ..
+            }) if ledger_event_id == event.ledger_event_id
+        ));
+    }
+
+    #[test]
+    fn ledger_audit_replay_detects_proof_hash_drift() {
+        let store = Store::open_memory().unwrap();
+        let (ticket, result, mut proof, event) = audited_chain();
+        proof.hash = "tampered-proof-hash".into();
+        store.record_ticket(&ticket).unwrap();
+        store.record_sandbox_result(&result).unwrap();
+        store.record_proof(&proof).unwrap();
+        let event = store.append_ledger_event(event).unwrap();
+
+        assert!(matches!(
+            store.replay_ledger_audit(),
+            Err(StoreError::LedgerAuditProofHashMismatch {
+                ledger_event_id,
+                proof_id,
+                ..
+            }) if ledger_event_id == event.ledger_event_id && proof_id == proof.proof_id
+        ));
     }
 
     #[test]

@@ -42,16 +42,16 @@ small, auditable, and replayable.
   runs, capabilities, deltas, policy decisions, tickets, sandbox results,
   proofs, ledger events, and structured errors.
 - `moxi-core`: trusted kernel orchestration for admission, policy checks,
-  approvals, manifest-bound ticket issuing, registered executor dispatch,
-  verification, and ledger commits.
+  approvals, artifact/manifest-bound ticket issuing, registered executor
+  dispatch, verification, and ledger commits.
 - `moxi-sandbox`: first local read-only file sandbox.
-- `moxi-store`: SQLite-backed run state, budgets, tickets, approvals, and
-  append-only hash-chained ledger events.
+- `moxi-store`: SQLite-backed run state, budgets, tickets, approvals,
+  append-only hash-chained ledger events, and schema migrations.
 
 ## Build Order
 
-1. Keep the current manifest-bound, proof-bound kernel path stable and
-   hash-chained.
+1. Keep the current artifact-bound, manifest-bound, proof-bound kernel path
+   stable and hash-chained.
 2. Revisit JSONL transcript/WAL and projection layers as explicit future
    source-of-truth work, not as current implementation.
 3. Implement `moxi-gateway` for authentication, tenant/session trust, rate

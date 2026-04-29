@@ -18,13 +18,16 @@ swarm runtime, remote bridge, long-term memory runtime, or auto-evolution.
   records into kernel `Intent` values.
 - `moxi-contracts`: stable protocol types for `Intent`, `RunContract`,
   `CapabilityContract`, `WorldDelta`, `PolicyDecision`, `ExecutionTicket`,
-  `SandboxResult`, `Proof`, `LedgerEvent`, and structured errors.
+  `SandboxResult`, `Proof`, `LedgerEvent`, configurable `PolicyConfig`, and
+  structured errors.
 - `moxi-core`: trusted kernel API for admission, policy checks, ticket issuing,
   heartbeat accounting, registered capability execution, verification, and
-  ledger commits.
+  ledger commits. Policy evaluation is configurable for declared-capability,
+  risk, capability, resource, and approval rules.
 - `moxi-sandbox`: first local read-only file sandbox with workspace root lock
-  and path escape protection.
-- `moxi-store`: SQLite state store and append-only audit ledger.
+  and path escape protection, plus v0 process-sandbox JSON protocol execution.
+- `moxi-store`: SQLite state store, append-only audit ledger, persisted
+  ticket/result/proof payloads, and ledger replay/audit verification.
 
 ## Kernel path
 
@@ -68,16 +71,24 @@ Intent
   permission mode.
 - Default permission mode is read-only.
 - Network and shell are denied by default.
+- Policy defaults preserve the v0 safety posture, while `PolicyConfig` can
+  adjust declared-capability enforcement, risk approval/deny thresholds,
+  capability deny/approval rules, resource deny/approval patterns, and approval
+  policy/ref metadata.
 - External action requires an `ExecutionTicket`.
 - Capability execution is dispatched through registered executors; `file.read`
   is the default built-in executor, not a hard-coded kernel path.
-- The current in-process runtime only accepts `in_process_trusted` executor
-  manifests. Process, remote, browser, model-gateway, and plugin-host isolation
-  modes are protocol values, not enabled runtime paths yet.
+- The current runtime accepts `in_process_trusted` and `process_sandbox`
+  executor manifests. `process_sandbox` starts a configured executable directly,
+  sends JSON on stdin, reads JSON on stdout, and enforces a timeout. Remote,
+  browser, model-gateway, and plugin-host isolation modes are protocol values,
+  not enabled runtime paths yet.
 - Executor manifests must match the registered capability contract hash,
-  provider identity, and sandbox profile before ticket issuing or execution.
+  provider identity, sandbox profile, artifact hash, signature ref, and signing
+  key ref before ticket issuing or execution.
 - Execution tickets bind the policy decision, capability contract hash,
-  executor id/version, executor manifest hash, executor isolation, and the
+  executor id/version, executor artifact hash, executor signature ref, executor
+  signing key ref, executor manifest hash, executor isolation, and the
   capability retry policy snapshot.
 - Execution uses the persisted ticket payload as the authority; a caller-supplied
   ticket must exactly match the ticket recorded by the kernel before it can be
@@ -92,15 +103,35 @@ Intent
   accepts the recorded result for the ticket.
 - Proofs and ledger events carry the policy, capability, executor, gateway,
   input, and output hashes/refs used for the execution.
+- Ledger/proof bindings include executor artifact identity fields, so audit
+  replay can detect executor code identity drift.
 - Successful ledger commits must reference recorded proofs whose binding fields
   match the ledger event.
 - Execution tickets are issued by the kernel and can be consumed only once.
 - Execution ticket, sandbox result, and proof payloads are persisted for audit
   replay.
+- Ledger audit replay validates the hash chain and re-checks successful events
+  against persisted tickets, sandbox results, proofs, output hashes, and proof
+  evidence hashes.
+- SQLite stores track schema version in `store_meta` and run ordered migrations
+  for compatibility with older audit databases.
 - Run budgets track steps, heartbeats, tool calls, and timeout limits.
 - Successful ledger commits require at least one `Proof`.
 - Ledger events are append-only and hash-chained; correction must be a new
   event.
+
+## P0 boundary
+
+This branch treats P0 as the small trusted-kernel closure, not the full product
+runtime. Production auth providers, distributed rate limiting, compliance-grade
+redaction, model-backed understanding, standalone scheduler/EventBus runtimes,
+model/tool gateways, plugins, memory, swarm, workflow, and product surfaces are
+P1-P4 layers. They must integrate through the P0 contracts instead of expanding
+the trusted kernel.
+
+`process_sandbox` is a runnable v0 JSON protocol boundary. It is not yet
+production OS isolation; enabling executable external actions in production is
+blocked on OS-level sandbox hardening and credential/key-store integration.
 
 ## Verify
 

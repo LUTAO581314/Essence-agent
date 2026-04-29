@@ -75,13 +75,43 @@ pub enum DeltaState {
     RolledBack,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalPolicy {
+    #[default]
     Human,
     Quorum,
     Admin,
     None,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+pub struct PolicyConfig {
+    pub require_declared_capabilities: bool,
+    pub denied_capabilities: Vec<String>,
+    pub approval_required_capabilities: Vec<String>,
+    pub denied_resource_patterns: Vec<String>,
+    pub approval_required_resource_patterns: Vec<String>,
+    pub approval_required_at_or_above: Option<RiskLevel>,
+    pub deny_at_or_above: Option<RiskLevel>,
+    pub approval_policy: ApprovalPolicy,
+    pub approval_ref: Option<String>,
+}
+
+impl Default for PolicyConfig {
+    fn default() -> Self {
+        Self {
+            require_declared_capabilities: true,
+            denied_capabilities: Vec::new(),
+            approval_required_capabilities: Vec::new(),
+            denied_resource_patterns: Vec::new(),
+            approval_required_resource_patterns: Vec::new(),
+            approval_required_at_or_above: Some(RiskLevel::High),
+            deny_at_or_above: None,
+            approval_policy: ApprovalPolicy::Human,
+            approval_ref: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -261,10 +291,13 @@ pub struct ExecutorManifest {
     pub capability_contract_hash: String,
     pub provider_identity: String,
     pub executor_version: String,
+    pub artifact_hash: String,
+    pub signing_key_ref: String,
     pub isolation: ExecutorIsolation,
     pub sandbox_profile: String,
     pub manifest_ref: Option<String>,
     pub signature_ref: Option<String>,
+    pub attestation_ref: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -310,6 +343,9 @@ pub struct ExecutionTicket {
     pub capability_contract_hash: String,
     pub executor_ref: String,
     pub executor_version: String,
+    pub executor_artifact_hash: String,
+    pub executor_signature_ref: String,
+    pub executor_signing_key_ref: String,
     pub executor_manifest_hash: String,
     pub executor_isolation: ExecutorIsolation,
     pub retry_policy: RetryPolicy,
@@ -335,6 +371,9 @@ pub struct SandboxResult {
     pub capability_contract_hash: String,
     pub executor_ref: String,
     pub executor_version: String,
+    pub executor_artifact_hash: String,
+    pub executor_signature_ref: String,
+    pub executor_signing_key_ref: String,
     pub executor_manifest_hash: String,
     pub gateway_decision_ref: Option<String>,
     pub input_hash: String,
@@ -355,6 +394,9 @@ pub struct Proof {
     pub capability_contract_hash: String,
     pub executor_ref: String,
     pub executor_version: String,
+    pub executor_artifact_hash: String,
+    pub executor_signature_ref: String,
+    pub executor_signing_key_ref: String,
     pub executor_manifest_hash: String,
     pub gateway_decision_ref: Option<String>,
     pub input_hash: String,
@@ -382,6 +424,9 @@ pub struct LedgerEvent {
     pub capability_contract_hash: String,
     pub executor_ref: String,
     pub executor_version: String,
+    pub executor_artifact_hash: String,
+    pub executor_signature_ref: String,
+    pub executor_signing_key_ref: String,
     pub executor_manifest_hash: String,
     pub gateway_decision_ref: Option<String>,
     pub proof_refs: Vec<String>,
@@ -449,5 +494,19 @@ mod tests {
         let schema = schema_for::<CapabilityContract>();
         assert_eq!(schema["type"], "object");
         assert!(schema["definitions"].is_object());
+    }
+
+    #[test]
+    fn policy_config_defaults_roundtrip_json() {
+        let config = PolicyConfig::default();
+
+        assert!(config.require_declared_capabilities);
+        assert_eq!(config.approval_required_at_or_above, Some(RiskLevel::High));
+        assert_eq!(config.approval_policy, ApprovalPolicy::Human);
+
+        let serialized = serde_json::to_string(&config).unwrap();
+        let parsed: PolicyConfig = serde_json::from_str(&serialized).unwrap();
+
+        assert_eq!(config, parsed);
     }
 }

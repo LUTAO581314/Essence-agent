@@ -1,13 +1,13 @@
 use chrono::{Duration, Utc};
 use jsonschema::JSONSchema;
 use moxi_contracts::{
-    ApprovalGrant, ApprovalPolicy, CapabilityContract, Confidence, Decision, DeltaState,
-    EventResult, ExecutionTicket, ExecutorIsolation, ExecutorManifest, Intent, LedgerEvent,
-    PermissionMode, PolicyDecision, Proof, RequiredApproval, RiskLevel, RunContract, RunStatus,
+    ApprovalGrant, CapabilityContract, Confidence, Decision, DeltaState, EventResult,
+    ExecutionTicket, ExecutorIsolation, ExecutorManifest, Intent, LedgerEvent, PermissionMode,
+    PolicyConfig, PolicyDecision, Proof, RequiredApproval, RiskLevel, RunContract, RunStatus,
     SandboxInput, SandboxResult, WorldDelta,
 };
-use moxi_sandbox::{sha256_hex, FileReadSandbox, Sandbox, SandboxError};
-use moxi_store::{Store, StoreError};
+use moxi_sandbox::{sha256_hex, FileReadSandbox, ProcessSandbox, Sandbox, SandboxError};
+use moxi_store::{AuditReplayReport, Store, StoreError};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -20,7 +20,7 @@ pub enum CoreError {
     CapabilityNotFound(String),
     #[error("capability executor not registered: {0}")]
     ExecutorNotFound(String),
-    #[error("executor isolation is not supported by this in-process runtime: {0:?}")]
+    #[error("executor isolation is not supported by this runtime: {0:?}")]
     ExecutorIsolationUnsupported(ExecutorIsolation),
     #[error("executor manifest does not match capability contract: {0}")]
     ExecutorManifestMismatch(String),
@@ -68,12 +68,160 @@ pub trait CapabilityExecutor {
     fn execute(&self, ticket: &ExecutionTicket, input: SandboxInput) -> CoreResult<SandboxResult>;
 }
 
+#[derive(Debug, Clone)]
+pub struct PolicyEngine {
+    config: PolicyConfig,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PolicyEvaluation {
+    pub decision: Decision,
+    pub risk_level: RiskLevel,
+    pub reasons: Vec<String>,
+    pub required_approval: Option<RequiredApproval>,
+}
+
+impl Default for PolicyEngine {
+    fn default() -> Self {
+        Self::new(PolicyConfig::default())
+    }
+}
+
+impl PolicyEngine {
+    pub fn new(config: PolicyConfig) -> Self {
+        Self { config }
+    }
+
+    pub fn config(&self) -> &PolicyConfig {
+        &self.config
+    }
+
+    pub fn set_config(&mut self, config: PolicyConfig) {
+        self.config = config;
+    }
+
+    pub fn evaluate(
+        &self,
+        run: &RunContract,
+        capability: &CapabilityContract,
+        delta: &WorldDelta,
+    ) -> PolicyEvaluation {
+        let mut reasons = Vec::new();
+        let risk_level = std::cmp::max(delta.risk_level, capability.risk_level);
+
+        if self.config.require_declared_capabilities
+            && !run
+                .required_capabilities
+                .contains(&capability.capability_id)
+        {
+            reasons.push("capability not declared in RunContract".into());
+        }
+
+        if capability_rule_matches(&self.config.denied_capabilities, &capability.capability_id) {
+            reasons.push(format!(
+                "capability {} is denied by policy config",
+                capability.capability_id
+            ));
+        }
+
+        if self
+            .config
+            .deny_at_or_above
+            .is_some_and(|threshold| risk_level >= threshold)
+        {
+            reasons.push(format!(
+                "risk level {:?} is denied by policy config",
+                risk_level
+            ));
+        }
+
+        if let Some(reason) =
+            permission_mode_denial(run.permission_mode, &capability.permissions.resources)
+        {
+            reasons.push(reason);
+        }
+
+        if let Some(resource) = first_matching_resource(
+            &self.config.denied_resource_patterns,
+            &capability.permissions.resources,
+        ) {
+            reasons.push(format!("resource {resource} is denied by policy config"));
+        }
+
+        if !reasons.is_empty() {
+            return PolicyEvaluation {
+                decision: Decision::Deny,
+                risk_level,
+                reasons,
+                required_approval: None,
+            };
+        }
+
+        let mut approval_reasons = Vec::new();
+        if self
+            .config
+            .approval_required_at_or_above
+            .is_some_and(|threshold| risk_level >= threshold)
+        {
+            approval_reasons.push(format!(
+                "risk level {:?} requires {:?} approval",
+                risk_level, self.config.approval_policy
+            ));
+        }
+
+        if capability_rule_matches(
+            &self.config.approval_required_capabilities,
+            &capability.capability_id,
+        ) {
+            approval_reasons.push(format!(
+                "capability {} requires {:?} approval",
+                capability.capability_id, self.config.approval_policy
+            ));
+        }
+
+        if let Some(resource) = first_matching_resource(
+            &self.config.approval_required_resource_patterns,
+            &capability.permissions.resources,
+        ) {
+            approval_reasons.push(format!(
+                "resource {resource} requires {:?} approval",
+                self.config.approval_policy
+            ));
+        }
+
+        if !approval_reasons.is_empty() {
+            return PolicyEvaluation {
+                decision: Decision::RequireApproval,
+                risk_level,
+                reasons: approval_reasons,
+                required_approval: Some(RequiredApproval {
+                    approval_policy: self.config.approval_policy,
+                    approval_ref: self.config.approval_ref.clone(),
+                }),
+            };
+        }
+
+        PolicyEvaluation {
+            decision: Decision::Allow,
+            risk_level,
+            reasons: vec!["policy config, run contract, and capability checks passed".into()],
+            required_approval: None,
+        }
+    }
+}
+
 struct ExecutorRegistration {
     manifest: ExecutorManifest,
     executor: Box<dyn CapabilityExecutor>,
 }
 
 impl CapabilityExecutor for FileReadSandbox {
+    fn execute(&self, ticket: &ExecutionTicket, input: SandboxInput) -> CoreResult<SandboxResult> {
+        Ok(Sandbox::execute(self, ticket, input)?)
+    }
+}
+
+impl CapabilityExecutor for ProcessSandbox {
     fn execute(&self, ticket: &ExecutionTicket, input: SandboxInput) -> CoreResult<SandboxResult> {
         Ok(Sandbox::execute(self, ticket, input)?)
     }
@@ -108,6 +256,7 @@ pub struct Kernel {
     registry: CapabilityRegistry,
     executors: HashMap<String, ExecutorRegistration>,
     runs: HashMap<String, RunContract>,
+    policy_engine: PolicyEngine,
     store: Store,
 }
 
@@ -118,6 +267,7 @@ impl Kernel {
             registry: CapabilityRegistry::default(),
             executors: HashMap::new(),
             runs: HashMap::new(),
+            policy_engine: PolicyEngine::default(),
             store: Store::open_memory()?,
         };
         let capability = file_read_capability();
@@ -128,12 +278,22 @@ impl Kernel {
         Ok(kernel)
     }
 
+    pub fn new_in_memory_with_policy_config(
+        workspace_root: impl Into<PathBuf>,
+        policy_config: PolicyConfig,
+    ) -> CoreResult<Self> {
+        let mut kernel = Self::new_in_memory(workspace_root)?;
+        kernel.set_policy_config(policy_config);
+        Ok(kernel)
+    }
+
     pub fn with_store(workspace_root: impl Into<PathBuf>, store: Store) -> Self {
         let mut kernel = Self {
             actor_id: "kernel".into(),
             registry: CapabilityRegistry::default(),
             executors: HashMap::new(),
             runs: HashMap::new(),
+            policy_engine: PolicyEngine::default(),
             store,
         };
         let capability = file_read_capability();
@@ -144,6 +304,24 @@ impl Kernel {
             )
             .expect("built-in file.read executor manifest is valid");
         kernel
+    }
+
+    pub fn with_store_and_policy_config(
+        workspace_root: impl Into<PathBuf>,
+        store: Store,
+        policy_config: PolicyConfig,
+    ) -> Self {
+        let mut kernel = Self::with_store(workspace_root, store);
+        kernel.set_policy_config(policy_config);
+        kernel
+    }
+
+    pub fn policy_config(&self) -> &PolicyConfig {
+        self.policy_engine.config()
+    }
+
+    pub fn set_policy_config(&mut self, policy_config: PolicyConfig) {
+        self.policy_engine.set_config(policy_config);
     }
 
     pub fn register_capability(&mut self, contract: CapabilityContract) -> CoreResult<()> {
@@ -163,7 +341,10 @@ impl Kernel {
         manifest: ExecutorManifest,
         executor: impl CapabilityExecutor + 'static,
     ) -> CoreResult<()> {
-        if manifest.isolation != ExecutorIsolation::InProcessTrusted {
+        if !matches!(
+            manifest.isolation,
+            ExecutorIsolation::InProcessTrusted | ExecutorIsolation::ProcessSandbox
+        ) {
             return Err(CoreError::ExecutorIsolationUnsupported(manifest.isolation));
         }
         if let Some(capability) = self.registry.get(&manifest.capability_id) {
@@ -248,52 +429,7 @@ impl Kernel {
             return Err(CoreError::CapabilityNotFound(delta.capability_id));
         };
 
-        let mut reasons = Vec::new();
-        let mut decision = Decision::Allow;
-        let mut required_approval = None;
-
-        if !run
-            .required_capabilities
-            .contains(&capability.capability_id)
-        {
-            decision = Decision::Deny;
-            reasons.push("capability not declared in RunContract".into());
-        }
-
-        if let Some(reason) =
-            permission_mode_denial(run.permission_mode, &capability.permissions.resources)
-        {
-            decision = Decision::Deny;
-            reasons.push(reason);
-        }
-
-        if capability
-            .permissions
-            .denied
-            .iter()
-            .any(|item| item == "network")
-            || capability
-                .permissions
-                .denied
-                .iter()
-                .any(|item| item == "shell")
-        {
-            reasons.push("network and shell are denied by default".into());
-        }
-
-        let risk = std::cmp::max(delta.risk_level, capability.risk_level);
-        if matches!(risk, RiskLevel::High | RiskLevel::Critical) && decision == Decision::Allow {
-            decision = Decision::RequireApproval;
-            required_approval = Some(RequiredApproval {
-                approval_policy: ApprovalPolicy::Human,
-                approval_ref: None,
-            });
-            reasons.push("high risk action requires human approval".into());
-        }
-
-        if reasons.is_empty() {
-            reasons.push("budget, run contract, and capability checks passed".into());
-        }
+        let evaluation = self.policy_engine.evaluate(run, capability, &delta);
 
         delta.state = DeltaState::PolicyChecked;
         let policy = PolicyDecision {
@@ -302,10 +438,10 @@ impl Kernel {
             delta_id: delta.delta_id,
             actor_id: self.actor_id.clone(),
             capability_id: capability.capability_id.clone(),
-            decision,
-            risk_level: risk,
-            reasons,
-            required_approval,
+            decision: evaluation.decision,
+            risk_level: evaluation.risk_level,
+            reasons: evaluation.reasons,
+            required_approval: evaluation.required_approval,
             expires_at: Utc::now() + Duration::milliseconds(capability.timeout_ms as i64),
         };
 
@@ -416,6 +552,9 @@ impl Kernel {
             capability_contract_hash,
             executor_ref: executor.manifest.executor_id.clone(),
             executor_version: executor.manifest.executor_version.clone(),
+            executor_artifact_hash: executor.manifest.artifact_hash.clone(),
+            executor_signature_ref: executor_signature_ref(&executor.manifest)?,
+            executor_signing_key_ref: executor.manifest.signing_key_ref.clone(),
             executor_manifest_hash,
             executor_isolation: executor.manifest.isolation,
             retry_policy: capability.retry_policy.clone(),
@@ -523,6 +662,9 @@ impl Kernel {
         result.capability_contract_hash = ticket.capability_contract_hash.clone();
         result.executor_ref = ticket.executor_ref.clone();
         result.executor_version = ticket.executor_version.clone();
+        result.executor_artifact_hash = ticket.executor_artifact_hash.clone();
+        result.executor_signature_ref = ticket.executor_signature_ref.clone();
+        result.executor_signing_key_ref = ticket.executor_signing_key_ref.clone();
         result.executor_manifest_hash = ticket.executor_manifest_hash.clone();
         result.gateway_decision_ref = run.gateway_decision_ref.clone();
         result.input_hash = input_hash;
@@ -572,6 +714,9 @@ impl Kernel {
             "capability_contract_hash": result.capability_contract_hash.clone(),
             "executor_ref": result.executor_ref.clone(),
             "executor_version": result.executor_version.clone(),
+            "executor_artifact_hash": result.executor_artifact_hash.clone(),
+            "executor_signature_ref": result.executor_signature_ref.clone(),
+            "executor_signing_key_ref": result.executor_signing_key_ref.clone(),
             "executor_manifest_hash": result.executor_manifest_hash.clone(),
             "gateway_decision_ref": result.gateway_decision_ref.clone(),
             "input_hash": result.input_hash.clone(),
@@ -586,6 +731,9 @@ impl Kernel {
             capability_contract_hash: result.capability_contract_hash.clone(),
             executor_ref: result.executor_ref.clone(),
             executor_version: result.executor_version.clone(),
+            executor_artifact_hash: result.executor_artifact_hash.clone(),
+            executor_signature_ref: result.executor_signature_ref.clone(),
+            executor_signing_key_ref: result.executor_signing_key_ref.clone(),
             executor_manifest_hash: result.executor_manifest_hash.clone(),
             gateway_decision_ref: result.gateway_decision_ref.clone(),
             input_hash: result.input_hash.clone(),
@@ -638,6 +786,10 @@ impl Kernel {
 
     pub fn validate_ledger(&self) -> CoreResult<()> {
         Ok(self.store.validate_ledger_hash_chain()?)
+    }
+
+    pub fn replay_ledger_audit(&self) -> CoreResult<AuditReplayReport> {
+        Ok(self.store.replay_ledger_audit()?)
     }
 }
 
@@ -695,10 +847,16 @@ pub fn file_read_executor_manifest(capability: &CapabilityContract) -> ExecutorM
         capability_contract_hash: capability_contract_hash(capability),
         provider_identity: capability.provider_identity.clone(),
         executor_version: capability.capability_version.clone(),
+        artifact_hash: executor_artifact_hash(
+            "moxi.builtin.fs.file_read",
+            &capability.capability_version,
+        ),
+        signing_key_ref: "builtin://moxi/signing-key".into(),
         isolation: ExecutorIsolation::InProcessTrusted,
         sandbox_profile: capability.sandbox_profile.clone(),
         manifest_ref: Some("builtin://moxi/file.read/executor".into()),
-        signature_ref: None,
+        signature_ref: Some("builtin://moxi/file.read/executor/signature".into()),
+        attestation_ref: Some("builtin://moxi/file.read/executor/attestation".into()),
     }
 }
 
@@ -723,6 +881,9 @@ pub fn ledger_event_for_success(
         capability_contract_hash: result.capability_contract_hash.clone(),
         executor_ref: result.executor_ref.clone(),
         executor_version: result.executor_version.clone(),
+        executor_artifact_hash: result.executor_artifact_hash.clone(),
+        executor_signature_ref: result.executor_signature_ref.clone(),
+        executor_signing_key_ref: result.executor_signing_key_ref.clone(),
         executor_manifest_hash: result.executor_manifest_hash.clone(),
         gateway_decision_ref: result.gateway_decision_ref.clone(),
         proof_refs: vec![proof.proof_id.clone()],
@@ -749,6 +910,13 @@ pub fn executor_manifest_hash(manifest: &ExecutorManifest) -> String {
     sha256_hex(serde_json::to_vec(manifest).expect("executor manifest serialization cannot fail"))
 }
 
+pub fn executor_artifact_hash(executor_id: &str, executor_version: &str) -> String {
+    format!(
+        "sha256:{}",
+        sha256_hex(format!("{executor_id}@{executor_version}").as_bytes())
+    )
+}
+
 fn validate_executor_manifest(
     capability: &CapabilityContract,
     manifest: &ExecutorManifest,
@@ -773,7 +941,45 @@ fn validate_executor_manifest(
             "sandbox profile mismatch".into(),
         ));
     }
+    validate_executor_identity(manifest)?;
     Ok(())
+}
+
+fn validate_executor_identity(manifest: &ExecutorManifest) -> CoreResult<()> {
+    if !is_sha256_ref(&manifest.artifact_hash) {
+        return Err(CoreError::ExecutorManifestMismatch(
+            "executor artifact hash must be sha256:<64 lowercase hex chars>".into(),
+        ));
+    }
+    if manifest.signing_key_ref.trim().is_empty() {
+        return Err(CoreError::ExecutorManifestMismatch(
+            "executor signing key ref is required".into(),
+        ));
+    }
+    executor_signature_ref(manifest)?;
+    Ok(())
+}
+
+fn executor_signature_ref(manifest: &ExecutorManifest) -> CoreResult<String> {
+    manifest
+        .signature_ref
+        .as_ref()
+        .map(|signature_ref| signature_ref.trim())
+        .filter(|signature_ref| !signature_ref.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            CoreError::ExecutorManifestMismatch("executor signature ref is required".into())
+        })
+}
+
+fn is_sha256_ref(value: &str) -> bool {
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        return false;
+    };
+    hex.len() == 64
+        && hex
+            .chars()
+            .all(|char| char.is_ascii_hexdigit() && !char.is_ascii_uppercase())
 }
 
 fn validate_execution_binding(
@@ -782,9 +988,13 @@ fn validate_execution_binding(
     manifest: &ExecutorManifest,
 ) -> CoreResult<()> {
     validate_executor_manifest(capability, manifest)?;
+    let signature_ref = executor_signature_ref(manifest)?;
     if ticket.capability_contract_hash != capability_contract_hash(capability)
         || ticket.executor_ref != manifest.executor_id
         || ticket.executor_version != manifest.executor_version
+        || ticket.executor_artifact_hash != manifest.artifact_hash
+        || ticket.executor_signature_ref != signature_ref
+        || ticket.executor_signing_key_ref != manifest.signing_key_ref
         || ticket.executor_manifest_hash != executor_manifest_hash(manifest)
         || ticket.executor_isolation != manifest.isolation
     {
@@ -805,6 +1015,9 @@ fn validate_result_ticket_binding(
         || result.capability_contract_hash != ticket.capability_contract_hash
         || result.executor_ref != ticket.executor_ref
         || result.executor_version != ticket.executor_version
+        || result.executor_artifact_hash != ticket.executor_artifact_hash
+        || result.executor_signature_ref != ticket.executor_signature_ref
+        || result.executor_signing_key_ref != ticket.executor_signing_key_ref
         || result.executor_manifest_hash != ticket.executor_manifest_hash
     {
         return Err(CoreError::ResultBindingMismatch);
@@ -834,6 +1047,9 @@ fn validate_event_proof_binding(event: &LedgerEvent, proof: &Proof) -> CoreResul
         || proof.capability_contract_hash != event.capability_contract_hash
         || proof.executor_ref != event.executor_ref
         || proof.executor_version != event.executor_version
+        || proof.executor_artifact_hash != event.executor_artifact_hash
+        || proof.executor_signature_ref != event.executor_signature_ref
+        || proof.executor_signing_key_ref != event.executor_signing_key_ref
         || proof.executor_manifest_hash != event.executor_manifest_hash
         || proof.gateway_decision_ref != event.gateway_decision_ref
         || proof.input_hash != event.input_hash
@@ -855,6 +1071,47 @@ fn validate_payload(name: &str, schema: &Value, payload: &Value) -> CoreResult<(
         return Err(CoreError::SchemaValidation(name.into(), message));
     }
     Ok(())
+}
+
+fn capability_rule_matches(patterns: &[String], capability_id: &str) -> bool {
+    patterns
+        .iter()
+        .any(|pattern| exact_or_prefix_pattern_matches(pattern, capability_id))
+}
+
+fn first_matching_resource(patterns: &[String], resources: &[String]) -> Option<String> {
+    resources
+        .iter()
+        .find(|resource| {
+            patterns
+                .iter()
+                .any(|pattern| resource_pattern_matches(pattern, resource))
+        })
+        .cloned()
+}
+
+fn exact_or_prefix_pattern_matches(pattern: &str, value: &str) -> bool {
+    let pattern = pattern.trim().to_ascii_lowercase();
+    let value = value.to_ascii_lowercase();
+    if pattern.is_empty() {
+        return false;
+    }
+    if pattern == "*" {
+        return true;
+    }
+    if let Some(prefix) = pattern.strip_suffix('*') {
+        return value.starts_with(prefix);
+    }
+    value == pattern
+}
+
+fn resource_pattern_matches(pattern: &str, resource: &str) -> bool {
+    let pattern = pattern.trim().to_ascii_lowercase();
+    if pattern.is_empty() {
+        return false;
+    }
+    exact_or_prefix_pattern_matches(&pattern, resource)
+        || resource.to_ascii_lowercase().contains(&pattern)
 }
 
 fn permission_mode_denial(mode: PermissionMode, resources: &[String]) -> Option<String> {
@@ -918,7 +1175,7 @@ fn hash_json(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use moxi_contracts::{Budget, DeltaTarget, ResourceType};
+    use moxi_contracts::{ApprovalPolicy, Budget, DeltaTarget, ResourceType};
     use moxi_store::StoreError;
     use serde_json::json;
     use std::fs;
@@ -1027,11 +1284,52 @@ mod tests {
             capability_contract_hash: capability_contract_hash(capability),
             provider_identity: capability.provider_identity.clone(),
             executor_version: capability.capability_version.clone(),
+            artifact_hash: executor_artifact_hash(
+                "moxi.test.memory.echo",
+                &capability.capability_version,
+            ),
+            signing_key_ref: "test://moxi/signing-key".into(),
             isolation: ExecutorIsolation::InProcessTrusted,
             sandbox_profile: capability.sandbox_profile.clone(),
             manifest_ref: Some("test://memory.echo/executor".into()),
-            signature_ref: None,
+            signature_ref: Some("test://memory.echo/executor/signature".into()),
+            attestation_ref: Some("test://memory.echo/executor/attestation".into()),
         }
+    }
+
+    fn memory_echo_process_executor_manifest(capability: &CapabilityContract) -> ExecutorManifest {
+        let mut manifest = memory_echo_executor_manifest(capability);
+        manifest.executor_id = "moxi.test.memory.echo.process".into();
+        manifest.isolation = ExecutorIsolation::ProcessSandbox;
+        manifest.artifact_hash = executor_artifact_hash(
+            "moxi.test.memory.echo.process",
+            &capability.capability_version,
+        );
+        manifest.manifest_ref = Some("test://memory.echo/process-executor".into());
+        manifest.signature_ref = Some("test://memory.echo/process-executor/signature".into());
+        manifest.attestation_ref = Some("test://memory.echo/process-executor/attestation".into());
+        manifest
+    }
+
+    #[cfg(windows)]
+    fn json_process_executor() -> ProcessSandbox {
+        ProcessSandbox::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-Command",
+                "$input | Out-Null; Write-Output '{\"success\":true,\"output\":{\"echo\":\"process executor\"}}'",
+            ])
+            .timeout_ms(5_000)
+    }
+
+    #[cfg(not(windows))]
+    fn json_process_executor() -> ProcessSandbox {
+        ProcessSandbox::new("/bin/sh")
+            .args([
+                "-c",
+                "cat >/dev/null; printf '%s\n' '{\"success\":true,\"output\":{\"echo\":\"process executor\"}}'",
+            ])
+            .timeout_ms(5_000)
     }
 
     struct EchoExecutor;
@@ -1060,6 +1358,9 @@ mod tests {
                 capability_contract_hash: String::new(),
                 executor_ref: String::new(),
                 executor_version: String::new(),
+                executor_artifact_hash: String::new(),
+                executor_signature_ref: String::new(),
+                executor_signing_key_ref: String::new(),
                 executor_manifest_hash: String::new(),
                 gateway_decision_ref: None,
                 input_hash: String::new(),
@@ -1090,6 +1391,9 @@ mod tests {
                 capability_contract_hash: String::new(),
                 executor_ref: String::new(),
                 executor_version: String::new(),
+                executor_artifact_hash: String::new(),
+                executor_signature_ref: String::new(),
+                executor_signing_key_ref: String::new(),
                 executor_manifest_hash: String::new(),
                 gateway_decision_ref: None,
                 input_hash: String::new(),
@@ -1125,6 +1429,9 @@ mod tests {
                 capability_contract_hash: String::new(),
                 executor_ref: String::new(),
                 executor_version: String::new(),
+                executor_artifact_hash: String::new(),
+                executor_signature_ref: String::new(),
+                executor_signing_key_ref: String::new(),
                 executor_manifest_hash: String::new(),
                 gateway_decision_ref: None,
                 input_hash: String::new(),
@@ -1155,6 +1462,9 @@ mod tests {
                 capability_contract_hash: String::new(),
                 executor_ref: String::new(),
                 executor_version: String::new(),
+                executor_artifact_hash: String::new(),
+                executor_signature_ref: String::new(),
+                executor_signing_key_ref: String::new(),
                 executor_manifest_hash: String::new(),
                 gateway_decision_ref: None,
                 input_hash: String::new(),
@@ -1230,6 +1540,54 @@ mod tests {
     }
 
     #[test]
+    fn policy_config_can_allow_registered_undeclared_capability() {
+        let temp = tempdir().unwrap();
+        let config = PolicyConfig {
+            require_declared_capabilities: false,
+            ..Default::default()
+        };
+        let mut kernel = Kernel::new_in_memory_with_policy_config(temp.path(), config).unwrap();
+        kernel.register_capability(file_read_capability()).unwrap();
+        let run = kernel.admit(intent(temp.path(), vec![])).unwrap();
+
+        let policy = kernel
+            .propose_delta(
+                &run.run_id,
+                delta(&run.run_id, "hello.txt", "file.read", RiskLevel::Low),
+            )
+            .unwrap();
+
+        assert_eq!(policy.decision, Decision::Allow);
+    }
+
+    #[test]
+    fn policy_config_can_deny_capability_by_rule() {
+        let temp = tempdir().unwrap();
+        let config = PolicyConfig {
+            denied_capabilities: vec!["file.*".into()],
+            ..Default::default()
+        };
+        let mut kernel = Kernel::new_in_memory_with_policy_config(temp.path(), config).unwrap();
+        kernel.register_capability(file_read_capability()).unwrap();
+        let run = kernel
+            .admit(intent(temp.path(), vec!["file.read".into()]))
+            .unwrap();
+
+        let policy = kernel
+            .propose_delta(
+                &run.run_id,
+                delta(&run.run_id, "hello.txt", "file.read", RiskLevel::Low),
+            )
+            .unwrap();
+
+        assert_eq!(policy.decision, Decision::Deny);
+        assert!(policy
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("denied by policy config")));
+    }
+
+    #[test]
     fn policy_requires_approval_for_high_risk_delta() {
         let temp = tempdir().unwrap();
         let mut kernel = Kernel::new_in_memory(temp.path()).unwrap();
@@ -1246,6 +1604,69 @@ mod tests {
             .unwrap();
 
         assert_eq!(policy.decision, Decision::RequireApproval);
+    }
+
+    #[test]
+    fn policy_config_controls_risk_approval_threshold_and_policy() {
+        let temp = tempdir().unwrap();
+        let config = PolicyConfig {
+            approval_required_at_or_above: Some(RiskLevel::Medium),
+            approval_policy: ApprovalPolicy::Admin,
+            approval_ref: Some("approval://admin-duty".into()),
+            ..Default::default()
+        };
+        let mut kernel = Kernel::new_in_memory_with_policy_config(temp.path(), config).unwrap();
+        kernel.register_capability(file_read_capability()).unwrap();
+        let run = kernel
+            .admit(intent(temp.path(), vec!["file.read".into()]))
+            .unwrap();
+
+        let policy = kernel
+            .propose_delta(
+                &run.run_id,
+                delta(&run.run_id, "hello.txt", "file.read", RiskLevel::Medium),
+            )
+            .unwrap();
+
+        assert_eq!(policy.decision, Decision::RequireApproval);
+        assert_eq!(
+            policy.required_approval,
+            Some(RequiredApproval {
+                approval_policy: ApprovalPolicy::Admin,
+                approval_ref: Some("approval://admin-duty".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn policy_config_can_require_approval_for_resource_pattern() {
+        let temp = tempdir().unwrap();
+        let config = PolicyConfig {
+            approval_required_at_or_above: None,
+            approval_required_resource_patterns: vec!["workspace.write".into()],
+            ..Default::default()
+        };
+        let mut kernel = Kernel::new_in_memory_with_policy_config(temp.path(), config).unwrap();
+        kernel.register_capability(file_write_capability()).unwrap();
+        let run = kernel
+            .admit_with_permission_mode(
+                intent(temp.path(), vec!["file.write".into()]),
+                PermissionMode::WorkspaceWrite,
+            )
+            .unwrap();
+
+        let policy = kernel
+            .propose_delta(
+                &run.run_id,
+                delta(&run.run_id, "hello.txt", "file.write", RiskLevel::Low),
+            )
+            .unwrap();
+
+        assert_eq!(policy.decision, Decision::RequireApproval);
+        assert!(policy
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("resource workspace.write")));
     }
 
     #[test]
@@ -1392,6 +1813,10 @@ mod tests {
             committed.ledger_event_id
         );
         assert!(!committed.event_hash.is_empty());
+        let audit_report = kernel.replay_ledger_audit().unwrap();
+        assert_eq!(audit_report.ledger_events, 1);
+        assert_eq!(audit_report.successful_events, 1);
+        assert_eq!(audit_report.proofs, 1);
     }
 
     #[test]
@@ -1442,6 +1867,53 @@ mod tests {
 
         assert_eq!(result.output["echo"], "hello executor");
         assert_eq!(committed.capability_id, "memory.echo");
+        assert_eq!(
+            kernel.run_status(&run.run_id).unwrap(),
+            Some(RunStatus::Completed)
+        );
+    }
+
+    #[test]
+    fn process_sandbox_executor_runs_through_trusted_chain() {
+        let temp = tempdir().unwrap();
+        let mut kernel = Kernel::new_in_memory(temp.path()).unwrap();
+        let capability = memory_echo_capability();
+        let manifest = memory_echo_process_executor_manifest(&capability);
+        kernel.register_capability(capability).unwrap();
+        kernel
+            .register_executor(manifest, json_process_executor())
+            .unwrap();
+        let run = kernel
+            .admit(intent(temp.path(), vec!["memory.echo".into()]))
+            .unwrap();
+        let mut delta = delta(&run.run_id, "memory://echo", "memory.echo", RiskLevel::Low);
+        delta.target.resource_type = ResourceType::Memory;
+
+        let policy = kernel.propose_delta(&run.run_id, delta.clone()).unwrap();
+        let capability = kernel.capability("memory.echo").unwrap().clone();
+        let ticket = kernel.issue_ticket(&policy, &capability).unwrap();
+        assert_eq!(ticket.executor_isolation, ExecutorIsolation::ProcessSandbox);
+        let result = kernel
+            .execute(
+                &ticket,
+                SandboxInput {
+                    capability_id: "memory.echo".into(),
+                    payload: json!({ "text": "hello executor" }),
+                },
+            )
+            .unwrap();
+        let proof = kernel.verify(&result).unwrap();
+        let event = ledger_event_for_success(
+            &result,
+            &proof,
+            "memory://echo",
+            &policy.decision_id,
+            &delta.delta_id,
+        );
+        let committed = kernel.commit(event).unwrap();
+
+        assert_eq!(result.output["echo"], "process executor");
+        assert_eq!(committed.executor_ref, "moxi.test.memory.echo.process");
         assert_eq!(
             kernel.run_status(&run.run_id).unwrap(),
             Some(RunStatus::Completed)
@@ -1576,6 +2048,9 @@ mod tests {
             capability_contract_hash: ticket.capability_contract_hash.clone(),
             executor_ref: ticket.executor_ref.clone(),
             executor_version: ticket.executor_version.clone(),
+            executor_artifact_hash: ticket.executor_artifact_hash.clone(),
+            executor_signature_ref: ticket.executor_signature_ref.clone(),
+            executor_signing_key_ref: ticket.executor_signing_key_ref.clone(),
             executor_manifest_hash: ticket.executor_manifest_hash.clone(),
             gateway_decision_ref: None,
             input_hash: hash_json(&json!({
@@ -1741,6 +2216,91 @@ mod tests {
             kernel.register_executor(manifest, EchoExecutor),
             Err(CoreError::ExecutorManifestMismatch(_))
         ));
+    }
+
+    #[test]
+    fn executor_manifest_requires_artifact_identity_and_signature_refs() {
+        let temp = tempdir().unwrap();
+        let capability = memory_echo_capability();
+
+        let mut missing_artifact_kernel = Kernel::new_in_memory(temp.path()).unwrap();
+        missing_artifact_kernel
+            .register_capability(capability.clone())
+            .unwrap();
+        let mut missing_artifact = memory_echo_executor_manifest(&capability);
+        missing_artifact.artifact_hash.clear();
+        assert!(matches!(
+            missing_artifact_kernel.register_executor(missing_artifact, EchoExecutor),
+            Err(CoreError::ExecutorManifestMismatch(_))
+        ));
+
+        let mut missing_signature_kernel = Kernel::new_in_memory(temp.path()).unwrap();
+        missing_signature_kernel
+            .register_capability(capability.clone())
+            .unwrap();
+        let mut missing_signature = memory_echo_executor_manifest(&capability);
+        missing_signature.signature_ref = None;
+        assert!(matches!(
+            missing_signature_kernel.register_executor(missing_signature, EchoExecutor),
+            Err(CoreError::ExecutorManifestMismatch(_))
+        ));
+
+        let mut missing_signing_key_kernel = Kernel::new_in_memory(temp.path()).unwrap();
+        missing_signing_key_kernel
+            .register_capability(capability.clone())
+            .unwrap();
+        let mut missing_signing_key = memory_echo_executor_manifest(&capability);
+        missing_signing_key.signing_key_ref.clear();
+        assert!(matches!(
+            missing_signing_key_kernel.register_executor(missing_signing_key, EchoExecutor),
+            Err(CoreError::ExecutorManifestMismatch(_))
+        ));
+    }
+
+    #[test]
+    fn ticket_binding_rejects_executor_artifact_swaps_before_consumption() {
+        let temp = tempdir().unwrap();
+        let mut kernel = Kernel::new_in_memory(temp.path()).unwrap();
+        let capability = memory_echo_capability();
+        let original_manifest = memory_echo_executor_manifest(&capability);
+        let mut swapped_manifest = original_manifest.clone();
+        swapped_manifest.artifact_hash =
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into();
+        kernel.register_capability(capability).unwrap();
+        kernel
+            .register_executor(original_manifest.clone(), EchoExecutor)
+            .unwrap();
+        let run = kernel
+            .admit(intent(temp.path(), vec!["memory.echo".into()]))
+            .unwrap();
+        let delta = delta(&run.run_id, "memory://echo", "memory.echo", RiskLevel::Low);
+        let policy = kernel.propose_delta(&run.run_id, delta).unwrap();
+        let capability = kernel.capability("memory.echo").unwrap().clone();
+        let ticket = kernel.issue_ticket(&policy, &capability).unwrap();
+
+        kernel
+            .register_executor(swapped_manifest, EchoExecutor)
+            .unwrap();
+        let rejected = kernel.execute(
+            &ticket,
+            SandboxInput {
+                capability_id: "memory.echo".into(),
+                payload: json!({ "text": "hello executor" }),
+            },
+        );
+        kernel
+            .register_executor(original_manifest, EchoExecutor)
+            .unwrap();
+        let retried = kernel.execute(
+            &ticket,
+            SandboxInput {
+                capability_id: "memory.echo".into(),
+                payload: json!({ "text": "hello executor" }),
+            },
+        );
+
+        assert!(matches!(rejected, Err(CoreError::ExecutionBindingMismatch)));
+        assert!(retried.is_ok());
     }
 
     #[test]
@@ -1994,6 +2554,10 @@ mod tests {
             capability_contract_hash: "contract_hash_1".into(),
             executor_ref: "moxi.builtin.fs.file_read".into(),
             executor_version: "0.2.0".into(),
+            executor_artifact_hash:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            executor_signature_ref: "builtin://moxi/file.read/executor/signature".into(),
+            executor_signing_key_ref: "builtin://moxi/signing-key".into(),
             executor_manifest_hash: "executor_manifest_hash_1".into(),
             gateway_decision_ref: None,
             proof_refs: vec![],

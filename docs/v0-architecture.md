@@ -16,9 +16,10 @@ small:
 5. The trusted kernel path starts at `Intent`.
 6. Runs are admitted into `RunContract`.
 7. External actions must be proposed as `WorldDelta`.
-8. Policy produces `PolicyDecision`.
+8. Configurable policy evaluation produces `PolicyDecision`.
 9. The kernel issues single-use `ExecutionTicket` bound to the current
-   capability contract, executor manifest, isolation mode, and retry policy.
+   capability contract, executor artifact identity, executor manifest,
+   isolation mode, and retry policy.
 10. Execution requires the caller-supplied ticket to exactly match the stored
    ticket payload before ticket consumption.
 11. The sandbox returns `SandboxResult`.
@@ -33,9 +34,10 @@ small:
    refs for audit replay.
 
 The current durable store is SQLite through `moxi-store`. It owns run state,
-budget counters, approval grants, execution tickets, and append-only
-hash-chained ledger events. JSONL transcript/WAL and projection stores remain
-future design work, not current code.
+budget counters, approval grants, execution tickets, sandbox result payloads,
+proof payloads, append-only hash-chained ledger events, ledger replay/audit
+verification, and schema migrations through `store_meta`. JSONL transcript/WAL
+and projection stores remain future design work, not current code.
 
 ## Crate Map
 
@@ -48,9 +50,12 @@ future design work, not current code.
 - `moxi-contracts`: shared protocol structs and JSON schema generation.
 - `moxi-core`: trusted kernel orchestration across admission, policy, approval,
   ticket issuing, registered capability execution, verification, and ledger
-  commits.
-- `moxi-sandbox`: first local read-only file sandbox.
+  commits. Policy uses configurable rules with safe v0 defaults.
+- `moxi-sandbox`: local read-only file sandbox and v0 process-sandbox JSON
+  protocol executor.
 - `moxi-store`: SQLite state store and append-only audit ledger.
+  Store opening runs ordered schema migrations and rejects newer unsupported
+  schema versions.
 
 ## Entry Boundary
 
@@ -134,17 +139,26 @@ The shipped end-to-end scenario is `file.read` inside the workspace:
 - Network and shell are denied by default.
 - Capabilities must be registered before use.
 - Requested capabilities must be declared in the run contract.
-- High-risk and critical actions require human approval before ticket issuing.
+- By default, high-risk and critical actions require human approval before
+  ticket issuing.
+- `PolicyConfig` can tune declared-capability enforcement, capability
+  deny/approval rules, resource deny/approval patterns, risk approval/deny
+  thresholds, and approval policy/ref metadata.
 - Execution dispatch is capability-based. `file.read` is registered as a
   default executor, but the kernel path can run any registered executor whose
   capability passed contract, policy, ticket, schema, and result-binding checks.
-- The current runtime only accepts `in_process_trusted` executors. Process,
-  remote, browser, model-gateway, and plugin-host isolation modes are reserved
-  protocol values until their runtimes are implemented.
+- The current runtime accepts `in_process_trusted` and `process_sandbox`
+  executors. `process_sandbox` launches a configured executable directly,
+  sends `{ ticket, input }` JSON over stdin, reads `{ success, output, error }`
+  JSON from stdout, and kills the process on timeout. Remote, browser,
+  model-gateway, and plugin-host isolation modes remain reserved protocol values
+  until their runtimes are implemented.
 - Executor manifests must match the registered capability contract hash,
-  provider identity, and sandbox profile.
+  provider identity, sandbox profile, artifact hash, signature ref, and signing
+  key ref.
 - Execution tickets bind the policy decision, capability contract hash,
-  executor id/version, executor manifest hash, executor isolation, and the
+  executor id/version, executor artifact hash, executor signature ref, executor
+  signing key ref, executor manifest hash, executor isolation, and the
   capability retry policy snapshot.
 - The persisted ticket payload is the execution authority. A supplied ticket
   must exactly match the stored ticket before it can be consumed.
@@ -157,9 +171,35 @@ The shipped end-to-end scenario is `file.read` inside the workspace:
 - Execution tickets are single-use.
 - Execution ticket, sandbox result, and proof payloads are persisted for audit
   replay.
+- Ledger audit replay validates the hash chain and replays successful events
+  against persisted tickets, sandbox results, proofs, output hashes, and proof
+  evidence hashes.
 - Successful ledger commits require recorded proof references matching the
-  ledger event binding fields.
+  ledger event binding fields, including executor artifact identity.
 - Ledger events are append-only and hash-chained.
+
+## P0 Boundary
+
+P0 is the small trusted kernel closure: ingress normalization, deterministic
+gateway checks, deterministic intent compilation, run contracts, world deltas,
+policy decisions, execution tickets, capability contracts, sandbox execution,
+proofs, state, and ledger replay. It is not the full product runtime.
+
+The following are intentionally outside the P0 blocker set:
+
+- Production authentication providers, distributed rate limiting, and
+  compliance-grade redaction. These belong to production gateway integrations.
+- Model-backed understanding, planner handoff, model gateway, tool gateway,
+  plugin host, memory runtime, swarm runtime, workflow runtime, and product
+  surfaces. These are P1-P4 runtime layers.
+- Standalone scheduler runtime and streaming execution EventBus. P0 uses
+  kernel/store state transitions, heartbeat and budget counters, and
+  hash-chained ledger facts.
+
+One production gate remains explicit: `process_sandbox` can run the v0 JSON
+protocol, but it is not a production OS isolation boundary yet. Production
+exposure of executable external actions requires OS-level sandbox hardening and
+credential/key-store integration.
 
 ## Future Work
 
@@ -169,10 +209,17 @@ The shipped end-to-end scenario is `file.read` inside the workspace:
 - Concrete CLI, HTTP API, SDK, MCP server, desktop, and web transports.
 - Model gateway, tool gateway, plugin system, browser daemon, remote bridge,
   workflow runtime, swarm runtime, and long-term memory runtime.
-- Process, remote, browser, model-gateway, and plugin-host executor isolation
-  runtimes beyond the current `in_process_trusted` path.
+- Standalone scheduler runtime, streaming execution event bus, credential/key
+  store, verifier runtime, and rollback manager beyond the current trusted
+  kernel/store path.
+- Remote, browser, model-gateway, and plugin-host executor isolation runtimes.
+- OS-level hardening for `process_sandbox` beyond direct process launch, JSON
+  protocol validation, and timeout kill.
 - Production capability executors beyond the current built-in `file.read`.
-- JSONL transcript/WAL and replayable projections.
+- Real cryptographic signature verification and key trust roots beyond the
+  current v0 required identity refs.
+- JSONL transcript/WAL and UI/projection stores beyond the current ledger audit
+  replay verifier.
 - Production release packaging beyond source bundles.
 
 ## Verification

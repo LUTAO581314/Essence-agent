@@ -43,11 +43,19 @@ capability contract registration, policy decision, execution ticket, input
 schema validation, single-use ticket consumption, result binding validation,
 output schema validation, proof collection, and ledger commit.
 
+`moxi-contracts::PolicyConfig` and `moxi-core::PolicyEngine` are now the v0
+policy configuration surface. Defaults preserve the original safety behavior:
+registered capabilities must be declared in the run contract, and high/critical
+risk requires approval. Changes to serialized `PolicyConfig` fields should be
+treated as compatibility work because policy packs, deployment profiles, and
+future admin tooling will depend on them.
+
 Execution-facing serialized contracts now include capability contract hashes,
+executor artifact hashes, executor signature refs, executor signing key refs,
 executor manifest hashes, executor isolation, retry policy snapshots, and
-proof/ledger binding refs. Treat changes to these fields as compatibility
-work, because downstream auditors, replay tools, and future runtimes will rely
-on them to prove which capability and executor were authorized.
+proof/ledger binding refs. Treat changes to these fields as compatibility work,
+because downstream auditors, replay tools, and future runtimes will rely on
+them to prove which capability and executor were authorized.
 
 `SandboxResult.output_hash` is kernel-owned. Executors may populate the field,
 but the kernel recomputes it from structured output before validation,
@@ -60,6 +68,24 @@ the recorded sandbox result, and successful ledger commits are bound to
 recorded proofs whose policy, capability, executor, gateway, input, output, and
 ticket refs match the event.
 
-The current executable runtime accepts only `in_process_trusted` executor
-manifests. Other `ExecutorIsolation` variants are reserved protocol surface and
-should not be documented as runnable until their runtime checks exist.
+`moxi-store::Store::replay_ledger_audit` is the current read-time audit verifier.
+It first validates the append-only hash chain, then replays successful ledger
+events against persisted tickets, sandbox results, proofs, canonical output
+hashes, and proof evidence hashes. Adding fields to the ticket/result/proof
+binding set should update this replay verifier in the same compatibility unit.
+
+SQLite schema changes must move through `moxi-store` ordered migrations and bump
+the recorded `store_meta.schema_version`. Newer on-disk schemas are rejected
+rather than silently opened by older code.
+
+The current v0 executor identity check requires `sha256:<hex>` artifact refs,
+signature refs, and signing key refs. It does not yet verify cryptographic
+signatures against a real trust root; that remains future runtime work.
+
+The current executable runtime accepts `in_process_trusted` and
+`process_sandbox` executor manifests. `process_sandbox` is a stable v0 JSON
+protocol boundary: stdin receives `{ ticket, input }`, stdout returns
+`{ success, output, error }`, and the kernel still owns result binding,
+hashing, proofing, and ledger commit. Other `ExecutorIsolation` variants are
+reserved protocol surface and should not be documented as runnable until their
+runtime checks exist.

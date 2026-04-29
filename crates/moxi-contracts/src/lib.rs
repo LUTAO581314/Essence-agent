@@ -244,6 +244,19 @@ pub struct RequiredApproval {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+pub struct ApprovalGrant {
+    pub grant_id: String,
+    pub run_id: String,
+    pub delta_id: String,
+    pub policy_decision_ref: String,
+    pub capability_id: String,
+    pub approver_id: String,
+    pub reason: String,
+    pub granted_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct PolicyDecision {
     pub decision_id: String,
     pub run_id: String,

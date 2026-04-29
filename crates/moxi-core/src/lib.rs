@@ -1,9 +1,9 @@
 use chrono::{Duration, Utc};
 use jsonschema::JSONSchema;
 use moxi_contracts::{
-    ApprovalPolicy, CapabilityContract, Confidence, Decision, DeltaState, EventResult,
-    ExecutionTicket, Intent, LedgerEvent, PermissionMode, PolicyDecision, Proof, RequiredApproval,
-    RiskLevel, RunContract, RunStatus, SandboxInput, SandboxResult, WorldDelta,
+    ApprovalGrant, ApprovalPolicy, CapabilityContract, Confidence, Decision, DeltaState,
+    EventResult, ExecutionTicket, Intent, LedgerEvent, PermissionMode, PolicyDecision, Proof,
+    RequiredApproval, RiskLevel, RunContract, RunStatus, SandboxInput, SandboxResult, WorldDelta,
 };
 use moxi_sandbox::{sha256_hex, FileReadSandbox, Sandbox, SandboxError};
 use moxi_store::{Store, StoreError};
@@ -25,6 +25,12 @@ pub enum CoreError {
     PolicyDenied(String),
     #[error("approval required: {0}")]
     ApprovalRequired(String),
+    #[error("approval is not required for policy decision: {0}")]
+    ApprovalNotRequired(String),
+    #[error("approval grant does not match policy decision")]
+    ApprovalGrantMismatch,
+    #[error("approval grant expired: {0}")]
+    ApprovalGrantExpired(String),
     #[error("ticket expired: {0}")]
     TicketExpired(String),
     #[error("run mismatch")]
@@ -101,6 +107,14 @@ impl Kernel {
     }
 
     pub fn admit(&mut self, intent: Intent) -> CoreResult<RunContract> {
+        self.admit_with_permission_mode(intent, PermissionMode::ReadOnly)
+    }
+
+    pub fn admit_with_permission_mode(
+        &mut self,
+        intent: Intent,
+        permission_mode: PermissionMode,
+    ) -> CoreResult<RunContract> {
         let run_id = format!("run_{}", Uuid::new_v4());
         let contract = RunContract {
             status_ref: format!("state_{run_id}"),
@@ -109,7 +123,7 @@ impl Kernel {
             tenant_id: intent.tenant_id,
             user_id: intent.user_id,
             risk_level: intent.risk_level,
-            permission_mode: PermissionMode::ReadOnly,
+            permission_mode,
             budget: intent.budget,
             required_capabilities: intent.requested_capabilities,
             checkpoint_ref: None,
@@ -168,6 +182,13 @@ impl Kernel {
             reasons.push("capability not declared in RunContract".into());
         }
 
+        if let Some(reason) =
+            permission_mode_denial(run.permission_mode, &capability.permissions.resources)
+        {
+            decision = Decision::Deny;
+            reasons.push(reason);
+        }
+
         if capability
             .permissions
             .denied
@@ -221,10 +242,67 @@ impl Kernel {
         Ok(policy)
     }
 
+    pub fn grant_approval(
+        &mut self,
+        policy: &PolicyDecision,
+        approver_id: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> CoreResult<ApprovalGrant> {
+        self.runs
+            .get(&policy.run_id)
+            .ok_or_else(|| CoreError::RunNotFound(policy.run_id.clone()))?;
+
+        if policy.decision != Decision::RequireApproval || policy.required_approval.is_none() {
+            return Err(CoreError::ApprovalNotRequired(policy.decision_id.clone()));
+        }
+
+        if policy.expires_at < Utc::now() {
+            return Err(CoreError::ApprovalGrantExpired(policy.decision_id.clone()));
+        }
+
+        let grant = ApprovalGrant {
+            grant_id: format!("ag_{}", Uuid::new_v4()),
+            run_id: policy.run_id.clone(),
+            delta_id: policy.delta_id.clone(),
+            policy_decision_ref: policy.decision_id.clone(),
+            capability_id: policy.capability_id.clone(),
+            approver_id: approver_id.into(),
+            reason: reason.into(),
+            granted_at: Utc::now(),
+            expires_at: policy.expires_at,
+        };
+
+        self.store.record_approval_grant(&grant)?;
+        self.store
+            .transition_run_status(&policy.run_id, RunStatus::RunningHeartbeat)?;
+        if let Some(run) = self.runs.get_mut(&policy.run_id) {
+            run.approval_ref = Some(grant.grant_id.clone());
+        }
+        Ok(grant)
+    }
+
     pub fn issue_ticket(
         &self,
         policy: &PolicyDecision,
         capability: &CapabilityContract,
+    ) -> CoreResult<ExecutionTicket> {
+        self.issue_ticket_after_policy(policy, capability, None)
+    }
+
+    pub fn issue_ticket_with_grant(
+        &self,
+        policy: &PolicyDecision,
+        capability: &CapabilityContract,
+        grant: &ApprovalGrant,
+    ) -> CoreResult<ExecutionTicket> {
+        self.issue_ticket_after_policy(policy, capability, Some(grant))
+    }
+
+    fn issue_ticket_after_policy(
+        &self,
+        policy: &PolicyDecision,
+        capability: &CapabilityContract,
+        grant: Option<&ApprovalGrant>,
     ) -> CoreResult<ExecutionTicket> {
         match policy.decision {
             Decision::Allow => {}
@@ -232,7 +310,10 @@ impl Kernel {
                 return Err(CoreError::PolicyDenied(policy.reasons.join("; ")));
             }
             Decision::RequireApproval => {
-                return Err(CoreError::ApprovalRequired(policy.reasons.join("; ")));
+                let Some(grant) = grant else {
+                    return Err(CoreError::ApprovalRequired(policy.reasons.join("; ")));
+                };
+                self.validate_approval_grant(policy, capability, grant)?;
             }
         }
 
@@ -253,6 +334,36 @@ impl Kernel {
         };
         self.store.record_ticket(&ticket)?;
         Ok(ticket)
+    }
+
+    fn validate_approval_grant(
+        &self,
+        policy: &PolicyDecision,
+        capability: &CapabilityContract,
+        grant: &ApprovalGrant,
+    ) -> CoreResult<()> {
+        if grant.run_id != policy.run_id
+            || grant.delta_id != policy.delta_id
+            || grant.policy_decision_ref != policy.decision_id
+            || grant.capability_id != capability.capability_id
+            || grant.capability_id != policy.capability_id
+        {
+            return Err(CoreError::ApprovalGrantMismatch);
+        }
+
+        if grant.expires_at < Utc::now() {
+            return Err(CoreError::ApprovalGrantExpired(grant.grant_id.clone()));
+        }
+
+        let recorded = self
+            .store
+            .approval_grant(&grant.grant_id)?
+            .ok_or(CoreError::ApprovalGrantMismatch)?;
+        if recorded != *grant {
+            return Err(CoreError::ApprovalGrantMismatch);
+        }
+
+        Ok(())
     }
 
     pub fn execute(
@@ -326,6 +437,10 @@ impl Kernel {
 
     pub fn ledger_events_for_run(&self, run_id: &str) -> CoreResult<Vec<LedgerEvent>> {
         Ok(self.store.ledger_events_for_run(run_id)?)
+    }
+
+    pub fn validate_ledger(&self) -> CoreResult<()> {
+        Ok(self.store.validate_ledger_hash_chain()?)
     }
 }
 
@@ -417,6 +532,59 @@ fn validate_payload(name: &str, schema: &Value, payload: &Value) -> CoreResult<(
     Ok(())
 }
 
+fn permission_mode_denial(mode: PermissionMode, resources: &[String]) -> Option<String> {
+    resources
+        .iter()
+        .find(|resource| !permission_mode_allows_resource(mode, resource))
+        .map(|resource| {
+            format!(
+                "permission mode {} does not allow {resource}",
+                permission_mode_name(mode)
+            )
+        })
+}
+
+fn permission_mode_allows_resource(mode: PermissionMode, resource: &str) -> bool {
+    let resource = resource.to_ascii_lowercase();
+    match mode {
+        PermissionMode::ReadOnly => is_read_resource(&resource),
+        PermissionMode::WorkspaceWrite => {
+            !is_network_resource(&resource)
+                && !is_shell_resource(&resource)
+                && !is_privileged_resource(&resource)
+        }
+        PermissionMode::Networked => {
+            !is_shell_resource(&resource) && !is_privileged_resource(&resource)
+        }
+        PermissionMode::Privileged => true,
+    }
+}
+
+fn is_read_resource(resource: &str) -> bool {
+    resource.ends_with(".read") || resource == "workspace.read" || resource == "memory.read"
+}
+
+fn is_network_resource(resource: &str) -> bool {
+    resource.contains("network")
+}
+
+fn is_shell_resource(resource: &str) -> bool {
+    resource.contains("shell")
+}
+
+fn is_privileged_resource(resource: &str) -> bool {
+    resource.contains("credential") || resource.contains("privileged")
+}
+
+fn permission_mode_name(mode: PermissionMode) -> &'static str {
+    match mode {
+        PermissionMode::ReadOnly => "read_only",
+        PermissionMode::WorkspaceWrite => "workspace_write",
+        PermissionMode::Networked => "networked",
+        PermissionMode::Privileged => "privileged",
+    }
+}
+
 #[allow(dead_code)]
 fn hash_json(value: &Value) -> String {
     sha256_hex(serde_json::to_vec(value).expect("json serialization cannot fail"))
@@ -470,6 +638,14 @@ mod tests {
             risk_level,
             rollback_plan_ref: None,
         }
+    }
+
+    fn file_write_capability() -> CapabilityContract {
+        let mut capability = file_read_capability();
+        capability.capability_id = "file.write".into();
+        capability.permissions.resources = vec!["workspace.write".into()];
+        capability.permissions.denied = vec!["network".into(), "shell".into()];
+        capability
     }
 
     #[test]
@@ -538,6 +714,70 @@ mod tests {
             .unwrap();
 
         assert_eq!(policy.decision, Decision::RequireApproval);
+    }
+
+    #[test]
+    fn approval_grant_resumes_same_run_and_allows_ticket() {
+        let temp = tempdir().unwrap();
+        fs::write(temp.path().join("hello.txt"), "hello").unwrap();
+        let mut kernel = Kernel::new_in_memory(temp.path()).unwrap();
+        kernel.register_capability(file_read_capability()).unwrap();
+        let run = kernel
+            .admit(intent(temp.path(), vec!["file.read".into()]))
+            .unwrap();
+        let delta = delta(&run.run_id, "hello.txt", "file.read", RiskLevel::High);
+        let policy = kernel.propose_delta(&run.run_id, delta.clone()).unwrap();
+        assert_eq!(
+            kernel.run_status(&run.run_id).unwrap(),
+            Some(RunStatus::AwaitingApproval)
+        );
+
+        let grant = kernel
+            .grant_approval(&policy, "human_1", "reviewed high-risk file read")
+            .unwrap();
+        let capability = kernel.capability("file.read").unwrap().clone();
+        let ticket = kernel
+            .issue_ticket_with_grant(&policy, &capability, &grant)
+            .unwrap();
+        let result = kernel
+            .execute(
+                &ticket,
+                SandboxInput {
+                    capability_id: "file.read".into(),
+                    payload: json!({ "path": "hello.txt" }),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(grant.run_id, run.run_id);
+        assert_eq!(
+            kernel.run_status(&run.run_id).unwrap(),
+            Some(RunStatus::Observing)
+        );
+        assert_eq!(result.output["content"], "hello");
+    }
+
+    #[test]
+    fn read_only_run_denies_workspace_write_capability() {
+        let temp = tempdir().unwrap();
+        let mut kernel = Kernel::new_in_memory(temp.path()).unwrap();
+        kernel.register_capability(file_write_capability()).unwrap();
+        let run = kernel
+            .admit(intent(temp.path(), vec!["file.write".into()]))
+            .unwrap();
+
+        let policy = kernel
+            .propose_delta(
+                &run.run_id,
+                delta(&run.run_id, "hello.txt", "file.write", RiskLevel::Low),
+            )
+            .unwrap();
+
+        assert_eq!(policy.decision, Decision::Deny);
+        assert!(policy
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("permission mode read_only")));
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use chrono::Utc;
-use moxi_contracts::{Budget, ExecutionTicket, LedgerEvent, RunStatus};
+use moxi_contracts::{ApprovalGrant, Budget, ExecutionTicket, LedgerEvent, RunStatus};
 use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -26,6 +26,20 @@ pub enum StoreError {
     TicketUnknown(String),
     #[error("execution ticket already consumed: {0}")]
     TicketConsumed(String),
+    #[error("ledger chain broken at {ledger_event_id}: expected previous hash {expected_previous_hash}, got {actual_previous_hash}")]
+    LedgerChainBroken {
+        ledger_event_id: String,
+        expected_previous_hash: String,
+        actual_previous_hash: String,
+    },
+    #[error(
+        "ledger hash mismatch at {ledger_event_id}: expected {expected_hash}, got {actual_hash}"
+    )]
+    LedgerHashMismatch {
+        ledger_event_id: String,
+        expected_hash: String,
+        actual_hash: String,
+    },
 }
 
 pub type StoreResult<T> = Result<T, StoreError>;
@@ -78,6 +92,17 @@ impl Store {
                 consumed_at TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS approval_grants (
+                grant_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                delta_id TEXT NOT NULL,
+                policy_decision_ref TEXT NOT NULL,
+                capability_id TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS ledger_events (
                 ledger_event_id TEXT PRIMARY KEY,
                 run_id TEXT NOT NULL,
@@ -98,6 +123,18 @@ impl Store {
             BEFORE DELETE ON ledger_events
             BEGIN
                 SELECT RAISE(ABORT, 'ledger_events append only');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS approval_grants_no_update
+            BEFORE UPDATE ON approval_grants
+            BEGIN
+                SELECT RAISE(ABORT, 'approval_grants append only');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS approval_grants_no_delete
+            BEFORE DELETE ON approval_grants
+            BEGIN
+                SELECT RAISE(ABORT, 'approval_grants append only');
             END;
             "#,
         )?;
@@ -217,6 +254,41 @@ impl Store {
         }
     }
 
+    pub fn record_approval_grant(&self, grant: &ApprovalGrant) -> StoreResult<()> {
+        self.conn.execute(
+            r#"
+            INSERT INTO approval_grants (
+                grant_id, run_id, delta_id, policy_decision_ref, capability_id, payload_json, expires_at, created_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "#,
+            params![
+                grant.grant_id,
+                grant.run_id,
+                grant.delta_id,
+                grant.policy_decision_ref,
+                grant.capability_id,
+                serde_json::to_string(grant)?,
+                grant.expires_at.to_rfc3339(),
+                grant.granted_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn approval_grant(&self, grant_id: &str) -> StoreResult<Option<ApprovalGrant>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT payload_json FROM approval_grants WHERE grant_id = ?1")?;
+        let mut rows = stmt.query(params![grant_id])?;
+        if let Some(row) = rows.next()? {
+            let payload: String = row.get(0)?;
+            Ok(Some(serde_json::from_str(&payload)?))
+        } else {
+            Ok(None)
+        }
+    }
+
     pub fn append_ledger_event(&self, mut event: LedgerEvent) -> StoreResult<LedgerEvent> {
         event.previous_event_hash = self.latest_event_hash()?.unwrap_or_default();
         event.event_hash.clear();
@@ -257,7 +329,7 @@ impl Store {
 
     pub fn ledger_events_for_run(&self, run_id: &str) -> StoreResult<Vec<LedgerEvent>> {
         let mut stmt = self.conn.prepare(
-            "SELECT payload_json FROM ledger_events WHERE run_id = ?1 ORDER BY timestamp ASC",
+            "SELECT payload_json FROM ledger_events WHERE run_id = ?1 ORDER BY rowid ASC",
         )?;
         let events = stmt
             .query_map(params![run_id], |row| row.get::<_, String>(0))?
@@ -270,12 +342,79 @@ impl Store {
         let hash = self
             .conn
             .query_row(
-                "SELECT event_hash FROM ledger_events ORDER BY timestamp DESC, ledger_event_id DESC LIMIT 1",
+                "SELECT event_hash FROM ledger_events ORDER BY rowid DESC LIMIT 1",
                 [],
                 |row| row.get(0),
             )
             .optional()?;
         Ok(hash)
+    }
+
+    pub fn validate_ledger_hash_chain(&self) -> StoreResult<()> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT ledger_event_id, payload_json, event_hash, previous_event_hash
+            FROM ledger_events
+            ORDER BY rowid ASC
+            "#,
+        )?;
+        let mut rows = stmt.query([])?;
+        let mut expected_previous_hash = String::new();
+
+        while let Some(row) = rows.next()? {
+            let ledger_event_id: String = row.get(0)?;
+            let payload_json: String = row.get(1)?;
+            let stored_event_hash: String = row.get(2)?;
+            let stored_previous_hash: String = row.get(3)?;
+            let mut event: LedgerEvent = serde_json::from_str(&payload_json)?;
+
+            if event.ledger_event_id != ledger_event_id {
+                return Err(StoreError::LedgerHashMismatch {
+                    ledger_event_id,
+                    expected_hash: event.ledger_event_id,
+                    actual_hash: "ledger_event_id column mismatch".into(),
+                });
+            }
+
+            if event.previous_event_hash != stored_previous_hash {
+                return Err(StoreError::LedgerChainBroken {
+                    ledger_event_id,
+                    expected_previous_hash: event.previous_event_hash,
+                    actual_previous_hash: stored_previous_hash,
+                });
+            }
+
+            if event.event_hash != stored_event_hash {
+                return Err(StoreError::LedgerHashMismatch {
+                    ledger_event_id,
+                    expected_hash: event.event_hash,
+                    actual_hash: stored_event_hash,
+                });
+            }
+
+            if event.previous_event_hash != expected_previous_hash {
+                return Err(StoreError::LedgerChainBroken {
+                    ledger_event_id,
+                    expected_previous_hash,
+                    actual_previous_hash: event.previous_event_hash,
+                });
+            }
+
+            let actual_hash = event.event_hash.clone();
+            event.event_hash.clear();
+            let expected_hash = hash_event(&event)?;
+            if actual_hash != expected_hash {
+                return Err(StoreError::LedgerHashMismatch {
+                    ledger_event_id,
+                    expected_hash,
+                    actual_hash,
+                });
+            }
+
+            expected_previous_hash = actual_hash;
+        }
+
+        Ok(())
     }
 
     fn increment_counter(
@@ -333,8 +472,8 @@ fn is_allowed_transition(from: Option<RunStatus>, to: RunStatus) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
-    use moxi_contracts::EventResult;
+    use chrono::{Duration, Utc};
+    use moxi_contracts::{ApprovalGrant, EventResult};
 
     fn ledger_event() -> LedgerEvent {
         LedgerEvent {
@@ -353,6 +492,20 @@ mod tests {
             event_hash: String::new(),
             result: EventResult::Success,
             timestamp: Utc::now(),
+        }
+    }
+
+    fn approval_grant() -> ApprovalGrant {
+        ApprovalGrant {
+            grant_id: "ag_1".into(),
+            run_id: "run_1".into(),
+            delta_id: "delta_1".into(),
+            policy_decision_ref: "pd_1".into(),
+            capability_id: "file.read".into(),
+            approver_id: "human_1".into(),
+            reason: "approved".into(),
+            granted_at: Utc::now(),
+            expires_at: Utc::now() + Duration::minutes(5),
         }
     }
 
@@ -376,6 +529,25 @@ mod tests {
     }
 
     #[test]
+    fn approval_grants_are_append_only() {
+        let store = Store::open_memory().unwrap();
+        let grant = approval_grant();
+        store.record_approval_grant(&grant).unwrap();
+
+        let update = store.conn.execute(
+            "UPDATE approval_grants SET capability_id = 'tampered' WHERE grant_id = ?1",
+            params![grant.grant_id],
+        );
+        assert!(update.is_err());
+
+        let delete = store.conn.execute(
+            "DELETE FROM approval_grants WHERE grant_id = ?1",
+            params![grant.grant_id],
+        );
+        assert!(delete.is_err());
+    }
+
+    #[test]
     fn ledger_events_are_hash_chained() {
         let store = Store::open_memory().unwrap();
         let first = store.append_ledger_event(ledger_event()).unwrap();
@@ -386,6 +558,53 @@ mod tests {
 
         assert!(!first.event_hash.is_empty());
         assert_eq!(second.previous_event_hash, first.event_hash);
+    }
+
+    #[test]
+    fn ledger_hash_chain_validation_accepts_valid_chain() {
+        let store = Store::open_memory().unwrap();
+        store.append_ledger_event(ledger_event()).unwrap();
+        let mut second = ledger_event();
+        second.ledger_event_id = "le_2".into();
+        store.append_ledger_event(second).unwrap();
+
+        store.validate_ledger_hash_chain().unwrap();
+    }
+
+    #[test]
+    fn ledger_hash_chain_validation_detects_broken_previous_hash() {
+        let store = Store::open_memory().unwrap();
+        store.append_ledger_event(ledger_event()).unwrap();
+        let mut tampered = ledger_event();
+        tampered.ledger_event_id = "le_tampered".into();
+        tampered.previous_event_hash = "not-the-previous-hash".into();
+        tampered.event_hash = "not-the-event-hash".into();
+
+        store
+            .conn
+            .execute(
+                r#"
+                INSERT INTO ledger_events (
+                    ledger_event_id, run_id, event_type, payload_json, event_hash, previous_event_hash, timestamp
+                )
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                "#,
+                params![
+                    tampered.ledger_event_id,
+                    tampered.run_id,
+                    tampered.event_type,
+                    serde_json::to_string(&tampered).unwrap(),
+                    tampered.event_hash,
+                    tampered.previous_event_hash,
+                    tampered.timestamp.to_rfc3339(),
+                ],
+            )
+            .unwrap();
+
+        assert!(matches!(
+            store.validate_ledger_hash_chain(),
+            Err(StoreError::LedgerChainBroken { .. })
+        ));
     }
 
     #[test]

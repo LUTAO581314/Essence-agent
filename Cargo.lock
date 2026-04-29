@@ -892,7 +892,7 @@ dependencies = [
 
 [[package]]
 name = "moxi-contracts"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "schemars",
@@ -903,7 +903,7 @@ dependencies = [
 
 [[package]]
 name = "moxi-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "jsonschema",
@@ -918,7 +918,7 @@ dependencies = [
 
 [[package]]
 name = "moxi-sandbox"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "hex",
@@ -931,7 +931,7 @@ dependencies = [
 
 [[package]]
 name = "moxi-store"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "hex",

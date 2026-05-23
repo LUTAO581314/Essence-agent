@@ -1289,17 +1289,19 @@ fn is_allowed_transition(from: Option<RunStatus>, to: RunStatus) -> bool {
     use RunStatus::*;
     match (from, to) {
         (None, Admitted) => true,
-        (Some(Admitted), RunningHeartbeat | AwaitingApproval | Blocked | Executing | Cancelled) => {
-            true
-        }
+        (
+            Some(Admitted),
+            RunningHeartbeat | AwaitingApproval | Blocked | Executing | Cancelled | TimedOut,
+        ) => true,
         (Some(RunningHeartbeat), AwaitingApproval | Executing | Blocked | Cancelled | Failed) => {
             true
         }
-        (Some(AwaitingApproval), RunningHeartbeat | Blocked | Cancelled) => true,
-        (Some(Executing), Observing | Failed | Blocked) => true,
-        (Some(Observing), Verifying | Failed | Blocked) => true,
-        (Some(Verifying), Persisting | Failed | Blocked) => true,
-        (Some(Persisting), Completed | Failed | RolledBack) => true,
+        (Some(RunningHeartbeat), TimedOut) => true,
+        (Some(AwaitingApproval), RunningHeartbeat | Blocked | Cancelled | TimedOut) => true,
+        (Some(Executing), Observing | Failed | Blocked | TimedOut) => true,
+        (Some(Observing), Verifying | Failed | Blocked | TimedOut) => true,
+        (Some(Verifying), Persisting | Failed | Blocked | TimedOut) => true,
+        (Some(Persisting), Completed | Failed | RolledBack | TimedOut) => true,
         (Some(current), next) if current == next => true,
         _ => false,
     }

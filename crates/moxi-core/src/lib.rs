@@ -44,6 +44,8 @@ pub enum CoreError {
     TicketExpired(String),
     #[error("run mismatch")]
     RunMismatch,
+    #[error("run timed out: {0}")]
+    RunTimedOut(String),
     #[error("executor result does not match execution ticket")]
     ExecutorResultMismatch,
     #[error("sandbox result was not recorded by this kernel: {0}")]
@@ -409,6 +411,36 @@ impl Kernel {
         Ok(())
     }
 
+    fn enforce_run_timeout(&self, run: &RunContract) -> CoreResult<()> {
+        match self
+            .store
+            .get_run_status(&run.run_id)?
+            .ok_or_else(|| CoreError::RunNotFound(run.run_id.clone()))?
+        {
+            RunStatus::TimedOut => return Err(CoreError::RunTimedOut(run.run_id.clone())),
+            RunStatus::Completed
+            | RunStatus::Failed
+            | RunStatus::Cancelled
+            | RunStatus::Blocked
+            | RunStatus::RolledBack => return Ok(()),
+            _ => {}
+        }
+
+        let timeout_ms = std::cmp::min(run.budget.timeout_ms, i64::MAX as u64) as i64;
+        if let Some(deadline) = run
+            .created_at
+            .checked_add_signed(Duration::milliseconds(timeout_ms))
+        {
+            if Utc::now() >= deadline {
+                self.store
+                    .transition_run_status(&run.run_id, RunStatus::TimedOut)?;
+                return Err(CoreError::RunTimedOut(run.run_id.clone()));
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn propose_delta(
         &mut self,
         run_id: &str,
@@ -418,6 +450,8 @@ impl Kernel {
             .runs
             .get(run_id)
             .ok_or_else(|| CoreError::RunNotFound(run_id.into()))?;
+
+        self.enforce_run_timeout(run)?;
 
         if delta.run_id != run.run_id {
             return Err(CoreError::RunMismatch);
@@ -518,6 +552,12 @@ impl Kernel {
         capability: &CapabilityContract,
         grant: Option<&ApprovalGrant>,
     ) -> CoreResult<ExecutionTicket> {
+        let run = self
+            .runs
+            .get(&policy.run_id)
+            .ok_or_else(|| CoreError::RunNotFound(policy.run_id.clone()))?;
+        self.enforce_run_timeout(run)?;
+
         match policy.decision {
             Decision::Allow => {}
             Decision::Deny => {
@@ -602,6 +642,12 @@ impl Kernel {
         ticket: &ExecutionTicket,
         input: SandboxInput,
     ) -> CoreResult<SandboxResult> {
+        let run = self
+            .runs
+            .get(&ticket.run_id)
+            .ok_or_else(|| CoreError::RunNotFound(ticket.run_id.clone()))?;
+        self.enforce_run_timeout(run)?;
+
         if ticket.expires_at < Utc::now() {
             return Err(CoreError::TicketExpired(ticket.ticket_id.clone()));
         }
@@ -618,10 +664,6 @@ impl Kernel {
             .registry
             .get(&ticket.capability_id)
             .ok_or_else(|| CoreError::CapabilityNotFound(ticket.capability_id.clone()))?;
-        let run = self
-            .runs
-            .get(&ticket.run_id)
-            .ok_or_else(|| CoreError::RunNotFound(ticket.run_id.clone()))?;
 
         if input.capability_id != ticket.capability_id {
             return Err(CoreError::CapabilityNotFound(input.capability_id));
@@ -1221,6 +1263,11 @@ mod tests {
             risk_level,
             rollback_plan_ref: None,
         }
+    }
+
+    fn age_run_past_timeout(kernel: &mut Kernel, run_id: &str, elapsed_ms: i64) {
+        kernel.runs.get_mut(run_id).unwrap().created_at =
+            Utc::now() - Duration::milliseconds(elapsed_ms);
     }
 
     fn file_write_capability() -> CapabilityContract {
@@ -2421,6 +2468,113 @@ mod tests {
         );
 
         assert!(executed.is_ok());
+    }
+
+    #[test]
+    fn run_timeout_blocks_delta_proposal() {
+        let temp = tempdir().unwrap();
+        let budget = Budget {
+            timeout_ms: 5,
+            ..Default::default()
+        };
+        let mut kernel = Kernel::new_in_memory(temp.path()).unwrap();
+        kernel.register_capability(file_read_capability()).unwrap();
+        let run = kernel
+            .admit(intent_with_budget(
+                temp.path(),
+                vec!["file.read".into()],
+                budget,
+            ))
+            .unwrap();
+        age_run_past_timeout(&mut kernel, &run.run_id, 10);
+
+        let proposed = kernel.propose_delta(
+            &run.run_id,
+            delta(&run.run_id, "hello.txt", "file.read", RiskLevel::Low),
+        );
+
+        assert!(matches!(proposed, Err(CoreError::RunTimedOut(_))));
+        assert_eq!(
+            kernel.run_status(&run.run_id).unwrap(),
+            Some(RunStatus::TimedOut)
+        );
+    }
+
+    #[test]
+    fn run_timeout_blocks_ticket_issuance() {
+        let temp = tempdir().unwrap();
+        let budget = Budget {
+            timeout_ms: 5,
+            ..Default::default()
+        };
+        let mut kernel = Kernel::new_in_memory(temp.path()).unwrap();
+        kernel.register_capability(file_read_capability()).unwrap();
+        let run = kernel
+            .admit(intent_with_budget(
+                temp.path(),
+                vec!["file.read".into()],
+                budget,
+            ))
+            .unwrap();
+        let policy = kernel
+            .propose_delta(
+                &run.run_id,
+                delta(&run.run_id, "hello.txt", "file.read", RiskLevel::Low),
+            )
+            .unwrap();
+        let capability = kernel.capability("file.read").unwrap().clone();
+        age_run_past_timeout(&mut kernel, &run.run_id, 10);
+
+        assert!(matches!(
+            kernel.issue_ticket(&policy, &capability),
+            Err(CoreError::RunTimedOut(_))
+        ));
+        assert_eq!(
+            kernel.run_status(&run.run_id).unwrap(),
+            Some(RunStatus::TimedOut)
+        );
+    }
+
+    #[test]
+    fn run_timeout_blocks_execution() {
+        let temp = tempdir().unwrap();
+        fs::write(temp.path().join("hello.txt"), "hello").unwrap();
+        let budget = Budget {
+            timeout_ms: 5,
+            ..Default::default()
+        };
+        let mut kernel = Kernel::new_in_memory(temp.path()).unwrap();
+        kernel.register_capability(file_read_capability()).unwrap();
+        let run = kernel
+            .admit(intent_with_budget(
+                temp.path(),
+                vec!["file.read".into()],
+                budget,
+            ))
+            .unwrap();
+        let policy = kernel
+            .propose_delta(
+                &run.run_id,
+                delta(&run.run_id, "hello.txt", "file.read", RiskLevel::Low),
+            )
+            .unwrap();
+        let capability = kernel.capability("file.read").unwrap().clone();
+        let ticket = kernel.issue_ticket(&policy, &capability).unwrap();
+        age_run_past_timeout(&mut kernel, &run.run_id, 10);
+
+        let executed = kernel.execute(
+            &ticket,
+            SandboxInput {
+                capability_id: "file.read".into(),
+                payload: json!({ "path": "hello.txt" }),
+            },
+        );
+
+        assert!(matches!(executed, Err(CoreError::RunTimedOut(_))));
+        assert_eq!(
+            kernel.run_status(&run.run_id).unwrap(),
+            Some(RunStatus::TimedOut)
+        );
     }
 
     #[test]

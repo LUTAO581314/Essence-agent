@@ -45,6 +45,7 @@ pub enum RunStatus {
     Persisting,
     Completed,
     Failed,
+    TimedOut,
     Cancelled,
     Blocked,
     RolledBack,

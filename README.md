@@ -62,6 +62,18 @@ Intent
 -> LedgerEvent
 ```
 
+## Research docs
+
+Broader ESSENCE architecture and research notes have been condensed into these
+publishable docs:
+
+- [`docs/dual-chain-architecture.md`](docs/dual-chain-architecture.md):
+  architecture-chain and research-chain boundaries.
+- [`docs/competitive-research.md`](docs/competitive-research.md): upstream
+  agent-system lessons and implementation implications.
+- [`docs/paper-and-agent-research.md`](docs/paper-and-agent-research.md):
+  paper/source-inspired agent doctrine and production readiness themes.
+
 ## Safety defaults
 
 - Entry only normalizes host/channel differences.

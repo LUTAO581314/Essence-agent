@@ -50,6 +50,14 @@ risk requires approval. Changes to serialized `PolicyConfig` fields should be
 treated as compatibility work because policy packs, deployment profiles, and
 future admin tooling will depend on them.
 
+The additive extension descriptors in `moxi-contracts` are the vocabulary for
+future P1/P2 growth: `ModuleManifest`, `SkillManifest`, `SubagentManifest`,
+`MemoryProviderManifest`, `ModelGatewayManifest`, `ShellAdapterManifest`, and
+`AgentPersonaManifest`. These manifest shapes should be evolved as serialized
+API contracts. They describe modules and runtimes, but they do not grant
+execution authority; executable effects still require `CapabilityContract`,
+policy evaluation, `ExecutionTicket`, proof collection, and ledger commit.
+
 Execution-facing serialized contracts now include capability contract hashes,
 executor artifact hashes, executor signature refs, executor signing key refs,
 executor manifest hashes, executor isolation, retry policy snapshots, and

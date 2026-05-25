@@ -956,6 +956,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "moxi-observability"
+version = "0.2.0"
+dependencies = [
+ "chrono",
+ "hex",
+ "moxi-contracts",
+ "moxi-runtime",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "moxi-runtime"
+version = "0.2.0"
+dependencies = [
+ "chrono",
+ "hex",
+ "moxi-contracts",
+ "moxi-core",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
 name = "moxi-sandbox"
 version = "0.2.0"
 dependencies = [

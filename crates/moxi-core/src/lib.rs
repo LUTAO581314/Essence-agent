@@ -18,6 +18,8 @@ use uuid::Uuid;
 pub enum CoreError {
     #[error("capability not registered: {0}")]
     CapabilityNotFound(String),
+    #[error("capability contract does not match recorded capability authority")]
+    CapabilityContractMismatch,
     #[error("capability executor not registered: {0}")]
     ExecutorNotFound(String),
     #[error("executor isolation is not supported by this runtime: {0:?}")]
@@ -32,6 +34,10 @@ pub enum CoreError {
     SchemaValidation(String, String),
     #[error("policy denied: {0}")]
     PolicyDenied(String),
+    #[error("policy decision was not recorded by this kernel: {0}")]
+    PolicyDecisionNotFound(String),
+    #[error("policy decision does not match recorded policy authority")]
+    PolicyDecisionMismatch,
     #[error("approval required: {0}")]
     ApprovalRequired(String),
     #[error("approval is not required for policy decision: {0}")]
@@ -236,9 +242,7 @@ pub struct CapabilityRegistry {
 
 impl CapabilityRegistry {
     pub fn register(&mut self, contract: CapabilityContract) -> CoreResult<()> {
-        validate_schema("input_schema", &contract.input_schema)?;
-        validate_schema("output_schema", &contract.output_schema)?;
-        validate_schema("error_schema", &contract.error_schema)?;
+        validate_capability_contract(&contract)?;
         self.capabilities
             .insert(contract.capability_id.clone(), contract);
         Ok(())
@@ -328,13 +332,27 @@ impl Kernel {
 
     pub fn register_capability(&mut self, contract: CapabilityContract) -> CoreResult<()> {
         let capability_id = contract.capability_id.clone();
-        self.registry.register(contract)?;
-        if let (Some(capability), Some(executor)) = (
-            self.registry.get(&capability_id),
-            self.executors.get(&capability_id),
-        ) {
-            validate_executor_manifest(capability, &executor.manifest)?;
+        validate_capability_contract(&contract)?;
+        if let Some(existing) = self.registry.get(&capability_id) {
+            if existing == &contract {
+                return Ok(());
+            }
+            return Err(CoreError::CapabilityContractMismatch);
         }
+        if let Some(recorded) = self.store.capability_contract(&capability_id)? {
+            if recorded != contract {
+                return Err(CoreError::CapabilityContractMismatch);
+            }
+        }
+        if let Some(executor) = self.executors.get(&capability_id) {
+            validate_executor_manifest(&contract, &executor.manifest)?;
+        }
+        let capability_contract_hash = capability_contract_hash(&contract);
+        if self.store.capability_contract(&capability_id)?.is_none() {
+            self.store
+                .record_capability_contract(&contract, &capability_contract_hash)?;
+        }
+        self.registry.register(contract)?;
         Ok(())
     }
 
@@ -351,6 +369,29 @@ impl Kernel {
         }
         if let Some(capability) = self.registry.get(&manifest.capability_id) {
             validate_executor_manifest(capability, &manifest)?;
+        }
+        if let Some(existing) = self.executors.get(&manifest.capability_id) {
+            if existing.manifest != manifest {
+                return Err(CoreError::ExecutorManifestMismatch(
+                    "executor registration is immutable for a capability".into(),
+                ));
+            }
+        }
+        if let Some(recorded) = self.store.executor_manifest(&manifest.executor_id)? {
+            if recorded != manifest {
+                return Err(CoreError::ExecutorManifestMismatch(
+                    "executor manifest does not match recorded executor authority".into(),
+                ));
+            }
+        }
+        let executor_manifest_hash = executor_manifest_hash(&manifest);
+        if self
+            .store
+            .executor_manifest(&manifest.executor_id)?
+            .is_none()
+        {
+            self.store
+                .record_executor_manifest(&manifest, &executor_manifest_hash)?;
         }
         self.executors.insert(
             manifest.capability_id.clone(),
@@ -487,6 +528,7 @@ impl Kernel {
                 .transition_run_status(run_id, RunStatus::AwaitingApproval)?;
         }
 
+        self.store.record_policy_decision(&policy)?;
         Ok(policy)
     }
 
@@ -499,6 +541,7 @@ impl Kernel {
         self.runs
             .get(&policy.run_id)
             .ok_or_else(|| CoreError::RunNotFound(policy.run_id.clone()))?;
+        self.validate_recorded_policy_decision(policy)?;
 
         if policy.decision != Decision::RequireApproval || policy.required_approval.is_none() {
             return Err(CoreError::ApprovalNotRequired(policy.decision_id.clone()));
@@ -557,6 +600,7 @@ impl Kernel {
             .get(&policy.run_id)
             .ok_or_else(|| CoreError::RunNotFound(policy.run_id.clone()))?;
         self.enforce_run_timeout(run)?;
+        self.validate_recorded_policy_decision(policy)?;
 
         match policy.decision {
             Decision::Allow => {}
@@ -605,6 +649,17 @@ impl Kernel {
         };
         self.store.record_ticket(&ticket)?;
         Ok(ticket)
+    }
+
+    fn validate_recorded_policy_decision(&self, policy: &PolicyDecision) -> CoreResult<()> {
+        let recorded = self
+            .store
+            .policy_decision(&policy.decision_id)?
+            .ok_or_else(|| CoreError::PolicyDecisionNotFound(policy.decision_id.clone()))?;
+        if recorded != *policy {
+            return Err(CoreError::PolicyDecisionMismatch);
+        }
+        Ok(())
     }
 
     fn validate_approval_grant(
@@ -942,6 +997,13 @@ fn validate_schema(name: &str, schema: &Value) -> CoreResult<()> {
     JSONSchema::compile(schema)
         .map(|_| ())
         .map_err(|error| CoreError::SchemaValidation(name.into(), error.to_string()))
+}
+
+fn validate_capability_contract(contract: &CapabilityContract) -> CoreResult<()> {
+    validate_schema("input_schema", &contract.input_schema)?;
+    validate_schema("output_schema", &contract.output_schema)?;
+    validate_schema("error_schema", &contract.error_schema)?;
+    Ok(())
 }
 
 pub fn capability_contract_hash(capability: &CapabilityContract) -> String {
@@ -1380,6 +1442,7 @@ mod tests {
     }
 
     struct EchoExecutor;
+    struct MetadataEchoExecutor;
 
     impl CapabilityExecutor for EchoExecutor {
         fn execute(
@@ -1394,6 +1457,46 @@ mod tests {
                 .and_then(|value| value.as_str())
                 .unwrap_or_default();
             let output = json!({ "echo": text });
+            let output_hash = hash_json(&output);
+
+            Ok(SandboxResult {
+                ticket_id: ticket.ticket_id.clone(),
+                run_id: ticket.run_id.clone(),
+                capability_id: ticket.capability_id.clone(),
+                policy_decision_ref: String::new(),
+                capability_contract_ref: String::new(),
+                capability_contract_hash: String::new(),
+                executor_ref: String::new(),
+                executor_version: String::new(),
+                executor_artifact_hash: String::new(),
+                executor_signature_ref: String::new(),
+                executor_signing_key_ref: String::new(),
+                executor_manifest_hash: String::new(),
+                gateway_decision_ref: None,
+                input_hash: String::new(),
+                success: true,
+                output,
+                error: None,
+                started_at,
+                finished_at: Utc::now(),
+                output_hash,
+            })
+        }
+    }
+
+    impl CapabilityExecutor for MetadataEchoExecutor {
+        fn execute(
+            &self,
+            ticket: &ExecutionTicket,
+            input: SandboxInput,
+        ) -> CoreResult<SandboxResult> {
+            let started_at = Utc::now();
+            let idempotency_key = input
+                .runtime_metadata
+                .as_ref()
+                .map(|metadata| metadata.idempotency_key.clone())
+                .unwrap_or_default();
+            let output = json!({ "echo": idempotency_key });
             let output_hash = hash_json(&output);
 
             Ok(SandboxResult {
@@ -1727,10 +1830,19 @@ mod tests {
             .unwrap();
         let delta = delta(&run.run_id, "hello.txt", "file.read", RiskLevel::High);
         let policy = kernel.propose_delta(&run.run_id, delta.clone()).unwrap();
+        let mut tampered_policy = policy.clone();
+        tampered_policy
+            .reasons
+            .push("tampered approval reason".into());
         assert_eq!(
             kernel.run_status(&run.run_id).unwrap(),
             Some(RunStatus::AwaitingApproval)
         );
+
+        assert!(matches!(
+            kernel.grant_approval(&tampered_policy, "human_1", "tampered"),
+            Err(CoreError::PolicyDecisionMismatch)
+        ));
 
         let grant = kernel
             .grant_approval(&policy, "human_1", "reviewed high-risk file read")
@@ -1745,6 +1857,7 @@ mod tests {
                 SandboxInput {
                     capability_id: "file.read".into(),
                     payload: json!({ "path": "hello.txt" }),
+                    runtime_metadata: None,
                 },
             )
             .unwrap();
@@ -1801,6 +1914,53 @@ mod tests {
     }
 
     #[test]
+    fn ticket_issuance_rejects_unrecorded_policy_decision() {
+        let temp = tempdir().unwrap();
+        let mut kernel = Kernel::new_in_memory(temp.path()).unwrap();
+        kernel.register_capability(file_read_capability()).unwrap();
+        let run = kernel
+            .admit(intent(temp.path(), vec!["file.read".into()]))
+            .unwrap();
+        let mut policy = kernel
+            .propose_delta(
+                &run.run_id,
+                delta(&run.run_id, "hello.txt", "file.read", RiskLevel::Low),
+            )
+            .unwrap();
+        policy.decision_id = "pd_unrecorded".into();
+        let capability = kernel.capability("file.read").unwrap();
+
+        assert!(matches!(
+            kernel.issue_ticket(&policy, capability),
+            Err(CoreError::PolicyDecisionNotFound(decision_id))
+                if decision_id == "pd_unrecorded"
+        ));
+    }
+
+    #[test]
+    fn ticket_issuance_rejects_tampered_policy_decision() {
+        let temp = tempdir().unwrap();
+        let mut kernel = Kernel::new_in_memory(temp.path()).unwrap();
+        kernel.register_capability(file_read_capability()).unwrap();
+        let run = kernel
+            .admit(intent(temp.path(), vec!["file.read".into()]))
+            .unwrap();
+        let mut policy = kernel
+            .propose_delta(
+                &run.run_id,
+                delta(&run.run_id, "hello.txt", "file.read", RiskLevel::Low),
+            )
+            .unwrap();
+        policy.reasons.push("tampered after policy check".into());
+        let capability = kernel.capability("file.read").unwrap();
+
+        assert!(matches!(
+            kernel.issue_ticket(&policy, capability),
+            Err(CoreError::PolicyDecisionMismatch)
+        ));
+    }
+
+    #[test]
     fn unregistered_capability_is_rejected() {
         let temp = tempdir().unwrap();
         let mut kernel = Kernel::new_in_memory(temp.path()).unwrap();
@@ -1837,6 +1997,7 @@ mod tests {
                 SandboxInput {
                     capability_id: "file.read".into(),
                     payload: json!({ "path": "hello.txt" }),
+                    runtime_metadata: None,
                 },
             )
             .unwrap();
@@ -1894,6 +2055,7 @@ mod tests {
                 SandboxInput {
                     capability_id: "memory.echo".into(),
                     payload: json!({ "text": "hello executor" }),
+                    runtime_metadata: None,
                 },
             )
             .unwrap();
@@ -1918,6 +2080,42 @@ mod tests {
             kernel.run_status(&run.run_id).unwrap(),
             Some(RunStatus::Completed)
         );
+    }
+
+    #[test]
+    fn runtime_metadata_reaches_executor_without_payload_schema_drift() {
+        let temp = tempdir().unwrap();
+        let mut kernel = Kernel::new_in_memory(temp.path()).unwrap();
+        let capability = memory_echo_capability();
+        let manifest = memory_echo_executor_manifest(&capability);
+        kernel.register_capability(capability).unwrap();
+        kernel
+            .register_executor(manifest, MetadataEchoExecutor)
+            .unwrap();
+        let run = kernel
+            .admit(intent(temp.path(), vec!["memory.echo".into()]))
+            .unwrap();
+        let mut delta = delta(&run.run_id, "memory://echo", "memory.echo", RiskLevel::Low);
+        delta.target.resource_type = ResourceType::Memory;
+        let policy = kernel.propose_delta(&run.run_id, delta).unwrap();
+        let capability = kernel.capability("memory.echo").unwrap().clone();
+        let ticket = kernel.issue_ticket(&policy, &capability).unwrap();
+
+        let result = kernel
+            .execute(
+                &ticket,
+                SandboxInput {
+                    capability_id: "memory.echo".into(),
+                    payload: json!({ "text": "hello executor" }),
+                    runtime_metadata: Some(moxi_contracts::RuntimeInputMetadata {
+                        idempotency_key: "sha256:stable-key".into(),
+                        source: "moxi-runtime".into(),
+                    }),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(result.output["echo"], "sha256:stable-key");
     }
 
     #[test]
@@ -1946,6 +2144,7 @@ mod tests {
                 SandboxInput {
                     capability_id: "memory.echo".into(),
                     payload: json!({ "text": "hello executor" }),
+                    runtime_metadata: None,
                 },
             )
             .unwrap();
@@ -1990,6 +2189,7 @@ mod tests {
             SandboxInput {
                 capability_id: "memory.echo".into(),
                 payload: json!({ "text": "hello executor" }),
+                runtime_metadata: None,
             },
         );
         let accepted = kernel.execute(
@@ -1997,6 +2197,7 @@ mod tests {
             SandboxInput {
                 capability_id: "memory.echo".into(),
                 payload: json!({ "text": "hello executor" }),
+                runtime_metadata: None,
             },
         );
 
@@ -2027,6 +2228,7 @@ mod tests {
             SandboxInput {
                 capability_id: "memory.echo".into(),
                 payload: json!({ "text": "hello executor" }),
+                runtime_metadata: None,
             },
         );
 
@@ -2061,6 +2263,7 @@ mod tests {
                 SandboxInput {
                     capability_id: "memory.echo".into(),
                     payload: json!({ "text": "hello executor" }),
+                    runtime_metadata: None,
                 },
             )
             .unwrap();
@@ -2139,6 +2342,7 @@ mod tests {
                 SandboxInput {
                     capability_id: "memory.echo".into(),
                     payload: json!({ "text": "hello executor" }),
+                    runtime_metadata: None,
                 },
             )
             .unwrap();
@@ -2176,6 +2380,7 @@ mod tests {
             SandboxInput {
                 capability_id: "memory.echo".into(),
                 payload: json!({ "text": "hello executor" }),
+                runtime_metadata: None,
             },
         );
 
@@ -2207,6 +2412,7 @@ mod tests {
                 SandboxInput {
                     capability_id: "memory.echo".into(),
                     payload: json!({ "text": "hello executor" }),
+                    runtime_metadata: None,
                 },
             )
             .unwrap();
@@ -2305,7 +2511,7 @@ mod tests {
     }
 
     #[test]
-    fn ticket_binding_rejects_executor_artifact_swaps_before_consumption() {
+    fn executor_artifact_swaps_are_rejected_at_registration() {
         let temp = tempdir().unwrap();
         let mut kernel = Kernel::new_in_memory(temp.path()).unwrap();
         let capability = memory_echo_capability();
@@ -2317,41 +2523,18 @@ mod tests {
         kernel
             .register_executor(original_manifest.clone(), EchoExecutor)
             .unwrap();
-        let run = kernel
-            .admit(intent(temp.path(), vec!["memory.echo".into()]))
-            .unwrap();
-        let delta = delta(&run.run_id, "memory://echo", "memory.echo", RiskLevel::Low);
-        let policy = kernel.propose_delta(&run.run_id, delta).unwrap();
-        let capability = kernel.capability("memory.echo").unwrap().clone();
-        let ticket = kernel.issue_ticket(&policy, &capability).unwrap();
 
-        kernel
-            .register_executor(swapped_manifest, EchoExecutor)
-            .unwrap();
-        let rejected = kernel.execute(
-            &ticket,
-            SandboxInput {
-                capability_id: "memory.echo".into(),
-                payload: json!({ "text": "hello executor" }),
-            },
-        );
-        kernel
+        assert!(matches!(
+            kernel.register_executor(swapped_manifest, EchoExecutor),
+            Err(CoreError::ExecutorManifestMismatch(_))
+        ));
+        assert!(kernel
             .register_executor(original_manifest, EchoExecutor)
-            .unwrap();
-        let retried = kernel.execute(
-            &ticket,
-            SandboxInput {
-                capability_id: "memory.echo".into(),
-                payload: json!({ "text": "hello executor" }),
-            },
-        );
-
-        assert!(matches!(rejected, Err(CoreError::ExecutionBindingMismatch)));
-        assert!(retried.is_ok());
+            .is_ok());
     }
 
     #[test]
-    fn ticket_binding_rejects_executor_manifest_swaps_before_consumption() {
+    fn executor_manifest_swaps_are_rejected_at_registration() {
         let temp = tempdir().unwrap();
         let mut kernel = Kernel::new_in_memory(temp.path()).unwrap();
         let capability = memory_echo_capability();
@@ -2363,37 +2546,14 @@ mod tests {
         kernel
             .register_executor(original_manifest.clone(), EchoExecutor)
             .unwrap();
-        let run = kernel
-            .admit(intent(temp.path(), vec!["memory.echo".into()]))
-            .unwrap();
-        let delta = delta(&run.run_id, "memory://echo", "memory.echo", RiskLevel::Low);
-        let policy = kernel.propose_delta(&run.run_id, delta).unwrap();
-        let capability = kernel.capability("memory.echo").unwrap().clone();
-        let ticket = kernel.issue_ticket(&policy, &capability).unwrap();
 
-        kernel
-            .register_executor(swapped_manifest, EchoExecutor)
-            .unwrap();
-        let rejected = kernel.execute(
-            &ticket,
-            SandboxInput {
-                capability_id: "memory.echo".into(),
-                payload: json!({ "text": "hello executor" }),
-            },
-        );
-        kernel
+        assert!(matches!(
+            kernel.register_executor(swapped_manifest, EchoExecutor),
+            Err(CoreError::ExecutorManifestMismatch(_))
+        ));
+        assert!(kernel
             .register_executor(original_manifest, EchoExecutor)
-            .unwrap();
-        let retried = kernel.execute(
-            &ticket,
-            SandboxInput {
-                capability_id: "memory.echo".into(),
-                payload: json!({ "text": "hello executor" }),
-            },
-        );
-
-        assert!(matches!(rejected, Err(CoreError::ExecutionBindingMismatch)));
-        assert!(retried.is_ok());
+            .is_ok());
     }
 
     #[test]
@@ -2417,6 +2577,7 @@ mod tests {
             SandboxInput {
                 capability_id: "memory.echo".into(),
                 payload: json!({ "text": "hello executor" }),
+                runtime_metadata: None,
             },
         );
         let retried = kernel.execute(
@@ -2424,6 +2585,7 @@ mod tests {
             SandboxInput {
                 capability_id: "memory.echo".into(),
                 payload: json!({ "text": "hello executor" }),
+                runtime_metadata: None,
             },
         );
 
@@ -2464,6 +2626,7 @@ mod tests {
             SandboxInput {
                 capability_id: "memory.echo".into(),
                 payload: json!({ "text": "hello executor" }),
+                runtime_metadata: None,
             },
         );
 
@@ -2567,6 +2730,7 @@ mod tests {
             SandboxInput {
                 capability_id: "file.read".into(),
                 payload: json!({ "path": "hello.txt" }),
+                runtime_metadata: None,
             },
         );
 
@@ -2628,6 +2792,7 @@ mod tests {
                 SandboxInput {
                     capability_id: "file.read".into(),
                     payload: json!({ "path": "hello.txt" }),
+                    runtime_metadata: None,
                 },
             )
             .unwrap();
@@ -2638,6 +2803,7 @@ mod tests {
                 SandboxInput {
                     capability_id: "file.read".into(),
                     payload: json!({ "path": "hello.txt" }),
+                    runtime_metadata: None,
                 },
             ),
             Err(CoreError::Store(StoreError::TicketConsumed(_)))
@@ -2673,6 +2839,7 @@ mod tests {
                 SandboxInput {
                     capability_id: "file.read".into(),
                     payload: json!({ "path": "hello.txt" }),
+                    runtime_metadata: None,
                 },
             );
 
@@ -2752,6 +2919,7 @@ mod tests {
                     payload: json!({
                         "path": outside.path().join("secret.txt").to_string_lossy()
                     }),
+                    runtime_metadata: None,
                 },
             )
             .unwrap_err();

@@ -1,13 +1,13 @@
 use chrono::Utc;
 use moxi_contracts::{
-    ApprovalGrant, Budget, EventResult, ExecutionTicket, LedgerEvent, Proof, RunStatus,
-    SandboxResult,
+    ApprovalGrant, Budget, CapabilityContract, Decision, EventResult, ExecutionTicket,
+    ExecutorManifest, LedgerEvent, PolicyDecision, Proof, RunStatus, SandboxResult,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-const CURRENT_SCHEMA_VERSION: u32 = 3;
+const CURRENT_SCHEMA_VERSION: u32 = 5;
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -52,6 +52,37 @@ pub enum StoreError {
         ledger_event_id: String,
         ticket_id: String,
     },
+    #[error("ledger audit missing policy decision {policy_decision_ref} referenced by {ledger_event_id}")]
+    LedgerAuditMissingPolicyDecision {
+        ledger_event_id: String,
+        policy_decision_ref: String,
+    },
+    #[error(
+        "ledger audit missing capability contract {capability_id} referenced by {ledger_event_id}"
+    )]
+    LedgerAuditMissingCapabilityContract {
+        ledger_event_id: String,
+        capability_id: String,
+    },
+    #[error(
+        "ledger audit missing executor manifest {executor_id} referenced by {ledger_event_id}"
+    )]
+    LedgerAuditMissingExecutorManifest {
+        ledger_event_id: String,
+        executor_id: String,
+    },
+    #[error(
+        "ledger audit denied policy decision {policy_decision_ref} referenced by {ledger_event_id}"
+    )]
+    LedgerAuditDeniedPolicyDecision {
+        ledger_event_id: String,
+        policy_decision_ref: String,
+    },
+    #[error("ledger audit missing approval grant for policy decision {policy_decision_ref} referenced by {ledger_event_id}")]
+    LedgerAuditMissingApprovalGrant {
+        ledger_event_id: String,
+        policy_decision_ref: String,
+    },
     #[error("ledger audit missing sandbox result {ticket_id} referenced by {ledger_event_id}")]
     LedgerAuditMissingSandboxResult {
         ledger_event_id: String,
@@ -86,6 +117,10 @@ pub type StoreResult<T> = Result<T, StoreError>;
 pub struct AuditReplayReport {
     pub ledger_events: usize,
     pub successful_events: usize,
+    pub policy_decisions: usize,
+    pub approval_grants: usize,
+    pub capability_contracts: usize,
+    pub executor_manifests: usize,
     pub execution_tickets: usize,
     pub sandbox_results: usize,
     pub proofs: usize,
@@ -135,6 +170,12 @@ impl Store {
         }
         if version < 3 {
             self.migrate_to_v3()?;
+        }
+        if version < 4 {
+            self.migrate_to_v4()?;
+        }
+        if version < 5 {
+            self.migrate_to_v5()?;
         }
         self.install_append_only_triggers()?;
         Ok(())
@@ -394,9 +435,91 @@ impl Store {
         Ok(())
     }
 
+    fn migrate_to_v4(&self) -> StoreResult<()> {
+        self.conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS policy_decisions (
+                decision_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                delta_id TEXT NOT NULL,
+                capability_id TEXT NOT NULL,
+                decision TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            "#,
+        )?;
+        self.set_schema_version(4)?;
+        Ok(())
+    }
+
+    fn migrate_to_v5(&self) -> StoreResult<()> {
+        self.conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS capability_contracts (
+                capability_id TEXT PRIMARY KEY,
+                capability_contract_hash TEXT NOT NULL,
+                provider_identity TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS executor_manifests (
+                executor_id TEXT PRIMARY KEY,
+                capability_id TEXT NOT NULL,
+                executor_manifest_hash TEXT NOT NULL,
+                capability_contract_hash TEXT NOT NULL,
+                artifact_hash TEXT NOT NULL,
+                signature_ref TEXT NOT NULL,
+                signing_key_ref TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            "#,
+        )?;
+        self.set_schema_version(5)?;
+        Ok(())
+    }
+
     fn install_append_only_triggers(&self) -> StoreResult<()> {
         self.conn.execute_batch(
             r#"
+            CREATE TRIGGER IF NOT EXISTS capability_contracts_no_update
+            BEFORE UPDATE ON capability_contracts
+            BEGIN
+                SELECT RAISE(ABORT, 'capability_contracts append only');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS capability_contracts_no_delete
+            BEFORE DELETE ON capability_contracts
+            BEGIN
+                SELECT RAISE(ABORT, 'capability_contracts append only');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS executor_manifests_no_update
+            BEFORE UPDATE ON executor_manifests
+            BEGIN
+                SELECT RAISE(ABORT, 'executor_manifests append only');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS executor_manifests_no_delete
+            BEFORE DELETE ON executor_manifests
+            BEGIN
+                SELECT RAISE(ABORT, 'executor_manifests append only');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS policy_decisions_no_update
+            BEFORE UPDATE ON policy_decisions
+            BEGIN
+                SELECT RAISE(ABORT, 'policy_decisions append only');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS policy_decisions_no_delete
+            BEFORE DELETE ON policy_decisions
+            BEGIN
+                SELECT RAISE(ABORT, 'policy_decisions append only');
+            END;
+
             CREATE TRIGGER IF NOT EXISTS ledger_events_no_update
             BEFORE UPDATE ON ledger_events
             BEGIN
@@ -537,6 +660,123 @@ impl Store {
         self.increment_counter(run_id, "tool_calls", "max_tool_calls", "tool_calls")
     }
 
+    pub fn record_capability_contract(
+        &self,
+        contract: &CapabilityContract,
+        capability_contract_hash: &str,
+    ) -> StoreResult<()> {
+        self.conn.execute(
+            r#"
+            INSERT INTO capability_contracts (
+                capability_id, capability_contract_hash, provider_identity, payload_json, created_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5)
+            "#,
+            params![
+                contract.capability_id,
+                capability_contract_hash,
+                contract.provider_identity,
+                serde_json::to_string(contract)?,
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn capability_contract(
+        &self,
+        capability_id: &str,
+    ) -> StoreResult<Option<CapabilityContract>> {
+        let payload = self
+            .conn
+            .query_row(
+                "SELECT payload_json FROM capability_contracts WHERE capability_id = ?1",
+                params![capability_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        payload
+            .map(|payload| Ok(serde_json::from_str(&payload)?))
+            .transpose()
+    }
+
+    pub fn record_executor_manifest(
+        &self,
+        manifest: &ExecutorManifest,
+        executor_manifest_hash: &str,
+    ) -> StoreResult<()> {
+        self.conn.execute(
+            r#"
+            INSERT INTO executor_manifests (
+                executor_id, capability_id, executor_manifest_hash, capability_contract_hash,
+                artifact_hash, signature_ref, signing_key_ref, payload_json, created_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            "#,
+            params![
+                manifest.executor_id,
+                manifest.capability_id,
+                executor_manifest_hash,
+                manifest.capability_contract_hash,
+                manifest.artifact_hash,
+                manifest.signature_ref.as_deref().unwrap_or_default(),
+                manifest.signing_key_ref,
+                serde_json::to_string(manifest)?,
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn executor_manifest(&self, executor_id: &str) -> StoreResult<Option<ExecutorManifest>> {
+        let payload = self
+            .conn
+            .query_row(
+                "SELECT payload_json FROM executor_manifests WHERE executor_id = ?1",
+                params![executor_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        payload
+            .map(|payload| Ok(serde_json::from_str(&payload)?))
+            .transpose()
+    }
+
+    pub fn record_policy_decision(&self, policy: &PolicyDecision) -> StoreResult<()> {
+        self.conn.execute(
+            r#"
+            INSERT INTO policy_decisions (
+                decision_id, run_id, delta_id, capability_id, decision, payload_json, created_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "#,
+            params![
+                policy.decision_id,
+                policy.run_id,
+                policy.delta_id,
+                policy.capability_id,
+                format!("{:?}", policy.decision),
+                serde_json::to_string(policy)?,
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn policy_decision(&self, decision_id: &str) -> StoreResult<Option<PolicyDecision>> {
+        let payload = self
+            .conn
+            .query_row(
+                "SELECT payload_json FROM policy_decisions WHERE decision_id = ?1",
+                params![decision_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        payload
+            .map(|payload| Ok(serde_json::from_str(&payload)?))
+            .transpose()
+    }
+
     pub fn record_ticket(&self, ticket: &ExecutionTicket) -> StoreResult<()> {
         self.conn.execute(
             r#"
@@ -627,6 +867,20 @@ impl Store {
         } else {
             Ok(None)
         }
+    }
+
+    pub fn approval_grants_for_policy_decision(
+        &self,
+        policy_decision_ref: &str,
+    ) -> StoreResult<Vec<ApprovalGrant>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT payload_json FROM approval_grants WHERE policy_decision_ref = ?1 ORDER BY rowid ASC",
+        )?;
+        let grants = stmt
+            .query_map(params![policy_decision_ref], |row| row.get::<_, String>(0))?
+            .map(|payload| Ok(serde_json::from_str(&payload?)?))
+            .collect::<StoreResult<Vec<_>>>()?;
+        Ok(grants)
     }
 
     pub fn record_sandbox_result(&self, result: &SandboxResult) -> StoreResult<()> {
@@ -834,6 +1088,52 @@ impl Store {
         report.execution_tickets += 1;
         verify_event_ticket_binding(event, &ticket)?;
 
+        let capability = self
+            .capability_contract(&event.capability_id)?
+            .ok_or_else(|| StoreError::LedgerAuditMissingCapabilityContract {
+                ledger_event_id: event.ledger_event_id.clone(),
+                capability_id: event.capability_id.clone(),
+            })?;
+        report.capability_contracts += 1;
+        verify_event_capability_binding(event, &capability)?;
+
+        let manifest = self
+            .executor_manifest(&event.executor_ref)?
+            .ok_or_else(|| StoreError::LedgerAuditMissingExecutorManifest {
+                ledger_event_id: event.ledger_event_id.clone(),
+                executor_id: event.executor_ref.clone(),
+            })?;
+        report.executor_manifests += 1;
+        verify_event_executor_binding(event, &manifest)?;
+
+        let policy = self
+            .policy_decision(&event.policy_decision_ref)?
+            .ok_or_else(|| StoreError::LedgerAuditMissingPolicyDecision {
+                ledger_event_id: event.ledger_event_id.clone(),
+                policy_decision_ref: event.policy_decision_ref.clone(),
+            })?;
+        report.policy_decisions += 1;
+        verify_event_policy_binding(event, &policy)?;
+        if policy.decision == Decision::Deny {
+            return Err(StoreError::LedgerAuditDeniedPolicyDecision {
+                ledger_event_id: event.ledger_event_id.clone(),
+                policy_decision_ref: event.policy_decision_ref.clone(),
+            });
+        }
+        if policy.decision == Decision::RequireApproval {
+            let grants = self.approval_grants_for_policy_decision(&policy.decision_id)?;
+            let approved = grants
+                .iter()
+                .any(|grant| approval_grant_matches_event(event, grant));
+            if !approved {
+                return Err(StoreError::LedgerAuditMissingApprovalGrant {
+                    ledger_event_id: event.ledger_event_id.clone(),
+                    policy_decision_ref: event.policy_decision_ref.clone(),
+                });
+            }
+            report.approval_grants += 1;
+        }
+
         let result = self
             .sandbox_result(&event.execution_ticket_ref)?
             .ok_or_else(|| StoreError::LedgerAuditMissingSandboxResult {
@@ -1023,6 +1323,129 @@ fn verify_event_ticket_binding(event: &LedgerEvent, ticket: &ExecutionTicket) ->
     )?;
     audit_expect_eq(event, "ticket.actor_id", &event.actor_id, &ticket.actor_id)?;
     Ok(())
+}
+
+fn verify_event_capability_binding(
+    event: &LedgerEvent,
+    capability: &CapabilityContract,
+) -> StoreResult<()> {
+    audit_expect_eq(
+        event,
+        "capability.capability_id",
+        &event.capability_id,
+        &capability.capability_id,
+    )?;
+    audit_expect_eq(
+        event,
+        "capability.capability_id_ref",
+        &event.capability_contract_ref,
+        &capability.capability_id,
+    )?;
+    let expected_hash = hash_capability_contract(capability)?;
+    audit_expect_eq(
+        event,
+        "capability.capability_contract_hash",
+        &event.capability_contract_hash,
+        &expected_hash,
+    )?;
+    Ok(())
+}
+
+fn verify_event_executor_binding(
+    event: &LedgerEvent,
+    manifest: &ExecutorManifest,
+) -> StoreResult<()> {
+    audit_expect_eq(
+        event,
+        "executor.executor_id",
+        &event.executor_ref,
+        &manifest.executor_id,
+    )?;
+    audit_expect_eq(
+        event,
+        "executor.capability_id",
+        &event.capability_id,
+        &manifest.capability_id,
+    )?;
+    audit_expect_eq(
+        event,
+        "executor.executor_version",
+        &event.executor_version,
+        &manifest.executor_version,
+    )?;
+    audit_expect_eq(
+        event,
+        "executor.artifact_hash",
+        &event.executor_artifact_hash,
+        &manifest.artifact_hash,
+    )?;
+    audit_expect_eq(
+        event,
+        "executor.signing_key_ref",
+        &event.executor_signing_key_ref,
+        &manifest.signing_key_ref,
+    )?;
+    let signature_ref = manifest
+        .signature_ref
+        .as_deref()
+        .unwrap_or_default()
+        .to_string();
+    audit_expect_eq(
+        event,
+        "executor.signature_ref",
+        &event.executor_signature_ref,
+        &signature_ref,
+    )?;
+    audit_expect_eq(
+        event,
+        "executor.capability_contract_hash",
+        &event.capability_contract_hash,
+        &manifest.capability_contract_hash,
+    )?;
+    let expected_hash = hash_executor_manifest(manifest)?;
+    audit_expect_eq(
+        event,
+        "executor.executor_manifest_hash",
+        &event.executor_manifest_hash,
+        &expected_hash,
+    )?;
+    Ok(())
+}
+
+fn verify_event_policy_binding(event: &LedgerEvent, policy: &PolicyDecision) -> StoreResult<()> {
+    audit_expect_eq(
+        event,
+        "policy_decision.decision_id",
+        &event.policy_decision_ref,
+        &policy.decision_id,
+    )?;
+    audit_expect_eq(
+        event,
+        "policy_decision.run_id",
+        &event.run_id,
+        &policy.run_id,
+    )?;
+    audit_expect_eq(
+        event,
+        "policy_decision.delta_id",
+        &event.delta_id,
+        &policy.delta_id,
+    )?;
+    audit_expect_eq(
+        event,
+        "policy_decision.capability_id",
+        &event.capability_id,
+        &policy.capability_id,
+    )?;
+    Ok(())
+}
+
+fn approval_grant_matches_event(event: &LedgerEvent, grant: &ApprovalGrant) -> bool {
+    grant.run_id == event.run_id
+        && grant.delta_id == event.delta_id
+        && grant.policy_decision_ref == event.policy_decision_ref
+        && grant.capability_id == event.capability_id
+        && grant.expires_at >= event.timestamp
 }
 
 fn verify_event_result_binding(event: &LedgerEvent, result: &SandboxResult) -> StoreResult<()> {
@@ -1274,6 +1697,14 @@ fn proof_evidence_hash(result: &SandboxResult) -> String {
     }))
 }
 
+fn hash_capability_contract(capability: &CapabilityContract) -> StoreResult<String> {
+    Ok(hex::encode(Sha256::digest(serde_json::to_vec(capability)?)))
+}
+
+fn hash_executor_manifest(manifest: &ExecutorManifest) -> StoreResult<String> {
+    Ok(hex::encode(Sha256::digest(serde_json::to_vec(manifest)?)))
+}
+
 fn hash_json(value: &serde_json::Value) -> String {
     hex::encode(Sha256::digest(
         serde_json::to_vec(value).expect("json serialization cannot fail"),
@@ -1311,7 +1742,9 @@ fn is_allowed_transition(from: Option<RunStatus>, to: RunStatus) -> bool {
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
-    use moxi_contracts::{ApprovalGrant, EventResult};
+    use moxi_contracts::{
+        ApprovalGrant, EventResult, ExecutorIsolation, Permissions, RetryPolicy, RiskLevel,
+    };
     use serde_json::json;
 
     fn ledger_event() -> LedgerEvent {
@@ -1356,6 +1789,65 @@ mod tests {
             reason: "approved".into(),
             granted_at: Utc::now(),
             expires_at: Utc::now() + Duration::minutes(5),
+        }
+    }
+
+    fn policy_decision() -> PolicyDecision {
+        PolicyDecision {
+            decision_id: "pd_1".into(),
+            run_id: "run_1".into(),
+            delta_id: "delta_1".into(),
+            actor_id: "kernel".into(),
+            capability_id: "file.read".into(),
+            decision: Decision::Allow,
+            risk_level: RiskLevel::Low,
+            reasons: vec![],
+            required_approval: None,
+            expires_at: Utc::now() + Duration::minutes(5),
+        }
+    }
+
+    fn capability_contract() -> CapabilityContract {
+        CapabilityContract {
+            capability_id: "file.read".into(),
+            capability_version: "0.2.0".into(),
+            provider: "moxi.builtin.fs".into(),
+            provider_identity: "moxi.builtin.fs".into(),
+            manifest_ref: Some("builtin://moxi/file.read".into()),
+            signature_ref: Some("builtin://moxi/file.read/capability/signature".into()),
+            input_schema: json!({"type": "object"}),
+            output_schema: json!({"type": "object"}),
+            error_schema: json!({"type": "object"}),
+            permissions: Permissions {
+                resources: vec!["workspace.read".into()],
+                denied: vec!["network".into(), "shell".into()],
+            },
+            sandbox_profile: "fs-readonly".into(),
+            risk_level: RiskLevel::Low,
+            timeout_ms: 1_000,
+            retry_policy: RetryPolicy::default(),
+            audit_required: true,
+            proof_required: true,
+            rollback_required: false,
+        }
+    }
+
+    fn executor_manifest() -> ExecutorManifest {
+        let capability = capability_contract();
+        ExecutorManifest {
+            executor_id: "moxi.builtin.fs.file_read".into(),
+            capability_id: capability.capability_id.clone(),
+            capability_contract_hash: hash_capability_contract(&capability).unwrap(),
+            provider_identity: capability.provider_identity.clone(),
+            executor_version: "0.2.0".into(),
+            artifact_hash:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            signing_key_ref: "builtin://moxi/signing-key".into(),
+            isolation: ExecutorIsolation::InProcessTrusted,
+            sandbox_profile: capability.sandbox_profile,
+            manifest_ref: Some("builtin://moxi/file.read/executor".into()),
+            signature_ref: Some("builtin://moxi/file.read/executor/signature".into()),
+            attestation_ref: None,
         }
     }
 
@@ -1440,12 +1932,27 @@ mod tests {
         }
     }
 
-    fn audited_chain() -> (ExecutionTicket, SandboxResult, Proof, LedgerEvent) {
-        let ticket = execution_ticket();
+    fn audited_chain() -> (
+        PolicyDecision,
+        ExecutionTicket,
+        SandboxResult,
+        Proof,
+        LedgerEvent,
+    ) {
+        let policy = policy_decision();
+        let capability = capability_contract();
+        let manifest = executor_manifest();
+        let mut ticket = execution_ticket();
+        ticket.capability_contract_hash = hash_capability_contract(&capability).unwrap();
+        ticket.executor_manifest_hash = hash_executor_manifest(&manifest).unwrap();
         let mut result = sandbox_result();
+        result.capability_contract_hash = ticket.capability_contract_hash.clone();
+        result.executor_manifest_hash = ticket.executor_manifest_hash.clone();
         result.output_hash = hash_json(&result.output);
 
         let mut proof = proof();
+        proof.capability_contract_hash = ticket.capability_contract_hash.clone();
+        proof.executor_manifest_hash = ticket.executor_manifest_hash.clone();
         proof.gateway_decision_ref = result.gateway_decision_ref.clone();
         proof.input_hash = result.input_hash.clone();
         proof.output_hash = result.output_hash.clone();
@@ -1479,15 +1986,38 @@ mod tests {
             timestamp: Utc::now(),
         };
 
-        (ticket, result, proof, event)
+        (policy, ticket, result, proof, event)
     }
 
     fn record_audited_chain(store: &Store) -> LedgerEvent {
-        let (ticket, result, proof, event) = audited_chain();
-        store.record_ticket(&ticket).unwrap();
-        store.record_sandbox_result(&result).unwrap();
-        store.record_proof(&proof).unwrap();
+        let (policy, ticket, result, proof, event) = audited_chain();
+        record_registry_facts(store, &event);
+        record_execution_facts(store, &policy, &ticket, &result, &proof);
         store.append_ledger_event(event).unwrap()
+    }
+
+    fn record_registry_facts(store: &Store, event: &LedgerEvent) {
+        let capability = capability_contract();
+        let manifest = executor_manifest();
+        store
+            .record_capability_contract(&capability, &event.capability_contract_hash)
+            .unwrap();
+        store
+            .record_executor_manifest(&manifest, &event.executor_manifest_hash)
+            .unwrap();
+    }
+
+    fn record_execution_facts(
+        store: &Store,
+        policy: &PolicyDecision,
+        ticket: &ExecutionTicket,
+        result: &SandboxResult,
+        proof: &Proof,
+    ) {
+        store.record_policy_decision(policy).unwrap();
+        store.record_ticket(ticket).unwrap();
+        store.record_sandbox_result(result).unwrap();
+        store.record_proof(proof).unwrap();
     }
 
     fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
@@ -1639,8 +2169,111 @@ mod tests {
                 "executor_signing_key_ref"
             ));
         }
+        assert!(column_exists(
+            &store.conn,
+            "policy_decisions",
+            "payload_json"
+        ));
+        assert!(column_exists(
+            &store.conn,
+            "capability_contracts",
+            "payload_json"
+        ));
+        assert!(column_exists(
+            &store.conn,
+            "executor_manifests",
+            "payload_json"
+        ));
+        assert!(trigger_exists(
+            &store.conn,
+            "capability_contracts_no_update"
+        ));
+        assert!(trigger_exists(&store.conn, "executor_manifests_no_update"));
+        assert!(trigger_exists(&store.conn, "policy_decisions_no_update"));
         assert!(trigger_exists(&store.conn, "sandbox_results_no_update"));
         assert!(trigger_exists(&store.conn, "proofs_no_update"));
+    }
+
+    #[test]
+    fn capability_contract_payload_is_persisted_and_append_only() {
+        let store = Store::open_memory().unwrap();
+        let capability = capability_contract();
+        let capability_hash = hash_capability_contract(&capability).unwrap();
+
+        store
+            .record_capability_contract(&capability, &capability_hash)
+            .unwrap();
+
+        assert_eq!(
+            store
+                .capability_contract(&capability.capability_id)
+                .unwrap(),
+            Some(capability.clone())
+        );
+
+        let update = store.conn.execute(
+            "UPDATE capability_contracts SET capability_contract_hash = 'tampered' WHERE capability_id = ?1",
+            params![capability.capability_id],
+        );
+        assert!(update.is_err());
+
+        let delete = store.conn.execute(
+            "DELETE FROM capability_contracts WHERE capability_id = ?1",
+            params![capability.capability_id],
+        );
+        assert!(delete.is_err());
+    }
+
+    #[test]
+    fn executor_manifest_payload_is_persisted_and_append_only() {
+        let store = Store::open_memory().unwrap();
+        let manifest = executor_manifest();
+        let manifest_hash = hash_executor_manifest(&manifest).unwrap();
+
+        store
+            .record_executor_manifest(&manifest, &manifest_hash)
+            .unwrap();
+
+        assert_eq!(
+            store.executor_manifest(&manifest.executor_id).unwrap(),
+            Some(manifest.clone())
+        );
+
+        let update = store.conn.execute(
+            "UPDATE executor_manifests SET executor_manifest_hash = 'tampered' WHERE executor_id = ?1",
+            params![manifest.executor_id],
+        );
+        assert!(update.is_err());
+
+        let delete = store.conn.execute(
+            "DELETE FROM executor_manifests WHERE executor_id = ?1",
+            params![manifest.executor_id],
+        );
+        assert!(delete.is_err());
+    }
+
+    #[test]
+    fn policy_decision_payload_is_persisted_and_append_only() {
+        let store = Store::open_memory().unwrap();
+        let policy = policy_decision();
+        store.record_policy_decision(&policy).unwrap();
+
+        assert_eq!(
+            store.policy_decision(&policy.decision_id).unwrap(),
+            Some(policy.clone())
+        );
+
+        let update = store.conn.execute(
+            "UPDATE policy_decisions SET capability_id = 'tampered' WHERE decision_id = ?1",
+            params![policy.decision_id],
+        );
+        assert!(update.is_err());
+
+        let delete = store.conn.execute(
+            "DELETE FROM policy_decisions WHERE decision_id = ?1",
+            params![policy.decision_id],
+        );
+        assert!(delete.is_err());
     }
 
     #[test]
@@ -1772,6 +2405,10 @@ mod tests {
 
         assert_eq!(report.ledger_events, 1);
         assert_eq!(report.successful_events, 1);
+        assert_eq!(report.policy_decisions, 1);
+        assert_eq!(report.approval_grants, 0);
+        assert_eq!(report.capability_contracts, 1);
+        assert_eq!(report.executor_manifests, 1);
         assert_eq!(report.execution_tickets, 1);
         assert_eq!(report.sandbox_results, 1);
         assert_eq!(report.proofs, 1);
@@ -1781,7 +2418,9 @@ mod tests {
     #[test]
     fn ledger_audit_replay_detects_missing_sandbox_result() {
         let store = Store::open_memory().unwrap();
-        let (ticket, _result, proof, event) = audited_chain();
+        let (policy, ticket, _result, proof, event) = audited_chain();
+        record_registry_facts(&store, &event);
+        store.record_policy_decision(&policy).unwrap();
         store.record_ticket(&ticket).unwrap();
         store.record_proof(&proof).unwrap();
         let event = store.append_ledger_event(event).unwrap();
@@ -1796,11 +2435,215 @@ mod tests {
     }
 
     #[test]
+    fn ledger_audit_replay_detects_missing_capability_contract() {
+        let store = Store::open_memory().unwrap();
+        let (policy, ticket, result, proof, event) = audited_chain();
+        let manifest = executor_manifest();
+        store
+            .record_executor_manifest(&manifest, &event.executor_manifest_hash)
+            .unwrap();
+        record_execution_facts(&store, &policy, &ticket, &result, &proof);
+        let event = store.append_ledger_event(event).unwrap();
+
+        assert!(matches!(
+            store.replay_ledger_audit(),
+            Err(StoreError::LedgerAuditMissingCapabilityContract {
+                ledger_event_id,
+                capability_id
+            }) if ledger_event_id == event.ledger_event_id
+                && capability_id == event.capability_id
+        ));
+    }
+
+    #[test]
+    fn ledger_audit_replay_detects_missing_executor_manifest() {
+        let store = Store::open_memory().unwrap();
+        let (policy, ticket, result, proof, event) = audited_chain();
+        let capability = capability_contract();
+        store
+            .record_capability_contract(&capability, &event.capability_contract_hash)
+            .unwrap();
+        record_execution_facts(&store, &policy, &ticket, &result, &proof);
+        let event = store.append_ledger_event(event).unwrap();
+
+        assert!(matches!(
+            store.replay_ledger_audit(),
+            Err(StoreError::LedgerAuditMissingExecutorManifest {
+                ledger_event_id,
+                executor_id
+            }) if ledger_event_id == event.ledger_event_id
+                && executor_id == event.executor_ref
+        ));
+    }
+
+    #[test]
+    fn ledger_audit_replay_detects_capability_contract_hash_drift() {
+        let store = Store::open_memory().unwrap();
+        let (policy, ticket, result, proof, event) = audited_chain();
+        let mut capability = capability_contract();
+        capability.timeout_ms = 2_000;
+        let manifest = executor_manifest();
+        store
+            .record_capability_contract(&capability, "ignored-column-hash")
+            .unwrap();
+        store
+            .record_executor_manifest(&manifest, &event.executor_manifest_hash)
+            .unwrap();
+        record_execution_facts(&store, &policy, &ticket, &result, &proof);
+        let event = store.append_ledger_event(event).unwrap();
+
+        assert!(matches!(
+            store.replay_ledger_audit(),
+            Err(StoreError::LedgerAuditBindingMismatch {
+                ledger_event_id,
+                field: "capability.capability_contract_hash",
+                ..
+            }) if ledger_event_id == event.ledger_event_id
+        ));
+    }
+
+    #[test]
+    fn ledger_audit_replay_detects_executor_manifest_hash_drift() {
+        let store = Store::open_memory().unwrap();
+        let (policy, ticket, result, proof, event) = audited_chain();
+        let capability = capability_contract();
+        let mut manifest = executor_manifest();
+        manifest.executor_version = "0.2.1".into();
+        store
+            .record_capability_contract(&capability, &event.capability_contract_hash)
+            .unwrap();
+        store
+            .record_executor_manifest(&manifest, "ignored-column-hash")
+            .unwrap();
+        record_execution_facts(&store, &policy, &ticket, &result, &proof);
+        let event = store.append_ledger_event(event).unwrap();
+
+        assert!(matches!(
+            store.replay_ledger_audit(),
+            Err(StoreError::LedgerAuditBindingMismatch {
+                ledger_event_id,
+                field: "executor.executor_version",
+                ..
+            }) if ledger_event_id == event.ledger_event_id
+        ));
+    }
+
+    #[test]
+    fn ledger_audit_replay_detects_missing_policy_decision() {
+        let store = Store::open_memory().unwrap();
+        let (_policy, ticket, result, proof, event) = audited_chain();
+        record_registry_facts(&store, &event);
+        store.record_ticket(&ticket).unwrap();
+        store.record_sandbox_result(&result).unwrap();
+        store.record_proof(&proof).unwrap();
+        let event = store.append_ledger_event(event).unwrap();
+
+        assert!(matches!(
+            store.replay_ledger_audit(),
+            Err(StoreError::LedgerAuditMissingPolicyDecision {
+                ledger_event_id,
+                policy_decision_ref
+            }) if ledger_event_id == event.ledger_event_id
+                && policy_decision_ref == event.policy_decision_ref
+        ));
+    }
+
+    #[test]
+    fn ledger_audit_replay_detects_policy_decision_binding_drift() {
+        let store = Store::open_memory().unwrap();
+        let (mut policy, ticket, result, proof, event) = audited_chain();
+        policy.capability_id = "file.write".into();
+        record_registry_facts(&store, &event);
+        store.record_policy_decision(&policy).unwrap();
+        store.record_ticket(&ticket).unwrap();
+        store.record_sandbox_result(&result).unwrap();
+        store.record_proof(&proof).unwrap();
+        let event = store.append_ledger_event(event).unwrap();
+
+        assert!(matches!(
+            store.replay_ledger_audit(),
+            Err(StoreError::LedgerAuditBindingMismatch {
+                ledger_event_id,
+                field: "policy_decision.capability_id",
+                ..
+            }) if ledger_event_id == event.ledger_event_id
+        ));
+    }
+
+    #[test]
+    fn ledger_audit_replay_detects_denied_policy_decision() {
+        let store = Store::open_memory().unwrap();
+        let (mut policy, ticket, result, proof, event) = audited_chain();
+        policy.decision = Decision::Deny;
+        record_registry_facts(&store, &event);
+        store.record_policy_decision(&policy).unwrap();
+        store.record_ticket(&ticket).unwrap();
+        store.record_sandbox_result(&result).unwrap();
+        store.record_proof(&proof).unwrap();
+        let event = store.append_ledger_event(event).unwrap();
+
+        assert!(matches!(
+            store.replay_ledger_audit(),
+            Err(StoreError::LedgerAuditDeniedPolicyDecision {
+                ledger_event_id,
+                policy_decision_ref
+            }) if ledger_event_id == event.ledger_event_id
+                && policy_decision_ref == event.policy_decision_ref
+        ));
+    }
+
+    #[test]
+    fn ledger_audit_replay_requires_grant_for_approval_policy_decision() {
+        let store = Store::open_memory().unwrap();
+        let (mut policy, ticket, result, proof, event) = audited_chain();
+        policy.decision = Decision::RequireApproval;
+        record_registry_facts(&store, &event);
+        store.record_policy_decision(&policy).unwrap();
+        store.record_ticket(&ticket).unwrap();
+        store.record_sandbox_result(&result).unwrap();
+        store.record_proof(&proof).unwrap();
+        let event = store.append_ledger_event(event).unwrap();
+
+        assert!(matches!(
+            store.replay_ledger_audit(),
+            Err(StoreError::LedgerAuditMissingApprovalGrant {
+                ledger_event_id,
+                policy_decision_ref
+            }) if ledger_event_id == event.ledger_event_id
+                && policy_decision_ref == event.policy_decision_ref
+        ));
+    }
+
+    #[test]
+    fn ledger_audit_replay_accepts_grant_for_approval_policy_decision() {
+        let store = Store::open_memory().unwrap();
+        let (mut policy, ticket, result, proof, event) = audited_chain();
+        policy.decision = Decision::RequireApproval;
+        let grant = approval_grant();
+        record_registry_facts(&store, &event);
+        store.record_policy_decision(&policy).unwrap();
+        store.record_approval_grant(&grant).unwrap();
+        store.record_ticket(&ticket).unwrap();
+        store.record_sandbox_result(&result).unwrap();
+        store.record_proof(&proof).unwrap();
+        store.append_ledger_event(event).unwrap();
+
+        let report = store.replay_ledger_audit().unwrap();
+
+        assert_eq!(report.policy_decisions, 1);
+        assert_eq!(report.approval_grants, 1);
+        assert_eq!(report.capability_contracts, 1);
+        assert_eq!(report.executor_manifests, 1);
+    }
+
+    #[test]
     fn ledger_audit_replay_detects_executor_identity_drift() {
         let store = Store::open_memory().unwrap();
-        let (ticket, result, mut proof, event) = audited_chain();
+        let (policy, ticket, result, mut proof, event) = audited_chain();
         proof.executor_artifact_hash =
             "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into();
+        record_registry_facts(&store, &event);
+        store.record_policy_decision(&policy).unwrap();
         store.record_ticket(&ticket).unwrap();
         store.record_sandbox_result(&result).unwrap();
         store.record_proof(&proof).unwrap();
@@ -1819,8 +2662,10 @@ mod tests {
     #[test]
     fn ledger_audit_replay_detects_proof_hash_drift() {
         let store = Store::open_memory().unwrap();
-        let (ticket, result, mut proof, event) = audited_chain();
+        let (policy, ticket, result, mut proof, event) = audited_chain();
         proof.hash = "tampered-proof-hash".into();
+        record_registry_facts(&store, &event);
+        store.record_policy_decision(&policy).unwrap();
         store.record_ticket(&ticket).unwrap();
         store.record_sandbox_result(&result).unwrap();
         store.record_proof(&proof).unwrap();

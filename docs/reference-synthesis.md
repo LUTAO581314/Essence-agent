@@ -19,6 +19,9 @@ pull the kernel away from this small auditable loop.
 Reference projects inform the shape of the system, but the Rust kernel remains
 small, auditable, and replayable.
 
+This document is the canonical repository-level reference synthesis. The older
+`competitive-research.md` page now redirects here.
+
 ## References To Keep
 
 | Reference | Take | Do not take |
@@ -33,6 +36,33 @@ small, auditable, and replayable.
 | DeerFlow | Task orchestration, visible task stream, artifact/report workflow | Full LangGraph/FastAPI/Next stack in the core |
 | Star Office UI | Presence/status projection and multi-agent office shell | Identity or auth kernel |
 | TrendRadar | Source adapters, normalized items, scheduler, radar query surface | Research sources hard-coded into the kernel |
+
+## Reference Groups
+
+| Group | Useful references | What to absorb |
+| --- | --- | --- |
+| Agent runtime shell | Claude Code-style runtimes, Hermes, OpenClaw | streaming loop, tool registry, permissions, approvals, bridge boundaries |
+| Workflow platform | AutoGPT Platform, DeerFlow, Paperclip | graph/block execution, heartbeat runs, scheduler, webhooks, visible task streams |
+| Multi-agent orchestration | AutoGen, MetaGPT, Magentic-One, MultiAgentBench | typed handoffs, role contracts, parent orchestrator, topology benchmarks, review gates |
+| Code context substrate | GitNexus, Graphify, Sonic | code graph, BM25/semantic retrieval, impact analysis, MCP query surfaces |
+| Memory substrate | MemPalace and related local-first memory systems | drawers for verbatim facts, hybrid retrieval, graph memory, source tracking |
+| Skill/prompt OS | Superpowers, skills-main, agency-agent style role packs | skill triggering discipline, reusable role packets, quality gates |
+| Product shell | Star Office UI, visual status surfaces | agent presence, queues, approvals, memory writes, and risk states as readable projections |
+| Evolution loop | Evolver-style systems | gene/capsule/event assets, validation before adoption, rollbackable evolution |
+
+## Implementation Implications
+
+- Keep `moxi-core` focused on trust, state, policy, ticketing, execution
+  orchestration, verification, and ledger commits.
+- Express outer capabilities through contracts, manifests, schemas, budgets,
+  proofs, and approval policies.
+- Treat CLI, desktop, MCP, web, plugins, memory, workflow, and swarm surfaces
+  as replaceable shells over the same contracts.
+- Treat swarm as a P1 verifiable-collaboration runtime: bounded subagents,
+  typed messages, sidechains, review/inspector gates, merge evidence, and
+  topology/fault/security eval.
+- Use reference research to shape interfaces and tests, not to import
+  incompatible upstream code.
 
 ## Current Crate Mapping
 
@@ -59,8 +89,11 @@ small, auditable, and replayable.
 4. Grow concrete Entry adapters: CLI, API, SDK, MCP, desktop, and web.
 5. Add richer control-plane, projection, subagent, memory, plugin, browser, and
    workflow surfaces only after the trusted path stays small and auditable.
-6. Add Star Office style visual shells over event/projection streams.
-7. Add evolution assets after kernel behavior is stable and auditable.
+6. Add swarm contracts and eval before broad multi-agent autonomy:
+   `SwarmPlan`, typed `AgentMessage`, sidechains, review gates, merge evidence,
+   faulty-agent injection, and malicious-input regression.
+7. Add Star Office style visual shells over event/projection streams.
+8. Add evolution assets after kernel behavior is stable and auditable.
 
 ## Guardrails
 
@@ -69,5 +102,7 @@ small, auditable, and replayable.
 - Do not put fast-changing product integrations inside the Rust kernel.
 - Do not let plugins bypass approvals, budgets, auth, checkout, or storage
   contracts.
+- Do not let subagents self-expand authority, memory scope, budget, or parent
+  merge rights.
 - Do not copy incompatible upstream code; reimplement only the needed ideas.
 - Keep private memory local and opt-in for external lookup.

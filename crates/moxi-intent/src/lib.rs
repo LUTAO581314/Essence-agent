@@ -215,6 +215,7 @@ mod tests {
                 SandboxInput {
                     capability_id: "file.read".into(),
                     payload: json!({ "path": "hello.txt" }),
+                    runtime_metadata: None,
                 },
             )
             .unwrap();

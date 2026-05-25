@@ -1,4 +1,4 @@
-use chrono::Utc;
+﻿use chrono::Utc;
 use moxi_contracts::{
     ErrorCode, ExecutionTicket, SandboxInput, SandboxResult, Severity, StructuredError,
 };
@@ -386,6 +386,7 @@ mod tests {
                 SandboxInput {
                     capability_id: "file.read".into(),
                     payload: json!({ "path": "hello.txt" }),
+                    runtime_metadata: None,
                 },
             )
             .unwrap();
@@ -416,6 +417,7 @@ mod tests {
                 SandboxInput {
                     capability_id: "file.read".into(),
                     payload: json!({ "path": "ignored.txt" }),
+                    runtime_metadata: None,
                 },
             )
             .unwrap();

@@ -165,6 +165,81 @@ pub enum ExecutorIsolation {
     PluginHost,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ModuleKind {
+    Core,
+    Runtime,
+    Skill,
+    Shell,
+    Connector,
+    Memory,
+    Model,
+    Policy,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ModuleStability {
+    Experimental,
+    Preview,
+    Stable,
+    Deprecated,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillInvocationMode {
+    InProcess,
+    Process,
+    Remote,
+    Browser,
+    Model,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentMode {
+    Delegate,
+    Collaborate,
+    Review,
+    Monitor,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryAccessMode {
+    Read,
+    Write,
+    Search,
+    Summarize,
+    Forget,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelCapabilityKind {
+    Chat,
+    Reasoning,
+    Embedding,
+    Vision,
+    Audio,
+    Rerank,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ShellSurface {
+    Cli,
+    Ide,
+    Desktop,
+    Web,
+    Mobile,
+    Api,
+    Mcp,
+    DigitalHuman,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct Budget {
     pub max_steps: u32,
@@ -302,6 +377,102 @@ pub struct ExecutorManifest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+pub struct ModuleManifest {
+    pub module_id: String,
+    pub module_version: String,
+    pub kind: ModuleKind,
+    pub stability: ModuleStability,
+    pub owner: String,
+    pub summary: String,
+    pub required_capabilities: Vec<String>,
+    pub provided_capabilities: Vec<String>,
+    pub required_modules: Vec<String>,
+    pub policy_profile_ref: Option<String>,
+    pub manifest_ref: Option<String>,
+    pub signature_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+pub struct SkillManifest {
+    pub skill_id: String,
+    pub skill_version: String,
+    pub module_ref: String,
+    pub invocation_mode: SkillInvocationMode,
+    pub entrypoint_ref: String,
+    pub required_capabilities: Vec<String>,
+    pub provided_capabilities: Vec<String>,
+    pub input_schema: Value,
+    pub output_schema: Value,
+    pub permission_mode: PermissionMode,
+    pub risk_level: RiskLevel,
+    pub proof_required: bool,
+    pub approval_required: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+pub struct SubagentManifest {
+    pub agent_id: String,
+    pub agent_version: String,
+    pub role: String,
+    pub mode: SubagentMode,
+    pub allowed_capabilities: Vec<String>,
+    pub required_skills: Vec<String>,
+    pub memory_scopes: Vec<String>,
+    pub max_parallel_tasks: u32,
+    pub ledger_scope: String,
+    pub policy_profile_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+pub struct MemoryProviderManifest {
+    pub provider_id: String,
+    pub provider_version: String,
+    pub storage_ref: String,
+    pub access_modes: Vec<MemoryAccessMode>,
+    pub scopes: Vec<String>,
+    pub source_tracking_required: bool,
+    pub ledger_binding_required: bool,
+    pub retention_policy_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+pub struct ModelGatewayManifest {
+    pub gateway_id: String,
+    pub gateway_version: String,
+    pub provider_refs: Vec<String>,
+    pub capability_kinds: Vec<ModelCapabilityKind>,
+    pub default_model_ref: Option<String>,
+    pub fallback_policy_ref: Option<String>,
+    pub cost_policy_ref: Option<String>,
+    pub redaction_policy_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+pub struct ShellAdapterManifest {
+    pub shell_id: String,
+    pub shell_version: String,
+    pub surface: ShellSurface,
+    pub entry_channels: Vec<String>,
+    pub supported_permission_modes: Vec<PermissionMode>,
+    pub required_capabilities: Vec<String>,
+    pub projection_refs: Vec<String>,
+    pub approval_surface_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+pub struct AgentPersonaManifest {
+    pub persona_id: String,
+    pub persona_version: String,
+    pub display_name: String,
+    pub role: String,
+    pub tone_profile_ref: Option<String>,
+    pub allowed_modules: Vec<String>,
+    pub allowed_skills: Vec<String>,
+    pub memory_scopes: Vec<String>,
+    pub policy_profile_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct RequiredApproval {
     pub approval_policy: ApprovalPolicy,
     pub approval_ref: Option<String>,
@@ -357,9 +528,17 @@ pub struct ExecutionTicket {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+pub struct RuntimeInputMetadata {
+    pub idempotency_key: String,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct SandboxInput {
     pub capability_id: String,
     pub payload: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_metadata: Option<RuntimeInputMetadata>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -509,5 +688,39 @@ mod tests {
         let parsed: PolicyConfig = serde_json::from_str(&serialized).unwrap();
 
         assert_eq!(config, parsed);
+    }
+
+    #[test]
+    fn extension_manifests_roundtrip_json() {
+        let skill = SkillManifest {
+            skill_id: "skill.file.read".into(),
+            skill_version: "0.1.0".into(),
+            module_ref: "module.files".into(),
+            invocation_mode: SkillInvocationMode::Process,
+            entrypoint_ref: "bin/moxi-file-skill".into(),
+            required_capabilities: vec!["file.read".into()],
+            provided_capabilities: vec!["skill.file.read".into()],
+            input_schema: serde_json::json!({"type": "object"}),
+            output_schema: serde_json::json!({"type": "object"}),
+            permission_mode: PermissionMode::ReadOnly,
+            risk_level: RiskLevel::Low,
+            proof_required: true,
+            approval_required: false,
+        };
+
+        let serialized = serde_json::to_string(&skill).unwrap();
+        let parsed: SkillManifest = serde_json::from_str(&serialized).unwrap();
+
+        assert_eq!(skill, parsed);
+    }
+
+    #[test]
+    fn exposes_extension_manifest_schemas() {
+        assert_eq!(schema_for::<ModuleManifest>()["type"], "object");
+        assert_eq!(schema_for::<SubagentManifest>()["type"], "object");
+        assert_eq!(schema_for::<MemoryProviderManifest>()["type"], "object");
+        assert_eq!(schema_for::<ModelGatewayManifest>()["type"], "object");
+        assert_eq!(schema_for::<ShellAdapterManifest>()["type"], "object");
+        assert_eq!(schema_for::<AgentPersonaManifest>()["type"], "object");
     }
 }

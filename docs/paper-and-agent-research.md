@@ -31,6 +31,9 @@ The goal is to translate:
 | `LedgerEvent` | append-only record of what happened and why | current `LedgerEvent` |
 | `Heartbeat` | resumable execution window: restore, orient, act, verify, persist, sleep | partial through heartbeats/budgets; future scheduler runtime |
 | `MemoryCrystal` | source-tracked memory with fact, relation, confidence, decay, and recall path | future memory runtime |
+| `SwarmPlan` | bounded decision to use single, star, hierarchy, graph, or debate topology | future swarm contract |
+| `AgentMessage` | typed agent-to-agent message: claim, evidence, instruction, tool proposal, risk, or review | future swarm contract |
+| `MergeEvidence` | evidence bundle required before parent-run merge | future swarm contract |
 
 ## Design Principles
 
@@ -81,6 +84,17 @@ Humans should see state, risk, approvals, memory writes, active tools, and
 blocked runs. The UI is not merely decorative; it is a projection of audit and
 control facts that lets humans calibrate the system.
 
+### Swarm As Verifiable Collaboration
+
+Multi-agent research supports swarm-native systems, but only when collaboration
+has a protocol. ESSENCE should treat subagents as bounded workers, not trusted
+peers. A swarm run needs a topology, explicit handoffs, typed messages,
+sidechain records, reviewers or inspectors for high-risk merges, and evidence
+gates before the parent run accepts any result. More agents can improve
+coverage and review, but they also add coordination cost, latency, and error
+propagation, so swarm use must be budgeted and evaluated against single-agent
+baselines.
+
 ## Production Readiness Themes
 
 The research notes repeatedly point to the same red lines:
@@ -93,6 +107,9 @@ The research notes repeatedly point to the same red lines:
 - secret redaction before model calls, logs, plugin calls, and audit records;
 - hard budgets for time, tool calls, heartbeats, output, and future resource
   controls;
+- subagent budgets, allowlists, typed messages, sidechains, and parent-merge
+  evidence gates;
+- fault-injection and malicious-input tests for multi-agent runs;
 - append-only ledger and proof-backed recovery;
 - explicit rollback/correction events instead of silent mutation.
 

@@ -1,0 +1,16 @@
+[package]
+name = "moxi-observability"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+chrono.workspace = true
+moxi-runtime = { path = "../moxi-runtime" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+
+[dev-dependencies]
+moxi-contracts = { path = "../moxi-contracts" }

@@ -5,6 +5,8 @@ members = [
     "crates/moxi-entry",
     "crates/moxi-gateway",
     "crates/moxi-intent",
+    "crates/moxi-observability",
+    "crates/moxi-runtime",
     "crates/moxi-sandbox",
     "crates/moxi-store",
 ]

@@ -66,6 +66,9 @@ P0 responsibilities:
   reload them with profile-hash validation, and export redacted P1 readiness
   audit records. This makes the P0/P1 execution interlock reviewable without
   turning P0 into a runtime profile database.
+- require production or credential-capable P1 execution profiles to attach a
+  ready production-readiness decision before they can be sealed. Local read-only
+  profiles remain bounded local records and do not imply production authority.
 
 P0 must not become a model gateway, planner, memory database, plugin host,
 workflow engine, product database, or UI runtime.

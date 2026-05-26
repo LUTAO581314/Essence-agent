@@ -108,7 +108,9 @@ a Rust workspace with twenty library crates:
   storing raw secret material. It now also defines P1 execution-readiness
   profiles, tenant-policy-bound profile records, requests, decisions, and
   redacted P1 readiness audit exports so bounded P1 runtime tasks can enter the
-  P0 execution chain only when explicitly allowed.
+  P0 execution chain only when explicitly allowed. Production or
+  credential-capable P1 profile records must attach a ready
+  `ProductionReadinessDecision`.
 - `moxi-hotpath`: first low-latency control plane. It defines latency budgets,
   hot-path requests, cache entries, hot-path decisions, degrade plans, latency
   samples, latency snapshots, and hot-path facts for ack/deny/route/cache-hit
@@ -562,8 +564,9 @@ P0 boundary decisions:
   redacted audit records, rejects placeholder adapter evidence, blocks
   production readiness until all P0 hardening gates have tenant-bound adapter
   evidence, seals P1 execution profiles against tenant policy pack refs and
-  profile hashes, and blocks P1 runtime tasks before ticket issuance unless the
-  P1 execution profile allows them into the P0 chain.
+  profile hashes, requires ready production readiness before sealing production
+  or credential-capable P1 profiles, and blocks P1 runtime tasks before ticket
+  issuance unless the P1 execution profile allows them into the P0 chain.
 - Low-latency control-plane MVP: `moxi-hotpath` exposes `LatencyBudget`,
   `HotPathRequest`, `CacheEntry`, `HotPathDecision`, `DegradePlan`,
   `LatencySample`, `LatencySnapshot`, and `HotPathFact`. It enforces cache

@@ -158,8 +158,10 @@ now pass locally.
   compliance export evidence. It can seal P1 execution-readiness profiles into
   tenant-policy-bound `P1ExecutionReadinessProfileRecord` values, reload them
   with profile-hash validation, and export redacted P1 readiness audit records.
-  It records decisions and evidence refs only; it never stores raw secrets or
-  performs real cryptographic signing in this MVP.
+  Production or credential-capable P1 profiles must be sealed through a ready
+  `ProductionReadinessDecision`; blocked or missing production readiness fails
+  closed. It records decisions and evidence refs only; it never stores raw
+  secrets or performs real cryptographic signing in this MVP.
 - `moxi-hotpath`: first low-latency control plane. It defines
   `LatencyBudget`, `HotPathRequest`, `CacheEntry`, `HotPathDecision`,
   `DegradePlan`, `LatencySample`, `LatencySnapshot`, and `HotPathFact`,
@@ -517,6 +519,9 @@ publishable docs:
   as `P1ExecutionReadinessProfileRecord` values, reloaded with profile-hash and
   tenant checks, and included in redacted audit exports for P0/P1 execution
   interlock review.
+- Production or credential-capable P1 execution profiles can only be sealed when
+  a tenant-bound `ProductionReadinessDecision::Ready` is attached. Local
+  read-only profiles do not gain production authority from this record.
 - Capability contract, executor manifest, policy decision, execution ticket,
   sandbox result, and proof payloads are persisted for audit replay.
 - Ledger audit replay validates the hash chain and re-checks successful events

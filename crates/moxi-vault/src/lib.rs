@@ -80,6 +80,13 @@ pub enum ProductionAdapterVerificationKind {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
+pub enum ProductionAuthDecisionKind {
+    Verified,
+    Rejected,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
 pub enum RotationEnforcementDecisionKind {
     Verified,
     Rejected,
@@ -507,6 +514,34 @@ pub struct ProductionAdapterVerificationDecision {
     pub adapter_ref: String,
     pub provider_ref: String,
     pub decision: ProductionAdapterVerificationKind,
+    pub reasons: Vec<String>,
+    pub evidence_refs: Vec<String>,
+    pub verified_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProductionAuthEvidence {
+    pub evidence_id: String,
+    pub tenant_id: String,
+    pub auth_provider_ref: String,
+    pub adapter_decision_ref: String,
+    pub issuer_ref: String,
+    pub jwks_ref: String,
+    pub token_policy_ref: String,
+    pub audience_ref: String,
+    pub session_policy_ref: String,
+    pub attestation_ref: String,
+    pub checked_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProductionAuthDecision {
+    pub decision_id: String,
+    pub tenant_id: String,
+    pub auth_provider_ref: String,
+    pub decision: ProductionAuthDecisionKind,
     pub reasons: Vec<String>,
     pub evidence_refs: Vec<String>,
     pub verified_at: DateTime<Utc>,
@@ -1720,6 +1755,108 @@ impl VaultController {
         }
     }
 
+    pub fn verify_production_auth(
+        hardening: &ProductionHardeningEvidence,
+        adapter_decision: &ProductionAdapterVerificationDecision,
+        evidence: &ProductionAuthEvidence,
+    ) -> ProductionAuthDecision {
+        let mut reasons = Vec::new();
+        let mut evidence_refs = vec![
+            adapter_decision.decision_id.clone(),
+            evidence.evidence_id.clone(),
+            evidence.auth_provider_ref.clone(),
+            evidence.adapter_decision_ref.clone(),
+            evidence.issuer_ref.clone(),
+            evidence.jwks_ref.clone(),
+            evidence.token_policy_ref.clone(),
+            evidence.audience_ref.clone(),
+            evidence.session_policy_ref.clone(),
+            evidence.attestation_ref.clone(),
+        ];
+        evidence_refs.extend(hardening.evidence_refs.clone());
+        evidence_refs.extend(adapter_decision.evidence_refs.clone());
+
+        if hardening.tenant_id != evidence.tenant_id
+            || hardening.tenant_id != adapter_decision.tenant_id
+        {
+            reasons.push(
+                "production hardening, auth adapter decision, and auth evidence must share a tenant"
+                    .into(),
+            );
+        }
+
+        let hardening_auth_ref = hardening.auth_provider_ref.as_deref();
+        if hardening_auth_ref.is_none_or(is_placeholder_ref) {
+            reasons.push("production authentication provider is not configured".into());
+        }
+        if hardening_auth_ref != Some(evidence.auth_provider_ref.as_str()) {
+            reasons.push("auth evidence does not match the hardening auth provider".into());
+        }
+        if adapter_decision.decision != ProductionAdapterVerificationKind::Verified {
+            reasons.push("auth provider adapter decision must be verified".into());
+        }
+        if adapter_decision.kind != ProductionAdapterKind::AuthProvider {
+            reasons.push("adapter decision must be for the production auth provider".into());
+        }
+        if adapter_decision.provider_ref != evidence.auth_provider_ref {
+            reasons.push("auth adapter provider does not match auth evidence".into());
+        }
+        if evidence.adapter_decision_ref != adapter_decision.decision_id {
+            reasons.push("auth evidence is not bound to the adapter decision".into());
+        }
+        if evidence.checked_at >= evidence.expires_at || evidence.expires_at <= Utc::now() {
+            reasons.push("production auth evidence is expired or invalid".into());
+        }
+        if [
+            evidence.evidence_id.as_str(),
+            evidence.auth_provider_ref.as_str(),
+            evidence.adapter_decision_ref.as_str(),
+            evidence.issuer_ref.as_str(),
+            evidence.jwks_ref.as_str(),
+            evidence.token_policy_ref.as_str(),
+            evidence.audience_ref.as_str(),
+            evidence.session_policy_ref.as_str(),
+            evidence.attestation_ref.as_str(),
+        ]
+        .iter()
+        .any(|value| is_placeholder_ref(value))
+        {
+            reasons.push("production auth evidence contains placeholder refs".into());
+        }
+
+        evidence_refs.sort();
+        evidence_refs.dedup();
+        reasons.sort();
+        reasons.dedup();
+
+        let decision = if reasons.is_empty() {
+            reasons.push("production auth evidence is verified".into());
+            ProductionAuthDecisionKind::Verified
+        } else {
+            ProductionAuthDecisionKind::Rejected
+        };
+
+        ProductionAuthDecision {
+            decision_id: stable_id(
+                "production_auth",
+                &(
+                    hardening.tenant_id.as_str(),
+                    evidence.auth_provider_ref.as_str(),
+                    evidence.evidence_id.as_str(),
+                    &decision,
+                    &evidence_refs,
+                ),
+            ),
+            tenant_id: hardening.tenant_id.clone(),
+            auth_provider_ref: evidence.auth_provider_ref.clone(),
+            decision,
+            reasons,
+            evidence_refs,
+            verified_at: Utc::now(),
+            expires_at: evidence.expires_at,
+        }
+    }
+
     pub fn verify_rotation_enforcement(
         credential: &CredentialRef,
         hardening: &ProductionHardeningEvidence,
@@ -2783,6 +2920,25 @@ mod tests {
             .collect()
     }
 
+    fn production_auth_evidence(
+        adapter_decision: &ProductionAdapterVerificationDecision,
+    ) -> ProductionAuthEvidence {
+        ProductionAuthEvidence {
+            evidence_id: "production.auth.evidence.1".into(),
+            tenant_id: "tenant.a".into(),
+            auth_provider_ref: "oidc://prod/tenant.a".into(),
+            adapter_decision_ref: adapter_decision.decision_id.clone(),
+            issuer_ref: "issuer://tenant.a/prod-oidc".into(),
+            jwks_ref: "jwks://tenant.a/prod-oidc/current".into(),
+            token_policy_ref: "token-policy://tenant.a/prod".into(),
+            audience_ref: "audience://tenant.a/moxi-core".into(),
+            session_policy_ref: "session-policy://tenant.a/prod".into(),
+            attestation_ref: "attestation://tenant.a/production-auth/2026-05".into(),
+            checked_at: Utc::now(),
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+        }
+    }
+
     fn secret_injection_evidence(
         credential: &CredentialRef,
         secret_use: &SecretUseDecision,
@@ -3833,6 +3989,66 @@ mod tests {
             ProductionAdapterVerificationKind::Rejected
         );
         assert!(!rejected.reasons.is_empty());
+    }
+
+    #[test]
+    fn production_auth_decision_is_provider_and_adapter_bound_fail_closed() {
+        let hardening = hardening_evidence();
+        let adapter_decision = VaultController::verify_production_adapter_evidence(
+            &adapter_evidence(ProductionAdapterKind::AuthProvider, "oidc://prod/tenant.a"),
+        );
+        let evidence = production_auth_evidence(&adapter_decision);
+        let decision =
+            VaultController::verify_production_auth(&hardening, &adapter_decision, &evidence);
+
+        assert_eq!(decision.decision, ProductionAuthDecisionKind::Verified);
+        assert_eq!(decision.tenant_id, "tenant.a");
+        assert_eq!(decision.auth_provider_ref, "oidc://prod/tenant.a");
+        assert!(decision
+            .evidence_refs
+            .contains(&adapter_decision.decision_id));
+        assert!(decision.evidence_refs.contains(&evidence.evidence_id));
+        assert!(decision.evidence_refs.contains(&evidence.jwks_ref));
+
+        let mut placeholder_jwks = evidence.clone();
+        placeholder_jwks.jwks_ref = "mock-jwks".into();
+        let rejected_jwks = VaultController::verify_production_auth(
+            &hardening,
+            &adapter_decision,
+            &placeholder_jwks,
+        );
+        assert_eq!(rejected_jwks.decision, ProductionAuthDecisionKind::Rejected);
+        assert!(!rejected_jwks.reasons.is_empty());
+
+        let mut provider_mismatch = evidence.clone();
+        provider_mismatch.auth_provider_ref = "oidc://prod/tenant.a/other".into();
+        let rejected_provider = VaultController::verify_production_auth(
+            &hardening,
+            &adapter_decision,
+            &provider_mismatch,
+        );
+        assert_eq!(
+            rejected_provider.decision,
+            ProductionAuthDecisionKind::Rejected
+        );
+        assert!(!rejected_provider.reasons.is_empty());
+
+        let wrong_adapter = VaultController::verify_production_adapter_evidence(&adapter_evidence(
+            ProductionAdapterKind::ExternalSecretManager,
+            "kms://tenant.a/prod",
+        ));
+        let mut wrong_adapter_evidence = evidence;
+        wrong_adapter_evidence.adapter_decision_ref = wrong_adapter.decision_id.clone();
+        let rejected_adapter = VaultController::verify_production_auth(
+            &hardening,
+            &wrong_adapter,
+            &wrong_adapter_evidence,
+        );
+        assert_eq!(
+            rejected_adapter.decision,
+            ProductionAuthDecisionKind::Rejected
+        );
+        assert!(!rejected_adapter.reasons.is_empty());
     }
 
     #[test]

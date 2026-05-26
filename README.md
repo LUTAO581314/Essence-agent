@@ -148,7 +148,8 @@ now pass locally.
   evidence refs, and human approval for protected/high-risk deltas before
   rollout planning.
 - `moxi-vault`: first P0 production-hardening control plane. It defines
-  `CredentialRef`, `SecretUseRequest`, `SecretUseDecision`, `TrustRoot`,
+  `CredentialRef`, `SecretUseRequest`, `SecretUseDecision`,
+  `SecretInjectionEvidence`, `SecretInjectionDecision`, `TrustRoot`,
   `TrustRootRecord`, `ExecutorSignature`, `SignatureVerificationDecision`,
   `TenantPolicyPack`, `QuorumApproval`, `BreakGlassRequest`,
   `BreakGlassDecision`, and `AuditExportRecord`, plus sealed
@@ -158,6 +159,7 @@ now pass locally.
   metadata, and a
   fail-closed `P1ExecutionReadinessDecision` gate plus
   `ProductionAdapterEvidence`, `ProductionAdapterVerificationDecision`,
+  `ProductionAuthEvidence`, `ProductionAuthDecision`,
   `RotationEnforcementDecision`, `ComplianceExportDeliveryDecision`, and
   `ProductionReadinessDecision` gates over
   production auth, external secret manager, crypto verifier, hardened sandbox,
@@ -166,7 +168,13 @@ now pass locally.
   verifies adapter evidence into tenant-bound decisions and requires production
   readiness to bind every adapter evidence item to the matching verified
   decision; when rotation refs are configured it also requires every credential
-  to bind to a verified rotation-enforcement decision. It can seal tenant policy packs with stable
+  to bind to a verified rotation-enforcement decision. It verifies production
+  auth evidence into tenant-bound decisions that bind the configured auth
+  provider, issuer/JWKS/token/session policy refs, and a verified AuthProvider
+  adapter decision; it also verifies secret injection receipts as tenant-bound
+  decisions that bind an allowed `SecretUseDecision`, an executor-injected
+  credential, hardened sandbox and injection profiles, and a verified
+  SecretInjection adapter decision. It can seal tenant policy packs with stable
   hashes, then seal P1 execution-readiness profiles into
   tenant-policy-record-bound `P1ExecutionReadinessProfileRecord` values, reload
   them with policy/profile hash validation, and export redacted P1 readiness audit records
@@ -589,18 +597,21 @@ redacted local compliance export bundles, verifies compliance export delivery
 evidence against the bundle hash, verifies secret injection evidence into a
 decision bound to an allowed `SecretUseDecision`, an executor-injected
 credential, hardened sandbox and injection profiles, a verified injection
-adapter decision, executor ref, and receipt, and now evaluates a fail-closed P1
+adapter decision, executor ref, and receipt, verifies production auth evidence
+into a decision bound to the configured auth provider, issuer/JWKS/token/session
+policy refs, and a verified AuthProvider adapter decision, and now evaluates a fail-closed P1
 execution-readiness decision plus production readiness decisions over
 trust-root, quorum, break-glass, audit-export, auth, secret-manager,
 crypto-verifier, sandbox, secret-injection, and rotation evidence. Production
-adapter evidence, credential rotation refs, secret injection receipts, and
-compliance export delivery receipts are verified into tenant-bound decisions
-before readiness or review can cite them. P1 may only enter the P0 execution
+adapter evidence, production auth evidence, credential rotation refs, secret
+injection receipts, and compliance export delivery receipts are verified into
+tenant-bound decisions before readiness or review can cite them. P1 may only enter the P0 execution
 chain when that readiness decision is ready; it still cannot issue tickets,
-execute without P0, verify, or commit. Real cryptographic verification, OS
-credential injection, HSM/KMS integration, production secret rotation adapters,
-and real external trust-root/compliance storage backends still require concrete
-external adapters before production exposure.
+execute without P0, verify, or commit. Real OIDC/SSO authentication, real
+cryptographic verification, OS credential injection, HSM/KMS integration,
+production secret rotation adapters, and real external trust-root/compliance
+storage backends still require concrete external adapters before production
+exposure.
 
 `process_sandbox` is a runnable v0 JSON protocol boundary. It is not yet
 production OS isolation; enabling executable external actions in production is

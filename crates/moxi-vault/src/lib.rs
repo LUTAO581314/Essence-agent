@@ -94,6 +94,13 @@ pub enum ComplianceExportDeliveryDecisionKind {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
+pub enum TrustRootStorageDecisionKind {
+    Verified,
+    Rejected,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
 pub enum ProductionReadinessGate {
     ProductionAuth,
     ExternalSecretManager,
@@ -232,6 +239,37 @@ pub struct TrustRootRecord {
     pub evidence_refs: Vec<String>,
     pub sealed_by: String,
     pub sealed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TrustRootStorageEvidence {
+    pub evidence_id: String,
+    pub tenant_id: String,
+    pub record_id: String,
+    pub trust_root_hash: String,
+    pub storage_provider_ref: String,
+    pub storage_location_ref: String,
+    pub attestation_ref: String,
+    pub receipt_ref: String,
+    pub replica_set_ref: String,
+    pub retention_policy_ref: String,
+    pub stored_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TrustRootStorageDecision {
+    pub decision_id: String,
+    pub tenant_id: String,
+    pub record_id: String,
+    pub root_id: String,
+    pub trust_root_hash: String,
+    pub storage_provider_ref: String,
+    pub decision: TrustRootStorageDecisionKind,
+    pub reasons: Vec<String>,
+    pub evidence_refs: Vec<String>,
+    pub verified_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -782,6 +820,92 @@ impl VaultController {
         }
 
         Ok(record.trust_root.clone())
+    }
+
+    pub fn verify_trust_root_storage(
+        record: &TrustRootRecord,
+        evidence: &TrustRootStorageEvidence,
+    ) -> TrustRootStorageDecision {
+        let mut reasons = Vec::new();
+        let mut evidence_refs = record.evidence_refs.clone();
+        evidence_refs.extend([
+            record.record_id.clone(),
+            record.trust_root_hash.clone(),
+            evidence.evidence_id.clone(),
+            evidence.storage_provider_ref.clone(),
+            evidence.storage_location_ref.clone(),
+            evidence.attestation_ref.clone(),
+            evidence.receipt_ref.clone(),
+            evidence.replica_set_ref.clone(),
+            evidence.retention_policy_ref.clone(),
+        ]);
+
+        if Self::load_trust_root(record).is_err() {
+            reasons.push("trust-root record failed local hash validation".into());
+        }
+        if record.tenant_id != evidence.tenant_id {
+            reasons
+                .push("trust-root record and storage evidence belong to different tenants".into());
+        }
+        if record.record_id != evidence.record_id
+            || record.trust_root_hash != evidence.trust_root_hash
+        {
+            reasons.push("storage evidence is not bound to the trust-root record hash".into());
+        }
+        if evidence.stored_at >= evidence.expires_at || evidence.expires_at <= Utc::now() {
+            reasons.push("trust-root storage evidence is expired or invalid".into());
+        }
+        if [
+            evidence.evidence_id.as_str(),
+            evidence.storage_provider_ref.as_str(),
+            evidence.storage_location_ref.as_str(),
+            evidence.attestation_ref.as_str(),
+            evidence.receipt_ref.as_str(),
+            evidence.replica_set_ref.as_str(),
+            evidence.retention_policy_ref.as_str(),
+        ]
+        .iter()
+        .any(|value| is_placeholder_ref(value))
+        {
+            reasons.push("trust-root storage evidence contains placeholder refs".into());
+        }
+
+        evidence_refs.sort();
+        evidence_refs.dedup();
+        reasons.sort();
+        reasons.dedup();
+
+        let decision = if reasons.is_empty() {
+            reasons.push("trust-root external storage evidence is verified".into());
+            TrustRootStorageDecisionKind::Verified
+        } else {
+            TrustRootStorageDecisionKind::Rejected
+        };
+
+        TrustRootStorageDecision {
+            decision_id: stable_id(
+                "trust_root_storage",
+                &(
+                    record.tenant_id.as_str(),
+                    record.record_id.as_str(),
+                    record.trust_root_hash.as_str(),
+                    evidence.evidence_id.as_str(),
+                    evidence.storage_provider_ref.as_str(),
+                    &decision,
+                    &evidence_refs,
+                ),
+            ),
+            tenant_id: record.tenant_id.clone(),
+            record_id: record.record_id.clone(),
+            root_id: record.root_id.clone(),
+            trust_root_hash: record.trust_root_hash.clone(),
+            storage_provider_ref: evidence.storage_provider_ref.clone(),
+            decision,
+            reasons,
+            evidence_refs,
+            verified_at: Utc::now(),
+            expires_at: evidence.expires_at,
+        }
     }
 
     pub fn verify_executor_signature_with_trust_root_records(
@@ -2497,6 +2621,23 @@ mod tests {
         }
     }
 
+    fn trust_root_storage_evidence(record: &TrustRootRecord) -> TrustRootStorageEvidence {
+        TrustRootStorageEvidence {
+            evidence_id: "trust-root.storage.evidence.1".into(),
+            tenant_id: record.tenant_id.clone(),
+            record_id: record.record_id.clone(),
+            trust_root_hash: record.trust_root_hash.clone(),
+            storage_provider_ref: "trust-store://tenant.a/prod-roots".into(),
+            storage_location_ref: "trust-store://tenant.a/prod-roots/root.github".into(),
+            attestation_ref: "attestation://tenant.a/trust-store/2026-05".into(),
+            receipt_ref: "receipt://tenant.a/trust-store/root.github".into(),
+            replica_set_ref: "replica-set://tenant.a/trust-store/quorum-a".into(),
+            retention_policy_ref: "retention://tenant.a/trust-root/seven-years".into(),
+            stored_at: Utc::now(),
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+        }
+    }
+
     #[test]
     fn low_risk_secret_use_is_reference_only_and_never_exposes_raw_secret() {
         let decision = VaultController::decide_secret_use(
@@ -2639,6 +2780,54 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(tenant_error, VaultError::TenantMismatch);
+    }
+
+    #[test]
+    fn trust_root_storage_decision_is_record_hash_bound_and_fail_closed() {
+        let record = VaultController::seal_trust_root(
+            trust_root(),
+            vec!["security.import.review".into()],
+            "vault.controller",
+        )
+        .unwrap();
+        let evidence = trust_root_storage_evidence(&record);
+        let decision = VaultController::verify_trust_root_storage(&record, &evidence);
+
+        assert_eq!(decision.decision, TrustRootStorageDecisionKind::Verified);
+        assert_eq!(decision.tenant_id, record.tenant_id);
+        assert_eq!(decision.record_id, record.record_id);
+        assert_eq!(decision.root_id, record.root_id);
+        assert_eq!(decision.trust_root_hash, record.trust_root_hash);
+        assert!(decision.evidence_refs.contains(&record.trust_root_hash));
+        assert!(decision.evidence_refs.contains(&evidence.receipt_ref));
+
+        let mut hash_mismatch = evidence.clone();
+        hash_mismatch.trust_root_hash = "trust_root_hash.tampered".into();
+        let rejected_hash = VaultController::verify_trust_root_storage(&record, &hash_mismatch);
+        assert_eq!(
+            rejected_hash.decision,
+            TrustRootStorageDecisionKind::Rejected
+        );
+        assert!(!rejected_hash.reasons.is_empty());
+
+        let mut placeholder_receipt = evidence.clone();
+        placeholder_receipt.receipt_ref = "mock-receipt".into();
+        let rejected_placeholder =
+            VaultController::verify_trust_root_storage(&record, &placeholder_receipt);
+        assert_eq!(
+            rejected_placeholder.decision,
+            TrustRootStorageDecisionKind::Rejected
+        );
+        assert!(!rejected_placeholder.reasons.is_empty());
+
+        let mut cross_tenant = evidence;
+        cross_tenant.tenant_id = "tenant.b".into();
+        let rejected_tenant = VaultController::verify_trust_root_storage(&record, &cross_tenant);
+        assert_eq!(
+            rejected_tenant.decision,
+            TrustRootStorageDecisionKind::Rejected
+        );
+        assert!(!rejected_tenant.reasons.is_empty());
     }
 
     #[test]

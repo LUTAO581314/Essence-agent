@@ -254,7 +254,8 @@ evolution ledger yet.
 R8 has locally completed the P0 production-hardening control-plane closure with
 `moxi-vault`. It models the first P0 production-hardening
 control plane for credential references, secret-use boundaries, tenant trust
-roots, sealed trust-root records, executor signature verification decisions, tenant policy packs,
+roots, sealed trust-root records, trust-root storage decisions, executor
+signature verification decisions, tenant policy packs,
 quorum approvals, break-glass decisions, redacted audit exports, production
 adapter evidence, a P1 execution-readiness gate, and a fail-closed production
 readiness gate. The P1 execution-readiness gate lets the default local profile
@@ -266,9 +267,10 @@ secret injection, rotation, tenant policy, executor trust-root, and compliance
 audit-export evidence before credentialed or executable production enablement.
 Production adapter evidence is now verified into tenant-bound
 `ProductionAdapterVerificationDecision` records, credential rotation refs are
-verified into `RotationEnforcementDecision` records, and production readiness
-requires every adapter evidence item and configured credential rotation ref to
-bind to its matching verified decision.
+verified into `RotationEnforcementDecision` records, trust-root external storage
+receipts are verified into `TrustRootStorageDecision` records, and production
+readiness requires every adapter evidence item and configured credential
+rotation ref to bind to its matching verified decision.
 P1 execution audit bundles now bind the runtime request, sealed profile record,
 readiness decision, optional production readiness ref, redaction profile, and
 evidence refs for review without granting ticket, execution, verification, or
@@ -572,7 +574,8 @@ P0 boundary decisions:
   loop requires eval evidence, passed experiments, and human approval for
   protected/high-risk deltas before rollout planning.
 - P0 production-hardening MVP: `moxi-vault` exposes `CredentialRef`,
-  `SecretUseRequest`, `SecretUseDecision`, `TrustRoot`, `TrustRootRecord`, `ExecutorSignature`,
+  `SecretUseRequest`, `SecretUseDecision`, `TrustRoot`, `TrustRootRecord`,
+  `TrustRootStorageEvidence`, `TrustRootStorageDecision`, `ExecutorSignature`,
   `SignatureVerificationDecision`, `TenantPolicyPack`,
   `TenantPolicyPackRecord`, `QuorumApproval`, `BreakGlassRequest`,
   `BreakGlassDecision`, `AuditExportRecord`,
@@ -585,13 +588,15 @@ P0 boundary decisions:
   `P1ExecutionAuditBundle`, and `ComplianceExportBundle`. It rejects raw
   secret-looking references, requires
   quorum for high-risk secret use, seals tenant trust roots into hash-bound
-  records, checks executor signatures against tenant trust-root records, binds
+  records, verifies external trust-root storage evidence against sealed record
+  hashes, checks executor signatures against tenant trust-root records, binds
   signature decisions to tenant ids, exports redacted
   audit records, P1 execution audit bundles, and local compliance export
   bundles, rejects placeholder adapter evidence, verifies adapter evidence into
   tenant-bound decisions, verifies credential rotation refs into tenant-bound
   decisions, verifies compliance export delivery evidence against bundle hashes
-  into tenant-bound decisions, blocks production readiness until all P0 hardening gates have
+  into tenant-bound decisions, blocks production readiness until all P0
+  hardening gates have
   tenant-bound adapter/rotation evidence and matching verified decisions,
   seals tenant policy packs with stable hashes, seals P1 execution
   profiles against tenant policy record refs and policy/profile hashes,
@@ -655,11 +660,11 @@ P0 boundary decisions:
   concrete KMS/HSM/secret-manager calls, real cryptographic signature
   verification, secret injection into hardened sandboxes, external tenant
   trust-root storage, and external compliance export bundle storage/delivery.
-  Hash-bound trust-root records, adapter evidence, rotation enforcement
-  decisions, compliance export delivery decisions, and rotation/compliance
-  requirements are now modeled as fail-closed gates, and local redacted
-  compliance bundles can be assembled, but live external infrastructure still
-  needs to be connected.
+  Hash-bound trust-root records, trust-root storage decisions, adapter evidence,
+  rotation enforcement decisions, compliance export delivery decisions, and
+  rotation/compliance requirements are now modeled as fail-closed gates, and
+  local redacted compliance bundles can be assembled, but live external
+  infrastructure still needs to be connected.
 - P1 execution readiness beyond the default local read-only profile: production
   profiles, credentialed execution, and high-risk runtime tasks still require
   production-ready P0 evidence and concrete external adapters.

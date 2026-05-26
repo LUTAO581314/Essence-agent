@@ -52,7 +52,8 @@ P0 responsibilities:
   results, proofs, and events.
 - keep credential use reference-only, bind secret-use decisions to evidence,
   seal tenant trust roots into hash-bound records, verify executor signature
-  metadata against tenant trust-root records, and export redacted audit records
+  metadata against tenant trust-root records, verify external trust-root storage
+  receipts against sealed record hashes, and export redacted audit records
   without persisting raw secret material.
 - evaluate production readiness fail-closed before credentialed or executable
   production enablement, covering production auth, external secret management,
@@ -253,8 +254,8 @@ Before credentialed or executable production actions, the architecture needs:
   verification decisions, hash-bound trust-root records, break-glass decisions,
   redacted audit records, a P1 execution-readiness gate, production adapter
   evidence, adapter verification decisions, rotation enforcement decisions, and
-  a fail-closed production readiness decision, but not live KMS/HSM calls or
-  external trust-root storage;
+  trust-root storage decisions, and a fail-closed production readiness decision,
+  but not live KMS/HSM calls or a real external trust-root storage backend;
 - OS-level process sandbox hardening; the readiness gate can require a hardened
   sandbox profile ref before production enablement, but does not implement the
   OS/container runtime itself;
@@ -311,12 +312,13 @@ Before credentialed or executable production actions, the architecture needs:
    projections, and forget audit events.
 13. Build `moxi-vault` as the first P0 production-hardening control plane for
    credential references, secret-use decisions, trust roots, hash-bound
-   trust-root records, signature verification decisions, tenant policy packs,
-   quorum approval, break-glass, audit export records, tenant policy pack
-   records, P1 execution-readiness profile records, P1 execution audit bundles,
-   compliance export bundles, production adapter evidence, adapter verification
-   decisions, rotation enforcement decisions, compliance export delivery
-   decisions, and fail-closed production readiness gates.
+   trust-root records, trust-root storage decisions, signature verification
+   decisions, tenant policy packs, quorum approval, break-glass, audit export
+   records, tenant policy pack records, P1 execution-readiness profile records,
+   P1 execution audit bundles, compliance export bundles, production adapter
+   evidence, adapter verification decisions, rotation enforcement decisions,
+   compliance export delivery decisions, and fail-closed production readiness
+   gates.
 14. Build `moxi-hotpath` as the first low-latency control plane for ack,
    early-deny, route, exact/template cache hit, degrade plans, latency samples,
    p50/p95/p99 snapshots, and hot-path facts.

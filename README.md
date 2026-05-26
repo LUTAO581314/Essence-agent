@@ -586,17 +586,21 @@ commit.
 `moxi-vault` is a control-plane MVP, not a production HSM or secret manager. It
 keeps raw secret material out of the model/log/ledger path, can assemble
 redacted local compliance export bundles, verifies compliance export delivery
-evidence against the bundle hash, and now evaluates a fail-closed P1
-execution-readiness decision plus production readiness decisions over trust-root,
-quorum, break-glass, audit-export, auth, secret-manager, crypto-verifier,
-sandbox, secret-injection, and rotation evidence. Production adapter evidence,
-credential rotation refs, and compliance export delivery receipts are verified
-into tenant-bound decisions before readiness or review can cite them. P1 may
-only enter the P0 execution chain when that readiness decision is ready; it
-still cannot issue tickets, execute without P0, verify, or commit. Real cryptographic verification,
-OS credential injection, HSM/KMS integration, production secret rotation
-adapters, and real external trust-root/compliance storage backends still require
-concrete external adapters before production exposure.
+evidence against the bundle hash, verifies secret injection evidence into a
+decision bound to an allowed `SecretUseDecision`, an executor-injected
+credential, hardened sandbox and injection profiles, a verified injection
+adapter decision, executor ref, and receipt, and now evaluates a fail-closed P1
+execution-readiness decision plus production readiness decisions over
+trust-root, quorum, break-glass, audit-export, auth, secret-manager,
+crypto-verifier, sandbox, secret-injection, and rotation evidence. Production
+adapter evidence, credential rotation refs, secret injection receipts, and
+compliance export delivery receipts are verified into tenant-bound decisions
+before readiness or review can cite them. P1 may only enter the P0 execution
+chain when that readiness decision is ready; it still cannot issue tickets,
+execute without P0, verify, or commit. Real cryptographic verification, OS
+credential injection, HSM/KMS integration, production secret rotation adapters,
+and real external trust-root/compliance storage backends still require concrete
+external adapters before production exposure.
 
 `process_sandbox` is a runnable v0 JSON protocol boundary. It is not yet
 production OS isolation; enabling executable external actions in production is

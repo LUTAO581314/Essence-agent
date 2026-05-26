@@ -102,11 +102,11 @@ a Rust workspace with twenty library crates:
   evidence refs, and human approval for protected or high-risk deltas before
   rollout planning.
 - `moxi-vault`: first P0 production-hardening control plane. It defines
-  credential references, secret-use requests/decisions, tenant trust roots,
-  sealed trust-root records, executor signature verification decisions, tenant
-  policy packs, sealed tenant policy records, quorum approvals, break-glass
-  decisions, and redacted audit
-  export records without storing raw secret material. It now also defines P1
+  credential references, secret-use requests/decisions, secret injection
+  evidence/decisions, tenant trust roots, sealed trust-root records, executor
+  signature verification decisions, tenant policy packs, sealed tenant policy
+  records, quorum approvals, break-glass decisions, and redacted audit export
+  records without storing raw secret material. It now also defines P1
   execution-readiness profiles, tenant-policy-record-bound profile records,
   requests, decisions, redacted P1 readiness audit exports, typed P1 execution
   audit bundles, and redacted compliance export bundles so bounded P1 runtime
@@ -267,10 +267,14 @@ secret injection, rotation, tenant policy, executor trust-root, and compliance
 audit-export evidence before credentialed or executable production enablement.
 Production adapter evidence is now verified into tenant-bound
 `ProductionAdapterVerificationDecision` records, credential rotation refs are
-verified into `RotationEnforcementDecision` records, trust-root external storage
-receipts are verified into `TrustRootStorageDecision` records, and production
-readiness requires every adapter evidence item and configured credential
-rotation ref to bind to its matching verified decision.
+verified into `RotationEnforcementDecision` records, secret injection receipts
+are verified into `SecretInjectionDecision` records bound to allowed
+`SecretUseDecision` values, executor-injected credentials, hardened sandbox
+profiles, verified injection adapter decisions, executor refs, and receipts,
+trust-root external storage receipts are verified into
+`TrustRootStorageDecision` records, and production readiness requires every
+adapter evidence item and configured credential rotation ref to bind to its
+matching verified decision.
 P1 execution audit bundles now bind the runtime request, sealed profile record,
 readiness decision, optional production readiness ref, redaction profile, and
 evidence refs for review without granting ticket, execution, verification, or
@@ -581,6 +585,7 @@ P0 boundary decisions:
   `BreakGlassDecision`, `AuditExportRecord`,
   `ProductionHardeningEvidence`, `ProductionAdapterEvidence`,
   `ProductionAdapterVerificationDecision`, `RotationEnforcementDecision`,
+  `SecretInjectionEvidence`, `SecretInjectionDecision`,
   `ComplianceExportDeliveryEvidence`, `ComplianceExportDeliveryDecision`, and
   `ProductionReadinessDecision`,
   plus `P1ExecutionReadinessProfile`, `P1ExecutionReadinessProfileRecord`,
@@ -594,7 +599,10 @@ P0 boundary decisions:
   audit records, P1 execution audit bundles, and local compliance export
   bundles, rejects placeholder adapter evidence, verifies adapter evidence into
   tenant-bound decisions, verifies credential rotation refs into tenant-bound
-  decisions, verifies compliance export delivery evidence against bundle hashes
+  decisions, verifies secret injection receipts into tenant-bound decisions
+  bound to allowed secret-use decisions, executor-injected credentials,
+  hardened sandbox profiles, verified injection adapter decisions, executor
+  refs, and receipts, verifies compliance export delivery evidence against bundle hashes
   into tenant-bound decisions, blocks production readiness until all P0
   hardening gates have
   tenant-bound adapter/rotation evidence and matching verified decisions,

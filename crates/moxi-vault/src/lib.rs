@@ -87,6 +87,13 @@ pub enum RotationEnforcementDecisionKind {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
+pub enum SecretInjectionDecisionKind {
+    Verified,
+    Rejected,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
 pub enum ComplianceExportDeliveryDecisionKind {
     Verified,
     Rejected,
@@ -211,6 +218,38 @@ pub struct SecretUseDecision {
     pub raw_secret_visible_to_logs: bool,
     pub raw_secret_persisted: bool,
     pub decided_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SecretInjectionEvidence {
+    pub evidence_id: String,
+    pub tenant_id: String,
+    pub credential_id: String,
+    pub secret_use_decision_id: String,
+    pub secret_injection_profile_ref: String,
+    pub hardened_sandbox_profile_ref: String,
+    pub adapter_decision_ref: String,
+    pub injection_receipt_ref: String,
+    pub executor_ref: String,
+    pub run_id: String,
+    pub attestation_ref: String,
+    pub delivered_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SecretInjectionDecision {
+    pub decision_id: String,
+    pub tenant_id: String,
+    pub credential_id: String,
+    pub secret_use_decision_id: String,
+    pub secret_injection_profile_ref: String,
+    pub hardened_sandbox_profile_ref: String,
+    pub decision: SecretInjectionDecisionKind,
+    pub reasons: Vec<String>,
+    pub evidence_refs: Vec<String>,
+    pub verified_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
 }
 
@@ -1759,6 +1798,147 @@ impl VaultController {
         }
     }
 
+    pub fn verify_secret_injection(
+        credential: &CredentialRef,
+        secret_use: &SecretUseDecision,
+        hardening: &ProductionHardeningEvidence,
+        adapter_decision: &ProductionAdapterVerificationDecision,
+        evidence: &SecretInjectionEvidence,
+    ) -> SecretInjectionDecision {
+        let mut reasons = Vec::new();
+        let mut evidence_refs = vec![
+            credential.credential_id.clone(),
+            secret_use.decision_id.clone(),
+            adapter_decision.decision_id.clone(),
+            evidence.evidence_id.clone(),
+            evidence.injection_receipt_ref.clone(),
+            evidence.executor_ref.clone(),
+            evidence.run_id.clone(),
+            evidence.attestation_ref.clone(),
+        ];
+        evidence_refs.extend(secret_use.evidence_refs.clone());
+        evidence_refs.extend(hardening.evidence_refs.clone());
+        evidence_refs.extend(adapter_decision.evidence_refs.clone());
+
+        if credential.tenant_id != evidence.tenant_id
+            || credential.tenant_id != hardening.tenant_id
+            || credential.tenant_id != adapter_decision.tenant_id
+        {
+            reasons.push(
+                "credential, hardening, adapter decision, and injection evidence must share a tenant"
+                    .into(),
+            );
+        }
+        if secret_use.credential_id != credential.credential_id
+            || evidence.credential_id != credential.credential_id
+        {
+            reasons.push("secret injection evidence is not bound to the credential".into());
+        }
+        if evidence.secret_use_decision_id != secret_use.decision_id {
+            reasons
+                .push("secret injection evidence is not bound to the secret-use decision".into());
+        }
+        if secret_use.decision != SecretUseDecisionKind::Allowed {
+            reasons.push("secret-use decision must be allowed before injection".into());
+        }
+        if secret_use.raw_secret_visible_to_model
+            || secret_use.raw_secret_visible_to_logs
+            || secret_use.raw_secret_persisted
+        {
+            reasons.push("secret-use decision exposes or persists raw secret material".into());
+        }
+        if credential.material_policy != SecretMaterialPolicy::ExecutorInjected {
+            reasons.push("credential material policy must require executor injection".into());
+        }
+
+        let hardening_injection_ref = hardening.secret_injection_profile_ref.as_deref();
+        let hardening_sandbox_ref = hardening.hardened_sandbox_profile_ref.as_deref();
+        if hardening_injection_ref.is_none_or(is_placeholder_ref) {
+            reasons.push("production secret injection profile is not configured".into());
+        }
+        if hardening_sandbox_ref.is_none_or(is_placeholder_ref) {
+            reasons.push("production hardened sandbox profile is not configured".into());
+        }
+        if hardening_injection_ref != Some(evidence.secret_injection_profile_ref.as_str()) {
+            reasons
+                .push("injection evidence does not match the hardening injection profile".into());
+        }
+        if hardening_sandbox_ref != Some(evidence.hardened_sandbox_profile_ref.as_str()) {
+            reasons.push("injection evidence does not match the hardening sandbox profile".into());
+        }
+
+        if adapter_decision.decision != ProductionAdapterVerificationKind::Verified {
+            reasons.push("secret injection adapter decision must be verified".into());
+        }
+        if adapter_decision.kind != ProductionAdapterKind::SecretInjection {
+            reasons.push("adapter decision must be for the secret injection adapter".into());
+        }
+        if adapter_decision.provider_ref != evidence.secret_injection_profile_ref {
+            reasons.push("adapter decision provider does not match injection profile".into());
+        }
+        if evidence.adapter_decision_ref != adapter_decision.decision_id {
+            reasons.push("injection evidence is not bound to the adapter decision".into());
+        }
+        if evidence.delivered_at >= evidence.expires_at || evidence.expires_at <= Utc::now() {
+            reasons.push("secret injection evidence is expired or invalid".into());
+        }
+        if [
+            evidence.evidence_id.as_str(),
+            evidence.secret_injection_profile_ref.as_str(),
+            evidence.hardened_sandbox_profile_ref.as_str(),
+            evidence.adapter_decision_ref.as_str(),
+            evidence.injection_receipt_ref.as_str(),
+            evidence.executor_ref.as_str(),
+            evidence.run_id.as_str(),
+            evidence.attestation_ref.as_str(),
+        ]
+        .iter()
+        .any(|value| is_placeholder_ref(value))
+        {
+            reasons.push("secret injection evidence contains placeholder refs".into());
+        }
+
+        evidence_refs.push(evidence.secret_injection_profile_ref.clone());
+        evidence_refs.push(evidence.hardened_sandbox_profile_ref.clone());
+        evidence_refs.push(evidence.adapter_decision_ref.clone());
+        evidence_refs.sort();
+        evidence_refs.dedup();
+        reasons.sort();
+        reasons.dedup();
+
+        let decision = if reasons.is_empty() {
+            reasons.push("secret injection evidence is verified".into());
+            SecretInjectionDecisionKind::Verified
+        } else {
+            SecretInjectionDecisionKind::Rejected
+        };
+
+        SecretInjectionDecision {
+            decision_id: stable_id(
+                "secret_injection",
+                &(
+                    credential.tenant_id.as_str(),
+                    credential.credential_id.as_str(),
+                    secret_use.decision_id.as_str(),
+                    evidence.evidence_id.as_str(),
+                    evidence.injection_receipt_ref.as_str(),
+                    &decision,
+                    &evidence_refs,
+                ),
+            ),
+            tenant_id: credential.tenant_id.clone(),
+            credential_id: credential.credential_id.clone(),
+            secret_use_decision_id: secret_use.decision_id.clone(),
+            secret_injection_profile_ref: evidence.secret_injection_profile_ref.clone(),
+            hardened_sandbox_profile_ref: evidence.hardened_sandbox_profile_ref.clone(),
+            decision,
+            reasons,
+            evidence_refs,
+            verified_at: Utc::now(),
+            expires_at: evidence.expires_at,
+        }
+    }
+
     pub fn evaluate_production_readiness(
         policy: &TenantPolicyPack,
         credentials: &[CredentialRef],
@@ -2601,6 +2781,28 @@ mod tests {
             .iter()
             .map(VaultController::verify_production_adapter_evidence)
             .collect()
+    }
+
+    fn secret_injection_evidence(
+        credential: &CredentialRef,
+        secret_use: &SecretUseDecision,
+        adapter_decision: &ProductionAdapterVerificationDecision,
+    ) -> SecretInjectionEvidence {
+        SecretInjectionEvidence {
+            evidence_id: "secret.injection.evidence.1".into(),
+            tenant_id: credential.tenant_id.clone(),
+            credential_id: credential.credential_id.clone(),
+            secret_use_decision_id: secret_use.decision_id.clone(),
+            secret_injection_profile_ref: "injector://tenant.a/prod".into(),
+            hardened_sandbox_profile_ref: "container://tenant.a/hardened-v1".into(),
+            adapter_decision_ref: adapter_decision.decision_id.clone(),
+            injection_receipt_ref: "receipt://tenant.a/secret-injection/run.1".into(),
+            executor_ref: "executor://tenant.a/hardened-runner".into(),
+            run_id: "run.1".into(),
+            attestation_ref: "attestation://tenant.a/secret-injection/2026-05".into(),
+            delivered_at: Utc::now(),
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+        }
     }
 
     fn compliance_delivery_evidence(
@@ -3750,6 +3952,115 @@ mod tests {
 
         assert_eq!(rejected.decision, RotationEnforcementDecisionKind::Rejected);
         assert!(!rejected.reasons.is_empty());
+    }
+
+    #[test]
+    fn secret_injection_decision_is_secret_use_and_sandbox_bound_fail_closed() {
+        let credential = credential();
+        let secret_use = VaultController::decide_secret_use(
+            &credential,
+            &secret_request(RiskLevel::High),
+            Some(&approval("secret.req.1")),
+        )
+        .unwrap();
+        let hardening = hardening_evidence();
+        let adapter_decision =
+            VaultController::verify_production_adapter_evidence(&adapter_evidence(
+                ProductionAdapterKind::SecretInjection,
+                "injector://tenant.a/prod",
+            ));
+        let evidence = secret_injection_evidence(&credential, &secret_use, &adapter_decision);
+        let decision = VaultController::verify_secret_injection(
+            &credential,
+            &secret_use,
+            &hardening,
+            &adapter_decision,
+            &evidence,
+        );
+
+        assert_eq!(decision.decision, SecretInjectionDecisionKind::Verified);
+        assert_eq!(decision.tenant_id, credential.tenant_id);
+        assert_eq!(decision.credential_id, credential.credential_id);
+        assert_eq!(decision.secret_use_decision_id, secret_use.decision_id);
+        assert_eq!(
+            decision.secret_injection_profile_ref,
+            "injector://tenant.a/prod"
+        );
+        assert_eq!(
+            decision.hardened_sandbox_profile_ref,
+            "container://tenant.a/hardened-v1"
+        );
+        assert!(decision.evidence_refs.contains(&secret_use.decision_id));
+        assert!(decision
+            .evidence_refs
+            .contains(&adapter_decision.decision_id));
+        assert!(decision
+            .evidence_refs
+            .contains(&evidence.injection_receipt_ref));
+
+        let mut denied_secret_use = secret_use.clone();
+        denied_secret_use.decision = SecretUseDecisionKind::Denied;
+        let rejected_secret_use = VaultController::verify_secret_injection(
+            &credential,
+            &denied_secret_use,
+            &hardening,
+            &adapter_decision,
+            &evidence,
+        );
+        assert_eq!(
+            rejected_secret_use.decision,
+            SecretInjectionDecisionKind::Rejected
+        );
+        assert!(!rejected_secret_use.reasons.is_empty());
+
+        let mut placeholder_receipt = evidence.clone();
+        placeholder_receipt.injection_receipt_ref = "mock-receipt".into();
+        let rejected_receipt = VaultController::verify_secret_injection(
+            &credential,
+            &secret_use,
+            &hardening,
+            &adapter_decision,
+            &placeholder_receipt,
+        );
+        assert_eq!(
+            rejected_receipt.decision,
+            SecretInjectionDecisionKind::Rejected
+        );
+        assert!(!rejected_receipt.reasons.is_empty());
+
+        let mut profile_mismatch = evidence.clone();
+        profile_mismatch.secret_injection_profile_ref = "injector://tenant.a/other".into();
+        let rejected_profile = VaultController::verify_secret_injection(
+            &credential,
+            &secret_use,
+            &hardening,
+            &adapter_decision,
+            &profile_mismatch,
+        );
+        assert_eq!(
+            rejected_profile.decision,
+            SecretInjectionDecisionKind::Rejected
+        );
+        assert!(!rejected_profile.reasons.is_empty());
+
+        let wrong_adapter = VaultController::verify_production_adapter_evidence(&adapter_evidence(
+            ProductionAdapterKind::HardenedSandbox,
+            "container://tenant.a/hardened-v1",
+        ));
+        let mut wrong_adapter_evidence = evidence;
+        wrong_adapter_evidence.adapter_decision_ref = wrong_adapter.decision_id.clone();
+        let rejected_adapter = VaultController::verify_secret_injection(
+            &credential,
+            &secret_use,
+            &hardening,
+            &wrong_adapter,
+            &wrong_adapter_evidence,
+        );
+        assert_eq!(
+            rejected_adapter.decision,
+            SecretInjectionDecisionKind::Rejected
+        );
+        assert!(!rejected_adapter.reasons.is_empty());
     }
 
     #[test]

@@ -150,15 +150,17 @@ now pass locally.
   `CredentialRef`, `SecretUseRequest`, `SecretUseDecision`, `TrustRoot`,
   `ExecutorSignature`, `SignatureVerificationDecision`, `TenantPolicyPack`,
   `QuorumApproval`, `BreakGlassRequest`, `BreakGlassDecision`, and
-  `AuditExportRecord`, enforcing reference-only secrets, quorum gates,
-  tenant trust-root checks, redacted audit export metadata, and a
+  `AuditExportRecord`, plus sealed `TenantPolicyPackRecord` values, enforcing
+  reference-only secrets, quorum gates, tenant trust-root checks, redacted audit
+  export metadata, and a
   fail-closed `P1ExecutionReadinessDecision` gate plus
   `ProductionAdapterEvidence` / `ProductionReadinessDecision` gates over
   production auth, external secret manager, crypto verifier, hardened sandbox,
   secret injection, rotation, tenant policy, executor trust roots, and
-  compliance export evidence. It can seal P1 execution-readiness profiles into
-  tenant-policy-bound `P1ExecutionReadinessProfileRecord` values, reload them
-  with profile-hash validation, and export redacted P1 readiness audit records
+  compliance export evidence. It can seal tenant policy packs with stable
+  hashes, then seal P1 execution-readiness profiles into
+  tenant-policy-record-bound `P1ExecutionReadinessProfileRecord` values, reload
+  them with policy/profile hash validation, and export redacted P1 readiness audit records
   plus `P1ExecutionAuditBundle` values binding the runtime request, profile
   record, readiness decision, optional production readiness ref, redaction
   profile, and evidence refs for review.
@@ -520,8 +522,9 @@ publishable docs:
   high-risk work without production-ready P0 evidence, and explicitly never
   grants P1 direct ticketing or execution authority.
 - P1 execution-readiness profiles can be sealed against tenant policy pack refs
-  as `P1ExecutionReadinessProfileRecord` values, reloaded with profile-hash and
-  tenant checks, and included in redacted audit exports and typed
+  and sealed `TenantPolicyPackRecord` refs as
+  `P1ExecutionReadinessProfileRecord` values, reloaded with policy/profile hash
+  and tenant checks, and included in redacted audit exports and typed
   `P1ExecutionAuditBundle` records for P0/P1 execution interlock review.
   Bundles bind the runtime request, profile record, readiness decision, optional
   production readiness ref, redaction profile, and evidence refs, while still

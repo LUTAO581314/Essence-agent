@@ -229,6 +229,19 @@ pub struct TenantPolicyPack {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TenantPolicyPackRecord {
+    pub record_id: String,
+    pub tenant_id: String,
+    pub pack_id: String,
+    pub policy_version: String,
+    pub policy_hash: String,
+    pub policy: TenantPolicyPack,
+    pub evidence_refs: Vec<String>,
+    pub sealed_by: String,
+    pub sealed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct QuorumApproval {
     pub approval_id: String,
     pub request_ref: String,
@@ -341,6 +354,8 @@ pub struct P1ExecutionReadinessProfileRecord {
     pub tenant_id: String,
     pub profile_id: String,
     pub tenant_policy_pack_ref: String,
+    pub tenant_policy_record_ref: String,
+    pub tenant_policy_hash: String,
     pub production_readiness_ref: Option<String>,
     pub profile_hash: String,
     pub profile: P1ExecutionReadinessProfile,
@@ -425,6 +440,8 @@ pub struct P1ExecutionAuditBundle {
     pub request_id: String,
     pub profile_record_ref: String,
     pub tenant_policy_pack_ref: String,
+    pub tenant_policy_record_ref: String,
+    pub tenant_policy_hash: String,
     pub production_readiness_ref: Option<String>,
     pub readiness_decision_ref: String,
     pub audit_export_ref: String,
@@ -712,12 +729,79 @@ impl VaultController {
         })
     }
 
+    pub fn seal_tenant_policy_pack(
+        policy: TenantPolicyPack,
+        evidence_refs: Vec<String>,
+        sealed_by: impl Into<String>,
+    ) -> Result<TenantPolicyPackRecord, VaultError> {
+        if policy.credential_scope_refs.is_empty() || evidence_refs.is_empty() {
+            return Err(VaultError::MissingEvidence);
+        }
+        let policy_hash = stable_id("tenant_policy_hash", &policy);
+        let mut combined_evidence = evidence_refs;
+        combined_evidence.push(policy.pack_id.clone());
+        combined_evidence.extend(policy.credential_scope_refs.clone());
+        combined_evidence.sort();
+        combined_evidence.dedup();
+
+        Ok(TenantPolicyPackRecord {
+            record_id: stable_id(
+                "tenant_policy_record",
+                &(
+                    policy.tenant_id.as_str(),
+                    policy.pack_id.as_str(),
+                    policy.policy_version.as_str(),
+                    policy_hash.as_str(),
+                    &combined_evidence,
+                ),
+            ),
+            tenant_id: policy.tenant_id.clone(),
+            pack_id: policy.pack_id.clone(),
+            policy_version: policy.policy_version.clone(),
+            policy_hash,
+            policy,
+            evidence_refs: combined_evidence,
+            sealed_by: sealed_by.into(),
+            sealed_at: Utc::now(),
+        })
+    }
+
+    pub fn load_tenant_policy_pack(
+        record: &TenantPolicyPackRecord,
+    ) -> Result<TenantPolicyPack, VaultError> {
+        if record.evidence_refs.is_empty() || record.policy.credential_scope_refs.is_empty() {
+            return Err(VaultError::MissingEvidence);
+        }
+        if record.tenant_id != record.policy.tenant_id
+            || record.pack_id != record.policy.pack_id
+            || record.policy_version != record.policy.policy_version
+        {
+            return Err(VaultError::TenantMismatch);
+        }
+        let expected_hash = stable_id("tenant_policy_hash", &record.policy);
+        if record.policy_hash != expected_hash {
+            return Err(VaultError::MissingEvidence);
+        }
+
+        Ok(record.policy.clone())
+    }
+
     pub fn seal_p1_execution_readiness_profile(
         policy: &TenantPolicyPack,
         profile: P1ExecutionReadinessProfile,
         sealed_by: impl Into<String>,
     ) -> Result<P1ExecutionReadinessProfileRecord, VaultError> {
-        Self::seal_p1_execution_readiness_profile_record(policy, profile, None, sealed_by)
+        let policy_record = Self::seal_tenant_policy_pack(
+            policy.clone(),
+            policy.credential_scope_refs.clone(),
+            "vault.policy.compat",
+        )?;
+        Self::seal_p1_execution_readiness_profile_with_policy_record(
+            &policy_record,
+            profile,
+            None,
+            sealed_by,
+        )
     }
 
     pub fn seal_production_p1_execution_readiness_profile(
@@ -726,20 +810,26 @@ impl VaultController {
         production_readiness: &ProductionReadinessDecision,
         sealed_by: impl Into<String>,
     ) -> Result<P1ExecutionReadinessProfileRecord, VaultError> {
-        Self::seal_p1_execution_readiness_profile_record(
-            policy,
+        let policy_record = Self::seal_tenant_policy_pack(
+            policy.clone(),
+            policy.credential_scope_refs.clone(),
+            "vault.policy.compat",
+        )?;
+        Self::seal_p1_execution_readiness_profile_with_policy_record(
+            &policy_record,
             profile,
             Some(production_readiness),
             sealed_by,
         )
     }
 
-    fn seal_p1_execution_readiness_profile_record(
-        policy: &TenantPolicyPack,
+    pub fn seal_p1_execution_readiness_profile_with_policy_record(
+        policy_record: &TenantPolicyPackRecord,
         profile: P1ExecutionReadinessProfile,
         production_readiness: Option<&ProductionReadinessDecision>,
         sealed_by: impl Into<String>,
     ) -> Result<P1ExecutionReadinessProfileRecord, VaultError> {
+        let policy = Self::load_tenant_policy_pack(policy_record)?;
         if profile.evidence_refs.is_empty() || policy.credential_scope_refs.is_empty() {
             return Err(VaultError::MissingEvidence);
         }
@@ -764,7 +854,10 @@ impl VaultController {
         let profile_hash = stable_id("p1_execution_profile_hash", &profile);
         let mut evidence_refs = profile.evidence_refs.clone();
         evidence_refs.push(policy.pack_id.clone());
+        evidence_refs.push(policy_record.record_id.clone());
+        evidence_refs.push(policy_record.policy_hash.clone());
         evidence_refs.extend(policy.credential_scope_refs.clone());
+        evidence_refs.extend(policy_record.evidence_refs.clone());
         if let Some(production_readiness) = production_readiness {
             if production_readiness.tenant_id != policy.tenant_id {
                 return Err(VaultError::TenantMismatch);
@@ -782,6 +875,8 @@ impl VaultController {
                 "p1_execution_profile_record",
                 &(
                     policy.pack_id.as_str(),
+                    policy_record.record_id.as_str(),
+                    policy_record.policy_hash.as_str(),
                     profile.profile_id.as_str(),
                     profile_hash.as_str(),
                     &evidence_refs,
@@ -790,6 +885,8 @@ impl VaultController {
             tenant_id: profile.tenant_id.clone(),
             profile_id: profile.profile_id.clone(),
             tenant_policy_pack_ref: policy.pack_id.clone(),
+            tenant_policy_record_ref: policy_record.record_id.clone(),
+            tenant_policy_hash: policy_record.policy_hash.clone(),
             production_readiness_ref,
             profile_hash,
             profile,
@@ -803,14 +900,31 @@ impl VaultController {
         record: &P1ExecutionReadinessProfileRecord,
         policy: &TenantPolicyPack,
     ) -> Result<P1ExecutionReadinessProfile, VaultError> {
+        let policy_record = Self::seal_tenant_policy_pack(
+            policy.clone(),
+            policy.credential_scope_refs.clone(),
+            "vault.policy.compat",
+        )?;
+        Self::load_p1_execution_readiness_profile_with_policy_record(record, &policy_record)
+    }
+
+    pub fn load_p1_execution_readiness_profile_with_policy_record(
+        record: &P1ExecutionReadinessProfileRecord,
+        policy_record: &TenantPolicyPackRecord,
+    ) -> Result<P1ExecutionReadinessProfile, VaultError> {
+        let policy = Self::load_tenant_policy_pack(policy_record)?;
         if record.evidence_refs.is_empty() {
             return Err(VaultError::MissingEvidence);
         }
         if record.tenant_id != policy.tenant_id
             || record.profile.tenant_id != policy.tenant_id
             || record.tenant_policy_pack_ref != policy.pack_id
+            || record.tenant_policy_record_ref != policy_record.record_id
         {
             return Err(VaultError::TenantMismatch);
+        }
+        if record.tenant_policy_hash != policy_record.policy_hash {
+            return Err(VaultError::MissingEvidence);
         }
         let expected_hash = stable_id("p1_execution_profile_hash", &record.profile);
         if record.profile_hash != expected_hash || record.profile_id != record.profile.profile_id {
@@ -897,6 +1011,8 @@ impl VaultController {
         evidence_refs.extend(audit_export.event_refs.clone());
         evidence_refs.push(profile_record.record_id.clone());
         evidence_refs.push(profile_record.tenant_policy_pack_ref.clone());
+        evidence_refs.push(profile_record.tenant_policy_record_ref.clone());
+        evidence_refs.push(profile_record.tenant_policy_hash.clone());
         evidence_refs.push(decision.decision_id.clone());
         evidence_refs.push(audit_export.export_id.clone());
         evidence_refs.push(audit_export.export_hash.clone());
@@ -938,6 +1054,8 @@ impl VaultController {
             request_id: request.request_id.clone(),
             profile_record_ref: profile_record.record_id.clone(),
             tenant_policy_pack_ref: profile_record.tenant_policy_pack_ref.clone(),
+            tenant_policy_record_ref: profile_record.tenant_policy_record_ref.clone(),
+            tenant_policy_hash: profile_record.tenant_policy_hash.clone(),
             production_readiness_ref: profile_record.production_readiness_ref.clone(),
             readiness_decision_ref: decision.decision_id.clone(),
             audit_export_ref: audit_export.export_id.clone(),
@@ -1707,22 +1825,75 @@ mod tests {
     }
 
     #[test]
-    fn p1_execution_profile_record_roundtrips_with_policy_binding() {
+    fn tenant_policy_pack_record_roundtrips_with_hash_binding() {
         let policy = tenant_policy();
-        let profile = P1ExecutionReadinessProfile::local_read_only("tenant.a");
-        let record = VaultController::seal_p1_execution_readiness_profile(
-            &policy,
-            profile.clone(),
+        let record = VaultController::seal_tenant_policy_pack(
+            policy.clone(),
+            vec!["policy.approved.1".into()],
             "vault.controller",
         )
         .unwrap();
 
-        let loaded =
-            VaultController::load_p1_execution_readiness_profile(&record, &policy).unwrap();
+        let loaded = VaultController::load_tenant_policy_pack(&record).unwrap();
+
+        assert_eq!(loaded, policy);
+        assert_eq!(record.tenant_id, "tenant.a");
+        assert_eq!(record.pack_id, "tenant.policy.1");
+        assert!(record.policy_hash.starts_with("tenant_policy_hash."));
+        assert!(record.evidence_refs.contains(&"policy.approved.1".into()));
+        assert!(record.evidence_refs.contains(&"cred.github".into()));
+    }
+
+    #[test]
+    fn tenant_policy_pack_record_rejects_tamper_and_missing_evidence() {
+        let policy = tenant_policy();
+        let missing_error =
+            VaultController::seal_tenant_policy_pack(policy.clone(), vec![], "vault.controller")
+                .unwrap_err();
+        assert_eq!(missing_error, VaultError::MissingEvidence);
+
+        let mut record = VaultController::seal_tenant_policy_pack(
+            policy,
+            vec!["policy.approved.1".into()],
+            "vault.controller",
+        )
+        .unwrap();
+        record.policy.quorum_approvers = 1;
+
+        let tamper_error = VaultController::load_tenant_policy_pack(&record).unwrap_err();
+        assert_eq!(tamper_error, VaultError::MissingEvidence);
+    }
+
+    #[test]
+    fn p1_execution_profile_record_roundtrips_with_policy_binding() {
+        let policy = tenant_policy();
+        let policy_record = VaultController::seal_tenant_policy_pack(
+            policy.clone(),
+            vec!["policy.approved.1".into()],
+            "vault.controller",
+        )
+        .unwrap();
+        let profile = P1ExecutionReadinessProfile::local_read_only("tenant.a");
+        let record = VaultController::seal_p1_execution_readiness_profile_with_policy_record(
+            &policy_record,
+            profile.clone(),
+            None,
+            "vault.controller",
+        )
+        .unwrap();
+
+        let loaded = VaultController::load_p1_execution_readiness_profile_with_policy_record(
+            &record,
+            &policy_record,
+        )
+        .unwrap();
 
         assert_eq!(loaded, profile);
         assert_eq!(record.tenant_policy_pack_ref, policy.pack_id);
+        assert_eq!(record.tenant_policy_record_ref, policy_record.record_id);
+        assert_eq!(record.tenant_policy_hash, policy_record.policy_hash);
         assert!(record.evidence_refs.contains(&"cred.github".into()));
+        assert!(record.evidence_refs.contains(&"policy.approved.1".into()));
         assert!(record
             .profile_hash
             .starts_with("p1_execution_profile_hash."));
@@ -1731,29 +1902,48 @@ mod tests {
     #[test]
     fn p1_execution_profile_record_rejects_tamper_and_cross_tenant_policy() {
         let policy = tenant_policy();
-        let profile = P1ExecutionReadinessProfile::local_read_only("tenant.a");
-        let mut record = VaultController::seal_p1_execution_readiness_profile(
-            &policy,
-            profile,
+        let policy_record = VaultController::seal_tenant_policy_pack(
+            policy.clone(),
+            vec!["policy.approved.1".into()],
             "vault.controller",
         )
         .unwrap();
-        record
+        let profile = P1ExecutionReadinessProfile::local_read_only("tenant.a");
+        let record = VaultController::seal_p1_execution_readiness_profile_with_policy_record(
+            &policy_record,
+            profile,
+            None,
+            "vault.controller",
+        )
+        .unwrap();
+        let mut tampered_record = record.clone();
+        tampered_record
             .profile
             .allowed_capabilities
             .push("network.http".into());
 
-        let tamper_error =
-            VaultController::load_p1_execution_readiness_profile(&record, &policy).unwrap_err();
+        let tamper_error = VaultController::load_p1_execution_readiness_profile_with_policy_record(
+            &tampered_record,
+            &policy_record,
+        )
+        .unwrap_err();
         assert_eq!(tamper_error, VaultError::MissingEvidence);
 
         let other_policy = TenantPolicyPack {
             tenant_id: "tenant.b".into(),
             ..tenant_policy()
         };
-        let tenant_error =
-            VaultController::load_p1_execution_readiness_profile(&record, &other_policy)
-                .unwrap_err();
+        let other_policy_record = VaultController::seal_tenant_policy_pack(
+            other_policy,
+            vec!["policy.approved.other".into()],
+            "vault.controller",
+        )
+        .unwrap();
+        let tenant_error = VaultController::load_p1_execution_readiness_profile_with_policy_record(
+            &record,
+            &other_policy_record,
+        )
+        .unwrap_err();
         assert_eq!(tenant_error, VaultError::TenantMismatch);
     }
 
@@ -1943,6 +2133,11 @@ mod tests {
         assert_eq!(bundle.run_id, request.run_id);
         assert_eq!(bundle.profile_record_ref, record.record_id);
         assert_eq!(bundle.tenant_policy_pack_ref, policy.pack_id);
+        assert_eq!(
+            bundle.tenant_policy_record_ref,
+            record.tenant_policy_record_ref
+        );
+        assert_eq!(bundle.tenant_policy_hash, record.tenant_policy_hash);
         assert_eq!(bundle.readiness_decision_ref, decision.decision_id);
         assert_eq!(bundle.audit_export_ref, audit.export_id);
         assert_eq!(bundle.redaction_profile_ref, "redaction.compliance.v1");
@@ -1955,6 +2150,7 @@ mod tests {
             .bundle_hash
             .starts_with("p1_execution_audit_bundle_hash."));
         assert!(bundle.evidence_refs.contains(&"runtime.task.1".into()));
+        assert!(bundle.evidence_refs.contains(&record.tenant_policy_hash));
         assert!(bundle.evidence_refs.contains(&audit.export_hash));
     }
 

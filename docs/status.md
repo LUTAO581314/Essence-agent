@@ -103,10 +103,11 @@ a Rust workspace with twenty library crates:
   rollout planning.
 - `moxi-vault`: first P0 production-hardening control plane. It defines
   credential references, secret-use requests/decisions, tenant trust roots,
-  executor signature verification decisions, tenant policy packs, quorum
-  approvals, break-glass decisions, and redacted audit export records without
-  storing raw secret material. It now also defines P1 execution-readiness
-  profiles, tenant-policy-bound profile records, requests, decisions, and
+  executor signature verification decisions, tenant policy packs, sealed tenant
+  policy records, quorum approvals, break-glass decisions, and redacted audit
+  export records without storing raw secret material. It now also defines P1
+  execution-readiness profiles, tenant-policy-record-bound profile records,
+  requests, decisions, and
   redacted P1 readiness audit exports plus typed P1 execution audit bundles so
   bounded P1 runtime tasks can enter the P0 execution chain only when
   explicitly allowed and later review the request/profile/decision evidence.
@@ -559,8 +560,9 @@ P0 boundary decisions:
   protected/high-risk deltas before rollout planning.
 - P0 production-hardening MVP: `moxi-vault` exposes `CredentialRef`,
   `SecretUseRequest`, `SecretUseDecision`, `TrustRoot`, `ExecutorSignature`,
-  `SignatureVerificationDecision`, `TenantPolicyPack`, `QuorumApproval`,
-  `BreakGlassRequest`, `BreakGlassDecision`, `AuditExportRecord`,
+  `SignatureVerificationDecision`, `TenantPolicyPack`,
+  `TenantPolicyPackRecord`, `QuorumApproval`, `BreakGlassRequest`,
+  `BreakGlassDecision`, `AuditExportRecord`,
   `ProductionHardeningEvidence`, `ProductionAdapterEvidence`, and
   `ProductionReadinessDecision`, plus `P1ExecutionReadinessProfile`,
   `P1ExecutionReadinessProfileRecord`, `P1ExecutionReadinessRequest`, and
@@ -570,9 +572,10 @@ P0 boundary decisions:
   decisions to tenant ids, exports redacted audit records and P1 execution
   audit bundles, rejects placeholder adapter evidence, blocks
   production readiness until all P0 hardening gates have tenant-bound adapter
-  evidence, seals P1 execution profiles against tenant policy pack refs and
-  profile hashes, requires ready production readiness before sealing production
-  or credential-capable P1 profiles, and blocks P1 runtime tasks before ticket
+  evidence, seals tenant policy packs with stable hashes, seals P1 execution
+  profiles against tenant policy record refs and policy/profile hashes,
+  requires ready production readiness before sealing production or
+  credential-capable P1 profiles, and blocks P1 runtime tasks before ticket
   issuance unless the P1 execution profile allows them into the P0 chain.
 - Low-latency control-plane MVP: `moxi-hotpath` exposes `LatencyBudget`,
   `HotPathRequest`, `CacheEntry`, `HotPathDecision`, `DegradePlan`,

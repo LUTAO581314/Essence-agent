@@ -57,6 +57,11 @@ P0 responsibilities:
   production enablement, covering production auth, external secret management,
   cryptographic verification, hardened sandboxing, secret injection, rotation,
   tenant policy, executor trust roots, and compliance audit export evidence.
+- evaluate P1 execution readiness fail-closed before a P1 runtime task can
+  enter the P0 ticket/proof/ledger chain. This readiness gate is separate from
+  production readiness: local read-only execution may be allowed for bounded
+  capabilities, while credentialed, high-risk, or production execution still
+  requires production-ready P0 evidence.
 
 P0 must not become a model gateway, planner, memory database, plugin host,
 workflow engine, product database, or UI runtime.
@@ -79,8 +84,10 @@ P1 responsibilities:
 - workflow scheduling, retries, and trigger handling;
 - event projection and UI-readable state streams.
 
-P1 may propose `WorldDelta` values and request capabilities. It must not issue
-execution tickets, consume credentials, mutate resources, or commit ledger
+P1 may propose `WorldDelta` values and request capabilities. It may execute only
+by passing the P0 P1-execution-readiness gate and then using the normal P0
+policy, ticket, sandbox, proof, and ledger chain. It must not issue execution
+tickets, consume credentials, mutate resources, verify outputs, or commit ledger
 events directly.
 
 ### P2 Shells And Product Surfaces
@@ -219,9 +226,9 @@ Before credentialed or executable production actions, the architecture needs:
 
 - production credential/key store; the current `moxi-vault` MVP models
   reference-only credential use, quorum approvals, trust roots, signature
-  verification decisions, break-glass decisions, redacted audit records,
-  production adapter evidence, and a fail-closed production readiness decision,
-  but not live KMS/HSM calls;
+  verification decisions, break-glass decisions, redacted audit records, a P1
+  execution-readiness gate, production adapter evidence, and a fail-closed
+  production readiness decision, but not live KMS/HSM calls;
 - OS-level process sandbox hardening; the readiness gate can require a hardened
   sandbox profile ref before production enablement, but does not implement the
   OS/container runtime itself;
@@ -276,8 +283,8 @@ Before credentialed or executable production actions, the architecture needs:
 13. Build `moxi-vault` as the first P0 production-hardening control plane for
    credential references, secret-use decisions, trust roots, signature
    verification decisions, tenant policy packs, quorum approval, break-glass,
-   audit export records, production adapter evidence, and fail-closed production
-   readiness gates.
+   audit export records, P1 execution readiness, production adapter evidence,
+   and fail-closed production readiness gates.
 14. Build `moxi-hotpath` as the first low-latency control plane for ack,
    early-deny, route, exact/template cache hit, degrade plans, latency samples,
    p50/p95/p99 snapshots, and hot-path facts.

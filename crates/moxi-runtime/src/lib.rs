@@ -5,6 +5,10 @@ use moxi_contracts::{
     SandboxInput, SkillManifest, UnderstandingProposal, UnderstandingProposalKind, WorldDelta,
 };
 use moxi_core::{capability_contract_hash, CoreError, Kernel};
+use moxi_vault::{
+    P1ExecutionReadinessDecision, P1ExecutionReadinessDecisionKind, P1ExecutionReadinessProfile,
+    P1ExecutionReadinessRequest, ProductionReadinessDecision, VaultController, VaultError,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -68,6 +72,8 @@ pub enum RuntimeError {
     SkillNotAllowed(String),
     #[error("runtime profile rejected execution plan: {0}")]
     ProfileRejected(String),
+    #[error("P1 execution readiness rejected task: {0}")]
+    P1ExecutionReadinessBlocked(String),
     #[error("runtime planner step not found: {0}")]
     PlannerStepNotFound(String),
     #[error("runtime planner step has no capability: {0}")]
@@ -116,6 +122,8 @@ pub enum RuntimeError {
     Serde(#[from] serde_json::Error),
     #[error("core error: {0}")]
     Core(#[from] CoreError),
+    #[error("vault error: {0}")]
+    Vault(#[from] VaultError),
 }
 
 pub type RuntimeResult<T> = Result<T, RuntimeError>;
@@ -2349,6 +2357,8 @@ pub struct RuntimeSession {
     sqlite_store: Option<RuntimeSqliteStore>,
     adoption_probes: RuntimeAdoptionProbeRegistry,
     policy_profile: RuntimePolicyProfile,
+    p1_execution_profile: P1ExecutionReadinessProfile,
+    production_readiness: Option<ProductionReadinessDecision>,
     running_task_policy: RunningTaskPolicy,
     retry_lease_ttl_ms: i64,
 }
@@ -2364,6 +2374,8 @@ impl RuntimeSession {
             sqlite_store: None,
             adoption_probes: RuntimeAdoptionProbeRegistry::default(),
             policy_profile: RuntimePolicyProfile::default(),
+            p1_execution_profile: P1ExecutionReadinessProfile::local_read_only("local"),
+            production_readiness: None,
             running_task_policy: RunningTaskPolicy::RequireInspection,
             retry_lease_ttl_ms: 30_000,
         }
@@ -2380,6 +2392,8 @@ impl RuntimeSession {
             sqlite_store: None,
             adoption_probes: RuntimeAdoptionProbeRegistry::default(),
             policy_profile: RuntimePolicyProfile::default(),
+            p1_execution_profile: P1ExecutionReadinessProfile::local_read_only("local"),
+            production_readiness: None,
             running_task_policy: RunningTaskPolicy::RequireInspection,
             retry_lease_ttl_ms: 30_000,
         })
@@ -2397,6 +2411,8 @@ impl RuntimeSession {
             sqlite_store: None,
             adoption_probes: RuntimeAdoptionProbeRegistry::default(),
             policy_profile: RuntimePolicyProfile::default(),
+            p1_execution_profile: P1ExecutionReadinessProfile::local_read_only("local"),
+            production_readiness: None,
             running_task_policy: RunningTaskPolicy::RequireInspection,
             retry_lease_ttl_ms: 30_000,
         })
@@ -2421,6 +2437,8 @@ impl RuntimeSession {
             sqlite_store: Some(sqlite_store),
             adoption_probes: RuntimeAdoptionProbeRegistry::default(),
             policy_profile: RuntimePolicyProfile::default(),
+            p1_execution_profile: P1ExecutionReadinessProfile::local_read_only("local"),
+            production_readiness: None,
             running_task_policy: RunningTaskPolicy::RequireInspection,
             retry_lease_ttl_ms: 30_000,
         })
@@ -2464,6 +2482,19 @@ impl RuntimeSession {
             self.running_task_policy = RunningTaskPolicy::RequireInspection;
         }
         self.policy_profile = profile;
+        self
+    }
+
+    pub fn with_p1_execution_readiness_profile(
+        mut self,
+        profile: P1ExecutionReadinessProfile,
+    ) -> Self {
+        self.p1_execution_profile = profile;
+        self
+    }
+
+    pub fn with_production_readiness(mut self, decision: ProductionReadinessDecision) -> Self {
+        self.production_readiness = Some(decision);
         self
     }
 
@@ -2527,6 +2558,10 @@ impl RuntimeSession {
 
     pub fn policy_profile(&self) -> &RuntimePolicyProfile {
         &self.policy_profile
+    }
+
+    pub fn p1_execution_readiness_profile(&self) -> &P1ExecutionReadinessProfile {
+        &self.p1_execution_profile
     }
 
     pub fn journal_path(&self) -> Option<&Path> {
@@ -3140,6 +3175,28 @@ impl RuntimeSession {
             return Err(RuntimeError::ApprovalRequired(policy.decision_id));
         }
 
+        let readiness = self.evaluate_p1_execution_readiness(run, &task, &policy)?;
+        if readiness.decision != P1ExecutionReadinessDecisionKind::Ready {
+            graph.tasks[task_index].state = TaskState::AwaitingApproval;
+            let event = self.emit(
+                Some(graph.graph_id.clone()),
+                Some(run.run_id.clone()),
+                Some(task.task_id.clone()),
+                RuntimeStage::AwaitingApproval,
+                "P1 execution readiness blocked before ticket issuing",
+                0.45,
+            )?;
+            self.task_store.update_task_state(
+                &graph.graph_id,
+                &task.task_id,
+                TaskState::AwaitingApproval,
+                Some(&event),
+            )?;
+            return Err(RuntimeError::P1ExecutionReadinessBlocked(
+                readiness.decision_id,
+            ));
+        }
+
         let ticket = self.kernel.issue_ticket(&policy, &capability)?;
         self.emit(
             Some(graph.graph_id.clone()),
@@ -3220,6 +3277,38 @@ impl RuntimeSession {
             ledger_event,
             output: result.output,
         })
+    }
+
+    fn evaluate_p1_execution_readiness(
+        &self,
+        run: &RunContract,
+        task: &TaskNode,
+        policy: &moxi_contracts::PolicyDecision,
+    ) -> RuntimeResult<P1ExecutionReadinessDecision> {
+        let request = P1ExecutionReadinessRequest {
+            request_id: stable_runtime_id(
+                "p1_exec_req",
+                &(
+                    run.run_id.as_str(),
+                    task.task_id.as_str(),
+                    policy.decision_id.as_str(),
+                ),
+            )?,
+            run_id: run.run_id.clone(),
+            tenant_id: run.tenant_id.clone(),
+            actor_id: "moxi-runtime".into(),
+            capability_id: task.capability_id.clone(),
+            permission_mode: run.permission_mode,
+            risk_level: policy.risk_level,
+            requires_credential: task.target.resource_type == ResourceType::Credential,
+            evidence_refs: vec![policy.decision_id.clone(), task.task_id.clone()],
+            requested_at: Utc::now(),
+        };
+        Ok(VaultController::evaluate_p1_execution_readiness(
+            &self.p1_execution_profile,
+            &request,
+            self.production_readiness.as_ref(),
+        )?)
     }
 
     fn emit(
@@ -4956,6 +5045,74 @@ mod tests {
             .iter()
             .any(|attempt| attempt.stage == RuntimeAttemptStage::Completed
                 && attempt.idempotency_key == report.outcomes[0].idempotency_key));
+    }
+
+    #[test]
+    fn default_p1_execution_readiness_allows_low_risk_file_read_through_p0_only() {
+        let temp = tempdir().unwrap();
+        fs::write(temp.path().join("hello.txt"), "hello runtime").unwrap();
+        let mut kernel = Kernel::new_in_memory(temp.path()).unwrap();
+        kernel.register_capability(file_read_capability()).unwrap();
+        let mut runtime = RuntimeSession::new(kernel);
+        let intent = read_only_intent("read hello.txt", temp.path().to_string_lossy(), "file.read");
+
+        let report = runtime.run(intent).unwrap();
+
+        assert_eq!(report.outcomes.len(), 1);
+        assert_eq!(report.outcomes[0].output["content"], "hello runtime");
+        assert!(report
+            .events
+            .iter()
+            .any(|event| event.message == "execution ticket issued"));
+        assert!(report
+            .events
+            .iter()
+            .any(|event| event.message == "executing through trusted kernel"));
+        assert_eq!(
+            runtime
+                .kernel()
+                .replay_ledger_audit()
+                .unwrap()
+                .successful_events,
+            1
+        );
+    }
+
+    #[test]
+    fn p1_execution_readiness_blocks_before_ticket_when_capability_not_allowed() {
+        let temp = tempdir().unwrap();
+        fs::write(temp.path().join("hello.txt"), "hello runtime").unwrap();
+        let mut kernel = Kernel::new_in_memory(temp.path()).unwrap();
+        kernel.register_capability(file_read_capability()).unwrap();
+        let profile = P1ExecutionReadinessProfile {
+            allowed_capabilities: vec!["memory.read".into()],
+            ..P1ExecutionReadinessProfile::local_read_only("local")
+        };
+        let mut runtime = RuntimeSession::new(kernel).with_p1_execution_readiness_profile(profile);
+        let intent = read_only_intent("read hello.txt", temp.path().to_string_lossy(), "file.read");
+
+        let result = runtime.run(intent);
+
+        assert!(matches!(
+            result,
+            Err(RuntimeError::P1ExecutionReadinessBlocked(_))
+        ));
+        assert!(runtime
+            .events()
+            .iter()
+            .any(|event| event.message == "P1 execution readiness blocked before ticket issuing"));
+        assert!(!runtime
+            .events()
+            .iter()
+            .any(|event| event.message == "execution ticket issued"));
+        assert_eq!(
+            runtime
+                .kernel()
+                .replay_ledger_audit()
+                .unwrap()
+                .successful_events,
+            0
+        );
     }
 
     #[test]

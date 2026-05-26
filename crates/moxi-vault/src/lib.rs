@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use moxi_contracts::{ApprovalPolicy, RiskLevel};
+use moxi_contracts::{ApprovalPolicy, PermissionMode, RiskLevel};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -93,6 +93,31 @@ pub enum ProductionAdapterKind {
     SecretInjection,
     RotationEnforcement,
     ComplianceAuditExport,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum P1ExecutionMode {
+    LocalReadOnly,
+    Production,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum P1ExecutionReadinessDecisionKind {
+    Ready,
+    Blocked,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum P1ExecutionReadinessGate {
+    TenantPolicy,
+    CapabilityScope,
+    PermissionMode,
+    RiskCeiling,
+    CredentialUse,
+    ProductionReadiness,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -292,6 +317,88 @@ pub struct ProductionReadinessDecision {
     pub missing_gates: Vec<ProductionReadinessGate>,
     pub reasons: Vec<String>,
     pub evidence_refs: Vec<String>,
+    pub evaluated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct P1ExecutionReadinessProfile {
+    pub profile_id: String,
+    pub tenant_id: String,
+    pub mode: P1ExecutionMode,
+    pub allowed_capabilities: Vec<String>,
+    pub allowed_permission_modes: Vec<PermissionMode>,
+    pub max_risk_level: RiskLevel,
+    pub allow_credential_use: bool,
+    pub require_production_readiness_for_high_risk: bool,
+    pub evidence_refs: Vec<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl P1ExecutionReadinessProfile {
+    pub fn local_read_only(tenant_id: impl Into<String>) -> Self {
+        let tenant_id = tenant_id.into();
+        Self {
+            profile_id: format!("p1.local-readonly.{tenant_id}"),
+            tenant_id,
+            mode: P1ExecutionMode::LocalReadOnly,
+            allowed_capabilities: vec!["file.read".into()],
+            allowed_permission_modes: vec![PermissionMode::ReadOnly],
+            max_risk_level: RiskLevel::Medium,
+            allow_credential_use: false,
+            require_production_readiness_for_high_risk: true,
+            evidence_refs: vec!["p1.local-readonly.profile".into()],
+            created_at: Utc::now(),
+        }
+    }
+
+    pub fn production(tenant_id: impl Into<String>, allowed_capabilities: Vec<String>) -> Self {
+        let tenant_id = tenant_id.into();
+        Self {
+            profile_id: format!("p1.production.{tenant_id}"),
+            tenant_id,
+            mode: P1ExecutionMode::Production,
+            allowed_capabilities,
+            allowed_permission_modes: vec![
+                PermissionMode::ReadOnly,
+                PermissionMode::WorkspaceWrite,
+                PermissionMode::Networked,
+            ],
+            max_risk_level: RiskLevel::High,
+            allow_credential_use: true,
+            require_production_readiness_for_high_risk: true,
+            evidence_refs: vec!["p1.production.profile".into()],
+            created_at: Utc::now(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct P1ExecutionReadinessRequest {
+    pub request_id: String,
+    pub run_id: String,
+    pub tenant_id: String,
+    pub actor_id: String,
+    pub capability_id: String,
+    pub permission_mode: PermissionMode,
+    pub risk_level: RiskLevel,
+    pub requires_credential: bool,
+    pub evidence_refs: Vec<String>,
+    pub requested_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct P1ExecutionReadinessDecision {
+    pub decision_id: String,
+    pub request_id: String,
+    pub tenant_id: String,
+    pub mode: P1ExecutionMode,
+    pub decision: P1ExecutionReadinessDecisionKind,
+    pub blocked_gates: Vec<P1ExecutionReadinessGate>,
+    pub reasons: Vec<String>,
+    pub evidence_refs: Vec<String>,
+    pub can_enter_p0_execution_chain: bool,
+    pub can_issue_ticket_directly: bool,
+    pub can_execute_without_p0: bool,
     pub evaluated_at: DateTime<Utc>,
 }
 
@@ -776,6 +883,110 @@ impl VaultController {
             reasons,
             evidence_refs,
             evaluated_at: now,
+        })
+    }
+
+    pub fn evaluate_p1_execution_readiness(
+        profile: &P1ExecutionReadinessProfile,
+        request: &P1ExecutionReadinessRequest,
+        production_readiness: Option<&ProductionReadinessDecision>,
+    ) -> Result<P1ExecutionReadinessDecision, VaultError> {
+        if profile.evidence_refs.is_empty() || request.evidence_refs.is_empty() {
+            return Err(VaultError::MissingEvidence);
+        }
+        if profile.tenant_id != request.tenant_id
+            || production_readiness.is_some_and(|decision| decision.tenant_id != request.tenant_id)
+        {
+            return Err(VaultError::TenantMismatch);
+        }
+
+        let mut blocked_gates = Vec::new();
+        let mut reasons = Vec::new();
+        let capability_allowed = matches_any(&profile.allowed_capabilities, &request.capability_id);
+        if !capability_allowed {
+            blocked_gates.push(P1ExecutionReadinessGate::CapabilityScope);
+            reasons.push(format!(
+                "capability {} is outside the P1 execution readiness profile",
+                request.capability_id
+            ));
+        }
+        if !profile
+            .allowed_permission_modes
+            .contains(&request.permission_mode)
+        {
+            blocked_gates.push(P1ExecutionReadinessGate::PermissionMode);
+            reasons.push(format!(
+                "permission mode {:?} is outside the P1 execution readiness profile",
+                request.permission_mode
+            ));
+        }
+        if request.risk_level > profile.max_risk_level {
+            blocked_gates.push(P1ExecutionReadinessGate::RiskCeiling);
+            reasons.push(format!(
+                "risk level {:?} exceeds P1 execution ceiling {:?}",
+                request.risk_level, profile.max_risk_level
+            ));
+        }
+        if request.requires_credential && !profile.allow_credential_use {
+            blocked_gates.push(P1ExecutionReadinessGate::CredentialUse);
+            reasons.push("P1 execution profile does not allow credential use".into());
+        }
+
+        let production_ready = production_readiness
+            .is_some_and(|decision| decision.decision == ProductionReadinessDecisionKind::Ready);
+        let needs_production_readiness = profile.mode == P1ExecutionMode::Production
+            || (profile.require_production_readiness_for_high_risk
+                && request.risk_level >= RiskLevel::High)
+            || request.requires_credential;
+        if needs_production_readiness && !production_ready {
+            blocked_gates.push(P1ExecutionReadinessGate::ProductionReadiness);
+            reasons.push(
+                "P1 execution requires ready P0 production hardening evidence for this request"
+                    .into(),
+            );
+        }
+
+        blocked_gates.sort();
+        blocked_gates.dedup();
+        reasons.sort();
+        reasons.dedup();
+
+        let decision = if blocked_gates.is_empty() {
+            reasons.push("P1 request may enter the P0 execution chain".into());
+            P1ExecutionReadinessDecisionKind::Ready
+        } else {
+            P1ExecutionReadinessDecisionKind::Blocked
+        };
+        let mut evidence_refs = profile.evidence_refs.clone();
+        evidence_refs.extend(request.evidence_refs.clone());
+        if let Some(production_readiness) = production_readiness {
+            evidence_refs.push(production_readiness.decision_id.clone());
+        }
+        evidence_refs.sort();
+        evidence_refs.dedup();
+
+        Ok(P1ExecutionReadinessDecision {
+            decision_id: stable_id(
+                "p1_execution_readiness",
+                &(
+                    profile.profile_id.as_str(),
+                    request.request_id.as_str(),
+                    &decision,
+                    &blocked_gates,
+                    &evidence_refs,
+                ),
+            ),
+            request_id: request.request_id.clone(),
+            tenant_id: request.tenant_id.clone(),
+            mode: profile.mode,
+            decision,
+            blocked_gates,
+            reasons,
+            evidence_refs,
+            can_enter_p0_execution_chain: decision == P1ExecutionReadinessDecisionKind::Ready,
+            can_issue_ticket_directly: false,
+            can_execute_without_p0: false,
+            evaluated_at: Utc::now(),
         })
     }
 }
@@ -1336,5 +1547,61 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error, VaultError::MissingEvidence);
+    }
+
+    #[test]
+    fn p1_local_readiness_allows_bounded_read_only_execution_through_p0() {
+        let profile = P1ExecutionReadinessProfile::local_read_only("tenant.a");
+        let request = P1ExecutionReadinessRequest {
+            request_id: "p1.req.1".into(),
+            run_id: "run.1".into(),
+            tenant_id: "tenant.a".into(),
+            actor_id: "moxi-runtime".into(),
+            capability_id: "file.read".into(),
+            permission_mode: PermissionMode::ReadOnly,
+            risk_level: RiskLevel::Low,
+            requires_credential: false,
+            evidence_refs: vec!["policy.decision.1".into()],
+            requested_at: Utc::now(),
+        };
+
+        let decision =
+            VaultController::evaluate_p1_execution_readiness(&profile, &request, None).unwrap();
+
+        assert_eq!(decision.decision, P1ExecutionReadinessDecisionKind::Ready);
+        assert!(decision.can_enter_p0_execution_chain);
+        assert!(!decision.can_issue_ticket_directly);
+        assert!(!decision.can_execute_without_p0);
+    }
+
+    #[test]
+    fn p1_local_readiness_blocks_high_risk_or_credentialed_tasks_without_production_ready_p0() {
+        let profile = P1ExecutionReadinessProfile::local_read_only("tenant.a");
+        let request = P1ExecutionReadinessRequest {
+            request_id: "p1.req.2".into(),
+            run_id: "run.2".into(),
+            tenant_id: "tenant.a".into(),
+            actor_id: "moxi-runtime".into(),
+            capability_id: "file.read".into(),
+            permission_mode: PermissionMode::ReadOnly,
+            risk_level: RiskLevel::High,
+            requires_credential: true,
+            evidence_refs: vec!["policy.decision.2".into()],
+            requested_at: Utc::now(),
+        };
+
+        let decision =
+            VaultController::evaluate_p1_execution_readiness(&profile, &request, None).unwrap();
+
+        assert_eq!(decision.decision, P1ExecutionReadinessDecisionKind::Blocked);
+        assert!(decision
+            .blocked_gates
+            .contains(&P1ExecutionReadinessGate::RiskCeiling));
+        assert!(decision
+            .blocked_gates
+            .contains(&P1ExecutionReadinessGate::CredentialUse));
+        assert!(decision
+            .blocked_gates
+            .contains(&P1ExecutionReadinessGate::ProductionReadiness));
     }
 }

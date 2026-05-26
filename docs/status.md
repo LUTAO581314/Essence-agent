@@ -57,7 +57,8 @@ a Rust workspace with twenty library crates:
   runtime journals, builds resume plans from replayed task state, applies a
   running-checkpoint policy, resumes ready tasks through the trusted P0 kernel,
   runs simple file-read fast paths and multi-step read-only skill graphs
-  through P0, and stops high-risk tasks at approval.
+  through P0, asks `moxi-vault` for P1 execution readiness before ticket
+  issuance, and stops high-risk tasks at approval or the readiness gate.
 - `moxi-observability`: first P1.5 read-only fact layer. It turns runtime
   graph/query snapshots into `RuntimeFact`, `EvidenceRef`, `RunTimeline`,
   `RunMetric`, and `ProjectionSnapshot` DTOs so shells, eval, adaptive control,
@@ -104,7 +105,9 @@ a Rust workspace with twenty library crates:
   credential references, secret-use requests/decisions, tenant trust roots,
   executor signature verification decisions, tenant policy packs, quorum
   approvals, break-glass decisions, and redacted audit export records without
-  storing raw secret material.
+  storing raw secret material. It now also defines P1 execution-readiness
+  profiles, requests, and decisions so bounded P1 runtime tasks can enter the
+  P0 execution chain only when explicitly allowed.
 - `moxi-hotpath`: first low-latency control plane. It defines latency budgets,
   hot-path requests, cache entries, hot-path decisions, degrade plans, latency
   samples, latency snapshots, and hot-path facts for ack/deny/route/cache-hit
@@ -246,9 +249,12 @@ R8 has locally completed the P0 production-hardening control-plane closure with
 control plane for credential references, secret-use boundaries, tenant trust
 roots, executor signature verification decisions, tenant policy packs,
 quorum approvals, break-glass decisions, redacted audit exports, production
-adapter evidence, and a
-fail-closed production readiness gate. The gate records missing production auth,
-external secret-manager/KMS/HSM, cryptographic verifier, hardened sandbox,
+adapter evidence, a P1 execution-readiness gate, and a fail-closed production
+readiness gate. The P1 execution-readiness gate lets the default local profile
+admit only bounded read-only `file.read` tasks into the P0 execution chain, and
+blocks unlisted capabilities, credentialed tasks, and high-risk tasks without
+production-ready P0 evidence. The production gate records missing production
+auth, external secret-manager/KMS/HSM, cryptographic verifier, hardened sandbox,
 secret injection, rotation, tenant policy, executor trust-root, and compliance
 audit-export evidence before credentialed or executable production enablement.
 It keeps raw secrets out of model, log, and durable payload paths. It does not
@@ -300,8 +306,8 @@ P0 coverage in current code:
   file sandbox, v0 process-sandbox protocol, proof collection, append-only
   ledger, schema migrations, ledger replay/audit verification, reference-only
   credential-use decisions, tenant trust-root signature verification decisions,
-  quorum approvals, break-glass decision records, and redacted audit export
-  records.
+  quorum approvals, break-glass decision records, redacted audit export records,
+  and a P0-controlled P1 execution-readiness gate for bounded runtime execution.
 - Partial: scheduler is represented by kernel-driven run status transitions and
   heartbeat/budget accounting, but not an independent scheduler runtime.
 - Partial: execution event bus is represented by persisted ledger/state facts,
@@ -312,6 +318,11 @@ P0 coverage in current code:
   injection, rotation, tenant policy, executor trust-root, and compliance export
   evidence. Concrete adapters for these gates remain required before production
   exposure.
+- P1 execution gates before runtime task execution: `moxi-runtime` now asks
+  `moxi-vault` for `P1ExecutionReadinessDecision` before ticket issuing. Ready
+  local read-only tasks still execute through
+  `admit -> propose_delta -> issue_ticket -> execute -> verify -> commit`;
+  blocked tasks stop before ticket issuance and P1 never gains direct authority.
 
 P0 boundary decisions:
 
@@ -427,6 +438,11 @@ P0 boundary decisions:
   read-only, digital-human read-only, and trusted-review runtime envelopes.
 - Runtime fast-path execution for simple `file.read` tasks, routed through
   `admit -> propose_delta -> issue_ticket -> execute -> verify -> commit`.
+- Runtime P1 execution readiness: before ticket issuing, `RuntimeSession`
+  builds a `P1ExecutionReadinessRequest` and requires `moxi-vault` to return a
+  ready `P1ExecutionReadinessDecision`. The default profile permits bounded
+  local read-only `file.read` execution through P0, while disallowed
+  capabilities stop before ticket issuance.
 - Runtime task-path execution for multiple read-only skill tasks, each routed
   through an independent P0 run and aggregated in one runtime report.
 - Runtime approval stop for high-risk tasks before ticket issuing.
@@ -537,12 +553,14 @@ P0 boundary decisions:
   `SignatureVerificationDecision`, `TenantPolicyPack`, `QuorumApproval`,
   `BreakGlassRequest`, `BreakGlassDecision`, `AuditExportRecord`,
   `ProductionHardeningEvidence`, `ProductionAdapterEvidence`, and
-  `ProductionReadinessDecision`. It rejects
+  `ProductionReadinessDecision`, plus `P1ExecutionReadinessProfile`,
+  `P1ExecutionReadinessRequest`, and `P1ExecutionReadinessDecision`. It rejects
   raw secret-looking references, requires quorum for high-risk secret use,
   checks executor signatures against tenant trust-root metadata, binds signature
   decisions to tenant ids, exports redacted audit records, rejects placeholder
-  adapter evidence, and blocks production readiness until all P0 hardening gates
-  have tenant-bound adapter evidence.
+  adapter evidence, blocks production readiness until all P0 hardening gates
+  have tenant-bound adapter evidence, and blocks P1 runtime tasks before ticket
+  issuance unless the P1 execution profile allows them into the P0 chain.
 - Low-latency control-plane MVP: `moxi-hotpath` exposes `LatencyBudget`,
   `HotPathRequest`, `CacheEntry`, `HotPathDecision`, `DegradePlan`,
   `LatencySample`, `LatencySnapshot`, and `HotPathFact`. It enforces cache
@@ -602,6 +620,9 @@ P0 boundary decisions:
   persistence, and compliance export bundle generation. Adapter evidence and
   rotation/compliance requirements are now modeled as fail-closed readiness
   gates, but live external infrastructure still needs to be connected.
+- P1 execution readiness beyond the default local read-only profile: production
+  profiles, credentialed execution, and high-risk runtime tasks still require
+  production-ready P0 evidence and concrete external adapters.
 - Low-latency hardening beyond the current R9 control-plane MVP: real
   benchmark harnesses, latency fact ingestion into observability/eval,
   model-serving adapters, queue/backpressure integration, exact/template cache

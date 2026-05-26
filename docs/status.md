@@ -107,8 +107,10 @@ a Rust workspace with twenty library crates:
   approvals, break-glass decisions, and redacted audit export records without
   storing raw secret material. It now also defines P1 execution-readiness
   profiles, tenant-policy-bound profile records, requests, decisions, and
-  redacted P1 readiness audit exports so bounded P1 runtime tasks can enter the
-  P0 execution chain only when explicitly allowed. Production or
+  redacted P1 readiness audit exports plus typed P1 execution audit bundles so
+  bounded P1 runtime tasks can enter the P0 execution chain only when
+  explicitly allowed and later review the request/profile/decision evidence.
+  Production or
   credential-capable P1 profile records must attach a ready
   `ProductionReadinessDecision`.
 - `moxi-hotpath`: first low-latency control plane. It defines latency budgets,
@@ -260,6 +262,10 @@ production-ready P0 evidence. The production gate records missing production
 auth, external secret-manager/KMS/HSM, cryptographic verifier, hardened sandbox,
 secret injection, rotation, tenant policy, executor trust-root, and compliance
 audit-export evidence before credentialed or executable production enablement.
+P1 execution audit bundles now bind the runtime request, sealed profile record,
+readiness decision, optional production readiness ref, redaction profile, and
+evidence refs for review without granting ticket, execution, verification, or
+ledger authority to P1.
 It keeps raw secrets out of model, log, and durable payload paths. It does not
 yet integrate concrete KMS/HSM/secret-manager adapters, perform real
 cryptographic verification, inject credentials into OS sandboxes, or generate
@@ -558,10 +564,11 @@ P0 boundary decisions:
   `ProductionHardeningEvidence`, `ProductionAdapterEvidence`, and
   `ProductionReadinessDecision`, plus `P1ExecutionReadinessProfile`,
   `P1ExecutionReadinessProfileRecord`, `P1ExecutionReadinessRequest`, and
-  `P1ExecutionReadinessDecision`. It rejects raw secret-looking references,
-  requires quorum for high-risk secret use, checks executor signatures against
-  tenant trust-root metadata, binds signature decisions to tenant ids, exports
-  redacted audit records, rejects placeholder adapter evidence, blocks
+  `P1ExecutionReadinessDecision`, and `P1ExecutionAuditBundle`. It rejects raw
+  secret-looking references, requires quorum for high-risk secret use, checks
+  executor signatures against tenant trust-root metadata, binds signature
+  decisions to tenant ids, exports redacted audit records and P1 execution
+  audit bundles, rejects placeholder adapter evidence, blocks
   production readiness until all P0 hardening gates have tenant-bound adapter
   evidence, seals P1 execution profiles against tenant policy pack refs and
   profile hashes, requires ready production readiness before sealing production

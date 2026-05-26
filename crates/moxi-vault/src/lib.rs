@@ -417,6 +417,28 @@ pub struct P1ExecutionReadinessDecision {
     pub evaluated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct P1ExecutionAuditBundle {
+    pub bundle_id: String,
+    pub tenant_id: String,
+    pub run_id: String,
+    pub request_id: String,
+    pub profile_record_ref: String,
+    pub tenant_policy_pack_ref: String,
+    pub production_readiness_ref: Option<String>,
+    pub readiness_decision_ref: String,
+    pub audit_export_ref: String,
+    pub redaction_profile_ref: String,
+    pub evidence_refs: Vec<String>,
+    pub can_enter_p0_execution_chain: bool,
+    pub can_issue_ticket_directly: bool,
+    pub can_execute_without_p0: bool,
+    pub contains_secret_material: bool,
+    pub bundle_hash: String,
+    pub generated_by: String,
+    pub generated_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone)]
 pub struct VaultController;
 
@@ -826,6 +848,109 @@ impl VaultController {
             ],
             generated_by,
         )
+    }
+
+    pub fn p1_execution_audit_bundle(
+        request: &P1ExecutionReadinessRequest,
+        decision: &P1ExecutionReadinessDecision,
+        profile_record: &P1ExecutionReadinessProfileRecord,
+        audit_export: &AuditExportRecord,
+        production_readiness: Option<&ProductionReadinessDecision>,
+    ) -> Result<P1ExecutionAuditBundle, VaultError> {
+        if request.tenant_id != decision.tenant_id
+            || request.tenant_id != profile_record.tenant_id
+            || request.tenant_id != audit_export.tenant_id
+            || production_readiness
+                .is_some_and(|readiness| readiness.tenant_id != request.tenant_id)
+        {
+            return Err(VaultError::TenantMismatch);
+        }
+        if request.evidence_refs.is_empty()
+            || decision.evidence_refs.is_empty()
+            || profile_record.evidence_refs.is_empty()
+            || audit_export.event_refs.is_empty()
+        {
+            return Err(VaultError::MissingEvidence);
+        }
+        if decision.request_id != request.request_id
+            || audit_export.kind != AuditExportRecordKind::P1ExecutionReadiness
+            || !audit_export.event_refs.contains(&profile_record.record_id)
+            || !audit_export.event_refs.contains(&decision.decision_id)
+            || !audit_export.event_refs.contains(&request.request_id)
+        {
+            return Err(VaultError::MissingEvidence);
+        }
+
+        match (
+            &profile_record.production_readiness_ref,
+            production_readiness,
+        ) {
+            (Some(expected), Some(readiness)) if expected == &readiness.decision_id => {}
+            (Some(_), _) => return Err(VaultError::MissingEvidence),
+            (None, Some(_)) => return Err(VaultError::MissingEvidence),
+            (None, None) => {}
+        }
+
+        let mut evidence_refs = request.evidence_refs.clone();
+        evidence_refs.extend(decision.evidence_refs.clone());
+        evidence_refs.extend(profile_record.evidence_refs.clone());
+        evidence_refs.extend(audit_export.event_refs.clone());
+        evidence_refs.push(profile_record.record_id.clone());
+        evidence_refs.push(profile_record.tenant_policy_pack_ref.clone());
+        evidence_refs.push(decision.decision_id.clone());
+        evidence_refs.push(audit_export.export_id.clone());
+        evidence_refs.push(audit_export.export_hash.clone());
+        if let Some(readiness) = production_readiness {
+            evidence_refs.push(readiness.decision_id.clone());
+            evidence_refs.extend(readiness.evidence_refs.clone());
+        }
+        evidence_refs.sort();
+        evidence_refs.dedup();
+        if evidence_refs.is_empty() {
+            return Err(VaultError::MissingEvidence);
+        }
+
+        let bundle_hash = stable_id(
+            "p1_execution_audit_bundle_hash",
+            &(
+                request.request_id.as_str(),
+                profile_record.record_id.as_str(),
+                decision.decision_id.as_str(),
+                audit_export.export_hash.as_str(),
+                &profile_record.production_readiness_ref,
+                &evidence_refs,
+            ),
+        );
+
+        Ok(P1ExecutionAuditBundle {
+            bundle_id: stable_id(
+                "p1_execution_audit_bundle",
+                &(
+                    request.request_id.as_str(),
+                    profile_record.record_id.as_str(),
+                    decision.decision_id.as_str(),
+                    audit_export.export_id.as_str(),
+                    bundle_hash.as_str(),
+                ),
+            ),
+            tenant_id: request.tenant_id.clone(),
+            run_id: request.run_id.clone(),
+            request_id: request.request_id.clone(),
+            profile_record_ref: profile_record.record_id.clone(),
+            tenant_policy_pack_ref: profile_record.tenant_policy_pack_ref.clone(),
+            production_readiness_ref: profile_record.production_readiness_ref.clone(),
+            readiness_decision_ref: decision.decision_id.clone(),
+            audit_export_ref: audit_export.export_id.clone(),
+            redaction_profile_ref: audit_export.redaction_profile_ref.clone(),
+            evidence_refs,
+            can_enter_p0_execution_chain: decision.can_enter_p0_execution_chain,
+            can_issue_ticket_directly: false,
+            can_execute_without_p0: false,
+            contains_secret_material: false,
+            bundle_hash,
+            generated_by: audit_export.generated_by.clone(),
+            generated_at: Utc::now(),
+        })
     }
 
     pub fn evaluate_production_readiness(
@@ -1774,6 +1899,198 @@ mod tests {
         assert!(!audit.contains_secret_material);
         assert!(audit.event_refs.contains(&record.record_id));
         assert!(audit.event_refs.contains(&decision.decision_id));
+    }
+
+    #[test]
+    fn p1_execution_audit_bundle_is_redacted_and_chain_bound() {
+        let policy = tenant_policy();
+        let profile = P1ExecutionReadinessProfile::local_read_only("tenant.a");
+        let record = VaultController::seal_p1_execution_readiness_profile(
+            &policy,
+            profile.clone(),
+            "vault.controller",
+        )
+        .unwrap();
+        let request = P1ExecutionReadinessRequest {
+            request_id: "p1.req.bundle".into(),
+            run_id: "run.bundle".into(),
+            tenant_id: "tenant.a".into(),
+            actor_id: "moxi-runtime".into(),
+            capability_id: "file.read".into(),
+            permission_mode: PermissionMode::ReadOnly,
+            risk_level: RiskLevel::Low,
+            requires_credential: false,
+            evidence_refs: vec!["policy.decision.bundle".into(), "runtime.task.1".into()],
+            requested_at: Utc::now(),
+        };
+        let loaded =
+            VaultController::load_p1_execution_readiness_profile(&record, &policy).unwrap();
+        let decision =
+            VaultController::evaluate_p1_execution_readiness(&loaded, &request, None).unwrap();
+        let audit = VaultController::audit_p1_execution_readiness(
+            &decision,
+            &record,
+            "redaction.compliance.v1",
+            "auditor.1",
+        )
+        .unwrap();
+
+        let bundle =
+            VaultController::p1_execution_audit_bundle(&request, &decision, &record, &audit, None)
+                .unwrap();
+
+        assert_eq!(bundle.tenant_id, "tenant.a");
+        assert_eq!(bundle.run_id, request.run_id);
+        assert_eq!(bundle.profile_record_ref, record.record_id);
+        assert_eq!(bundle.tenant_policy_pack_ref, policy.pack_id);
+        assert_eq!(bundle.readiness_decision_ref, decision.decision_id);
+        assert_eq!(bundle.audit_export_ref, audit.export_id);
+        assert_eq!(bundle.redaction_profile_ref, "redaction.compliance.v1");
+        assert!(bundle.production_readiness_ref.is_none());
+        assert!(bundle.can_enter_p0_execution_chain);
+        assert!(!bundle.can_issue_ticket_directly);
+        assert!(!bundle.can_execute_without_p0);
+        assert!(!bundle.contains_secret_material);
+        assert!(bundle
+            .bundle_hash
+            .starts_with("p1_execution_audit_bundle_hash."));
+        assert!(bundle.evidence_refs.contains(&"runtime.task.1".into()));
+        assert!(bundle.evidence_refs.contains(&audit.export_hash));
+    }
+
+    #[test]
+    fn p1_execution_audit_bundle_preserves_production_readiness_ref() {
+        let policy = tenant_policy();
+        let signature_decision = VaultController::verify_executor_signature(
+            &signature(),
+            &[trust_root()],
+            RiskLevel::High,
+        );
+        let production_readiness = VaultController::evaluate_production_readiness(
+            &policy,
+            &[credential()],
+            &[signature_decision],
+            &hardening_evidence(),
+            &all_adapter_evidence(),
+        )
+        .unwrap();
+        let production_profile =
+            P1ExecutionReadinessProfile::production("tenant.a", vec!["file.read".into()]);
+        let record = VaultController::seal_production_p1_execution_readiness_profile(
+            &policy,
+            production_profile.clone(),
+            &production_readiness,
+            "vault.controller",
+        )
+        .unwrap();
+        let request = P1ExecutionReadinessRequest {
+            request_id: "p1.req.prod.bundle".into(),
+            run_id: "run.prod.bundle".into(),
+            tenant_id: "tenant.a".into(),
+            actor_id: "moxi-runtime".into(),
+            capability_id: "file.read".into(),
+            permission_mode: PermissionMode::ReadOnly,
+            risk_level: RiskLevel::High,
+            requires_credential: true,
+            evidence_refs: vec!["policy.decision.prod.bundle".into()],
+            requested_at: Utc::now(),
+        };
+        let decision = VaultController::evaluate_p1_execution_readiness(
+            &production_profile,
+            &request,
+            Some(&production_readiness),
+        )
+        .unwrap();
+        let audit = VaultController::audit_p1_execution_readiness(
+            &decision,
+            &record,
+            "redaction.compliance.v1",
+            "auditor.1",
+        )
+        .unwrap();
+
+        let bundle = VaultController::p1_execution_audit_bundle(
+            &request,
+            &decision,
+            &record,
+            &audit,
+            Some(&production_readiness),
+        )
+        .unwrap();
+
+        assert_eq!(
+            bundle.production_readiness_ref,
+            Some(production_readiness.decision_id.clone())
+        );
+        assert!(bundle
+            .evidence_refs
+            .contains(&production_readiness.decision_id));
+        assert!(bundle.can_enter_p0_execution_chain);
+        assert!(!bundle.can_issue_ticket_directly);
+        assert!(!bundle.can_execute_without_p0);
+    }
+
+    #[test]
+    fn p1_execution_audit_bundle_rejects_unbound_or_cross_tenant_inputs() {
+        let policy = tenant_policy();
+        let profile = P1ExecutionReadinessProfile::local_read_only("tenant.a");
+        let record = VaultController::seal_p1_execution_readiness_profile(
+            &policy,
+            profile.clone(),
+            "vault.controller",
+        )
+        .unwrap();
+        let request = P1ExecutionReadinessRequest {
+            request_id: "p1.req.reject.bundle".into(),
+            run_id: "run.reject.bundle".into(),
+            tenant_id: "tenant.a".into(),
+            actor_id: "moxi-runtime".into(),
+            capability_id: "file.read".into(),
+            permission_mode: PermissionMode::ReadOnly,
+            risk_level: RiskLevel::Low,
+            requires_credential: false,
+            evidence_refs: vec!["policy.decision.reject.bundle".into()],
+            requested_at: Utc::now(),
+        };
+        let loaded =
+            VaultController::load_p1_execution_readiness_profile(&record, &policy).unwrap();
+        let decision =
+            VaultController::evaluate_p1_execution_readiness(&loaded, &request, None).unwrap();
+        let audit = VaultController::audit_p1_execution_readiness(
+            &decision,
+            &record,
+            "redaction.compliance.v1",
+            "auditor.1",
+        )
+        .unwrap();
+
+        let wrong_audit = AuditExportRecord {
+            event_refs: vec![decision.decision_id.clone()],
+            ..audit.clone()
+        };
+        let unbound_error = VaultController::p1_execution_audit_bundle(
+            &request,
+            &decision,
+            &record,
+            &wrong_audit,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(unbound_error, VaultError::MissingEvidence);
+
+        let cross_tenant_request = P1ExecutionReadinessRequest {
+            tenant_id: "tenant.b".into(),
+            ..request
+        };
+        let tenant_error = VaultController::p1_execution_audit_bundle(
+            &cross_tenant_request,
+            &decision,
+            &record,
+            &audit,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(tenant_error, VaultError::TenantMismatch);
     }
 
     #[test]

@@ -20,9 +20,10 @@ the first eval-gated self-improvement control loop without letting adaptive
 logic modify P0 directly. `moxi-vault` adds the first P0 production-hardening
 control plane for credential references, secret-use decisions, tenant trust
 roots, executor signature verification decisions, quorum approvals,
-break-glass decisions, and redacted audit export records without storing raw
-secret material, plus a P1 execution-readiness gate for bounded local runtime
-execution and a production readiness gate that blocks credentialed or
+break-glass decisions, redacted audit export records, and redacted P1
+execution audit bundles without storing raw secret material, plus a P1
+execution-readiness gate for bounded local runtime execution and a production
+readiness gate that blocks credentialed or
 executable production enablement until production auth, real external secret
 management, cryptographic verification, hardened sandboxing, secret injection,
 rotation enforcement, tenant policy, executor trust roots, and compliance audit
@@ -157,7 +158,10 @@ now pass locally.
   secret injection, rotation, tenant policy, executor trust roots, and
   compliance export evidence. It can seal P1 execution-readiness profiles into
   tenant-policy-bound `P1ExecutionReadinessProfileRecord` values, reload them
-  with profile-hash validation, and export redacted P1 readiness audit records.
+  with profile-hash validation, and export redacted P1 readiness audit records
+  plus `P1ExecutionAuditBundle` values binding the runtime request, profile
+  record, readiness decision, optional production readiness ref, redaction
+  profile, and evidence refs for review.
   Production or credential-capable P1 profiles must be sealed through a ready
   `ProductionReadinessDecision`; blocked or missing production readiness fails
   closed. It records decisions and evidence refs only; it never stores raw
@@ -517,8 +521,11 @@ publishable docs:
   grants P1 direct ticketing or execution authority.
 - P1 execution-readiness profiles can be sealed against tenant policy pack refs
   as `P1ExecutionReadinessProfileRecord` values, reloaded with profile-hash and
-  tenant checks, and included in redacted audit exports for P0/P1 execution
-  interlock review.
+  tenant checks, and included in redacted audit exports and typed
+  `P1ExecutionAuditBundle` records for P0/P1 execution interlock review.
+  Bundles bind the runtime request, profile record, readiness decision, optional
+  production readiness ref, redaction profile, and evidence refs, while still
+  denying P1 direct ticket, execution, verification, or ledger authority.
 - Production or credential-capable P1 execution profiles can only be sealed when
   a tenant-bound `ProductionReadinessDecision::Ready` is attached. Local
   read-only profiles do not gain production authority from this record.

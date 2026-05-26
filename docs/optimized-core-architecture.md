@@ -64,8 +64,11 @@ P0 responsibilities:
   requires production-ready P0 evidence.
 - seal P1 execution-readiness profiles against tenant policy pack references,
   reload them with profile-hash validation, and export redacted P1 readiness
-  audit records. This makes the P0/P1 execution interlock reviewable without
-  turning P0 into a runtime profile database.
+  audit records plus typed P1 execution audit bundles. Bundles bind the runtime
+  request, sealed profile record, readiness decision, optional production
+  readiness ref, redaction profile, and evidence refs. This makes the P0/P1
+  execution interlock reviewable without turning P0 into a runtime profile
+  database or granting P1 direct ticket/execution authority.
 - require production or credential-capable P1 execution profiles to attach a
   ready production-readiness decision before they can be sealed. Local read-only
   profiles remain bounded local records and do not imply production authority.
@@ -290,8 +293,9 @@ Before credentialed or executable production actions, the architecture needs:
 13. Build `moxi-vault` as the first P0 production-hardening control plane for
    credential references, secret-use decisions, trust roots, signature
    verification decisions, tenant policy packs, quorum approval, break-glass,
-   audit export records, P1 execution-readiness profile records, production
-   adapter evidence, and fail-closed production readiness gates.
+   audit export records, P1 execution-readiness profile records, P1 execution
+   audit bundles, production adapter evidence, and fail-closed production
+   readiness gates.
 14. Build `moxi-hotpath` as the first low-latency control plane for ack,
    early-deny, route, exact/template cache hit, degrade plans, latency samples,
    p50/p95/p99 snapshots, and hot-path facts.

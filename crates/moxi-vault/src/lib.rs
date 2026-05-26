@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use moxi_contracts::{ApprovalPolicy, PermissionMode, RiskLevel};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use thiserror::Error;
 
 pub const VAULT_SCHEMA_VERSION: u32 = 1;
@@ -68,6 +69,13 @@ pub enum AuditExportRecordKind {
 pub enum ProductionReadinessDecisionKind {
     Ready,
     Blocked,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum ProductionAdapterVerificationKind {
+    Verified,
+    Rejected,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -339,6 +347,21 @@ pub struct ProductionAdapterEvidence {
     pub healthcheck_ref: String,
     pub sandbox_profile_ref: Option<String>,
     pub generated_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProductionAdapterVerificationDecision {
+    pub decision_id: String,
+    pub tenant_id: String,
+    pub evidence_id: String,
+    pub kind: ProductionAdapterKind,
+    pub adapter_ref: String,
+    pub provider_ref: String,
+    pub decision: ProductionAdapterVerificationKind,
+    pub reasons: Vec<String>,
+    pub evidence_refs: Vec<String>,
+    pub verified_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
 }
 
@@ -1243,12 +1266,93 @@ impl VaultController {
         })
     }
 
+    pub fn verify_production_adapter_evidence(
+        evidence: &ProductionAdapterEvidence,
+    ) -> ProductionAdapterVerificationDecision {
+        let mut reasons = Vec::new();
+        let validation = validate_adapter_evidence(evidence);
+        if let Err(error) = &validation {
+            reasons.push(format!("adapter evidence failed validation: {error}"));
+        }
+        if evidence.generated_at >= evidence.expires_at {
+            reasons.push("adapter evidence expiry must be after generation time".into());
+        }
+        if evidence.adapter_version.trim().is_empty() {
+            reasons.push("adapter version is empty".into());
+        }
+        reasons.sort();
+        reasons.dedup();
+
+        let decision = if reasons.is_empty() {
+            reasons.push("production adapter evidence is verified".into());
+            ProductionAdapterVerificationKind::Verified
+        } else {
+            ProductionAdapterVerificationKind::Rejected
+        };
+        let mut evidence_refs = vec![
+            evidence.evidence_id.clone(),
+            evidence.attestation_ref.clone(),
+            evidence.healthcheck_ref.clone(),
+        ];
+        if let Some(sandbox_profile_ref) = &evidence.sandbox_profile_ref {
+            evidence_refs.push(sandbox_profile_ref.clone());
+        }
+        evidence_refs.sort();
+        evidence_refs.dedup();
+
+        ProductionAdapterVerificationDecision {
+            decision_id: stable_id(
+                "production_adapter_verification",
+                &(
+                    evidence.evidence_id.as_str(),
+                    &evidence.kind,
+                    evidence.adapter_ref.as_str(),
+                    evidence.provider_ref.as_str(),
+                    &decision,
+                    &evidence_refs,
+                ),
+            ),
+            tenant_id: evidence.tenant_id.clone(),
+            evidence_id: evidence.evidence_id.clone(),
+            kind: evidence.kind,
+            adapter_ref: evidence.adapter_ref.clone(),
+            provider_ref: evidence.provider_ref.clone(),
+            decision,
+            reasons,
+            evidence_refs,
+            verified_at: Utc::now(),
+            expires_at: evidence.expires_at,
+        }
+    }
+
     pub fn evaluate_production_readiness(
         policy: &TenantPolicyPack,
         credentials: &[CredentialRef],
         signature_decisions: &[SignatureVerificationDecision],
         hardening: &ProductionHardeningEvidence,
         adapter_evidence: &[ProductionAdapterEvidence],
+    ) -> Result<ProductionReadinessDecision, VaultError> {
+        let adapter_decisions = adapter_evidence
+            .iter()
+            .map(Self::verify_production_adapter_evidence)
+            .collect::<Vec<_>>();
+        Self::evaluate_production_readiness_with_adapter_decisions(
+            policy,
+            credentials,
+            signature_decisions,
+            hardening,
+            adapter_evidence,
+            &adapter_decisions,
+        )
+    }
+
+    pub fn evaluate_production_readiness_with_adapter_decisions(
+        policy: &TenantPolicyPack,
+        credentials: &[CredentialRef],
+        signature_decisions: &[SignatureVerificationDecision],
+        hardening: &ProductionHardeningEvidence,
+        adapter_evidence: &[ProductionAdapterEvidence],
+        adapter_decisions: &[ProductionAdapterVerificationDecision],
     ) -> Result<ProductionReadinessDecision, VaultError> {
         if hardening.evidence_refs.is_empty() {
             return Err(VaultError::MissingEvidence);
@@ -1263,6 +1367,9 @@ impl VaultController {
             || adapter_evidence
                 .iter()
                 .any(|evidence| evidence.tenant_id != policy.tenant_id)
+            || adapter_decisions
+                .iter()
+                .any(|decision| decision.tenant_id != policy.tenant_id)
         {
             return Err(VaultError::TenantMismatch);
         }
@@ -1273,6 +1380,10 @@ impl VaultController {
         for evidence in adapter_evidence {
             validate_adapter_evidence(evidence)?;
         }
+        for decision in adapter_decisions {
+            validate_adapter_decision(decision)?;
+        }
+        require_verified_adapter_decisions(adapter_evidence, adapter_decisions)?;
 
         let mut missing_gates = Vec::new();
         let mut reasons = Vec::new();
@@ -1431,6 +1542,11 @@ impl VaultController {
             adapter_evidence
                 .iter()
                 .map(|evidence| evidence.evidence_id.clone()),
+        );
+        evidence_refs.extend(
+            adapter_decisions
+                .iter()
+                .map(|decision| decision.decision_id.clone()),
         );
         evidence_refs.sort();
         evidence_refs.dedup();
@@ -1652,6 +1768,60 @@ fn validate_adapter_evidence(evidence: &ProductionAdapterEvidence) -> Result<(),
     Ok(())
 }
 
+fn validate_adapter_decision(
+    decision: &ProductionAdapterVerificationDecision,
+) -> Result<(), VaultError> {
+    if decision.decision != ProductionAdapterVerificationKind::Verified
+        || decision.evidence_refs.is_empty()
+        || decision.expires_at <= Utc::now()
+    {
+        return Err(VaultError::MissingEvidence);
+    }
+    if decision
+        .evidence_refs
+        .iter()
+        .any(|value| is_placeholder_ref(value))
+        || is_placeholder_ref(&decision.adapter_ref)
+        || is_placeholder_ref(&decision.provider_ref)
+    {
+        return Err(VaultError::MissingEvidence);
+    }
+    Ok(())
+}
+
+fn require_verified_adapter_decisions(
+    adapter_evidence: &[ProductionAdapterEvidence],
+    adapter_decisions: &[ProductionAdapterVerificationDecision],
+) -> Result<(), VaultError> {
+    if adapter_evidence.len() != adapter_decisions.len() {
+        return Err(VaultError::MissingEvidence);
+    }
+
+    let decisions_by_evidence = adapter_decisions
+        .iter()
+        .map(|decision| (decision.evidence_id.as_str(), decision))
+        .collect::<BTreeMap<_, _>>();
+    if decisions_by_evidence.len() != adapter_decisions.len() {
+        return Err(VaultError::MissingEvidence);
+    }
+
+    for evidence in adapter_evidence {
+        let Some(decision) = decisions_by_evidence.get(evidence.evidence_id.as_str()) else {
+            return Err(VaultError::MissingEvidence);
+        };
+        if decision.kind != evidence.kind
+            || decision.adapter_ref != evidence.adapter_ref
+            || decision.provider_ref != evidence.provider_ref
+            || decision.expires_at != evidence.expires_at
+            || !decision.evidence_refs.contains(&evidence.evidence_id)
+        {
+            return Err(VaultError::MissingEvidence);
+        }
+    }
+
+    Ok(())
+}
+
 fn approval_required(credential: &CredentialRef, risk_level: RiskLevel) -> bool {
     credential
         .approval_required_at_or_above
@@ -1860,6 +2030,15 @@ mod tests {
                 "audit://tenant.a/soc2-bundle",
             ),
         ]
+    }
+
+    fn all_adapter_decisions(
+        adapter_evidence: &[ProductionAdapterEvidence],
+    ) -> Vec<ProductionAdapterVerificationDecision> {
+        adapter_evidence
+            .iter()
+            .map(VaultController::verify_production_adapter_evidence)
+            .collect()
     }
 
     #[test]
@@ -2652,6 +2831,128 @@ mod tests {
             &[],
             None,
             "auditor.1",
+        )
+        .unwrap_err();
+        assert_eq!(tenant_error, VaultError::TenantMismatch);
+    }
+
+    #[test]
+    fn production_adapter_evidence_verification_is_tenant_bound_and_fail_closed() {
+        let evidence =
+            adapter_evidence(ProductionAdapterKind::AuthProvider, "oidc://prod/tenant.a");
+        let decision = VaultController::verify_production_adapter_evidence(&evidence);
+
+        assert_eq!(
+            decision.decision,
+            ProductionAdapterVerificationKind::Verified
+        );
+        assert_eq!(decision.tenant_id, evidence.tenant_id);
+        assert_eq!(decision.evidence_id, evidence.evidence_id);
+        assert_eq!(decision.kind, evidence.kind);
+        assert!(decision.evidence_refs.contains(&evidence.attestation_ref));
+        assert!(decision.evidence_refs.contains(&evidence.healthcheck_ref));
+
+        let mut placeholder = evidence;
+        placeholder.healthcheck_ref = "mock-healthcheck".into();
+        let rejected = VaultController::verify_production_adapter_evidence(&placeholder);
+
+        assert_eq!(
+            rejected.decision,
+            ProductionAdapterVerificationKind::Rejected
+        );
+        assert!(!rejected.reasons.is_empty());
+    }
+
+    #[test]
+    fn production_readiness_requires_verified_adapter_decisions() {
+        let policy = tenant_policy();
+        let signature_decision = VaultController::verify_executor_signature(
+            &signature(),
+            &[trust_root()],
+            RiskLevel::High,
+        );
+        let adapters = all_adapter_evidence();
+        let adapter_decisions = all_adapter_decisions(&adapters);
+
+        let ready = VaultController::evaluate_production_readiness_with_adapter_decisions(
+            &policy,
+            &[credential()],
+            std::slice::from_ref(&signature_decision),
+            &hardening_evidence(),
+            &adapters,
+            &adapter_decisions,
+        )
+        .unwrap();
+
+        assert_eq!(ready.decision, ProductionReadinessDecisionKind::Ready);
+        assert!(adapter_decisions
+            .iter()
+            .all(|decision| ready.evidence_refs.contains(&decision.decision_id)));
+
+        let missing_decision_error =
+            VaultController::evaluate_production_readiness_with_adapter_decisions(
+                &policy,
+                &[credential()],
+                std::slice::from_ref(&signature_decision),
+                &hardening_evidence(),
+                &adapters,
+                &adapter_decisions[1..],
+            )
+            .unwrap_err();
+        assert_eq!(missing_decision_error, VaultError::MissingEvidence);
+
+        let mut duplicate_decisions = adapter_decisions.clone();
+        duplicate_decisions[1] = adapter_decisions[0].clone();
+        let duplicate_error =
+            VaultController::evaluate_production_readiness_with_adapter_decisions(
+                &policy,
+                &[credential()],
+                std::slice::from_ref(&signature_decision),
+                &hardening_evidence(),
+                &adapters,
+                &duplicate_decisions,
+            )
+            .unwrap_err();
+        assert_eq!(duplicate_error, VaultError::MissingEvidence);
+
+        let mut mismatched_decisions = adapter_decisions.clone();
+        mismatched_decisions[0].provider_ref = "oidc://prod/tenant.a/other".into();
+        let mismatched_error =
+            VaultController::evaluate_production_readiness_with_adapter_decisions(
+                &policy,
+                &[credential()],
+                std::slice::from_ref(&signature_decision),
+                &hardening_evidence(),
+                &adapters,
+                &mismatched_decisions,
+            )
+            .unwrap_err();
+        assert_eq!(mismatched_error, VaultError::MissingEvidence);
+
+        let mut rejected_decisions = adapter_decisions.clone();
+        rejected_decisions[0].decision = ProductionAdapterVerificationKind::Rejected;
+        let rejected_error = VaultController::evaluate_production_readiness_with_adapter_decisions(
+            &policy,
+            &[credential()],
+            std::slice::from_ref(&signature_decision),
+            &hardening_evidence(),
+            &adapters,
+            &rejected_decisions,
+        )
+        .unwrap_err();
+        assert_eq!(rejected_error, VaultError::MissingEvidence);
+
+        let cross_tenant_decisions = vec![ProductionAdapterVerificationDecision {
+            tenant_id: "tenant.b".into(),
+            ..adapter_decisions[0].clone()
+        }];
+        let tenant_error = VaultController::evaluate_production_readiness_with_adapter_decisions(
+            &policy,
+            &[credential()],
+            &[signature_decision],
+            &hardening_evidence(),
+            &adapters,
+            &cross_tenant_decisions,
         )
         .unwrap_err();
         assert_eq!(tenant_error, VaultError::TenantMismatch);

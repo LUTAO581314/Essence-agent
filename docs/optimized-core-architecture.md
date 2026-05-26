@@ -57,6 +57,9 @@ P0 responsibilities:
   production enablement, covering production auth, external secret management,
   cryptographic verification, hardened sandboxing, secret injection, rotation,
   tenant policy, executor trust roots, and compliance audit export evidence.
+- verify production adapter evidence into tenant-bound adapter verification
+  decisions, and require production readiness to bind each adapter evidence item
+  to its matching verified decision before the decision can cite it.
 - evaluate P1 execution readiness fail-closed before a P1 runtime task can
   enter the P0 ticket/proof/ledger chain. This readiness gate is separate from
   production readiness: local read-only execution may be allowed for bounded
@@ -242,8 +245,9 @@ Before credentialed or executable production actions, the architecture needs:
 - production credential/key store; the current `moxi-vault` MVP models
   reference-only credential use, quorum approvals, trust roots, signature
   verification decisions, break-glass decisions, redacted audit records, a P1
-  execution-readiness gate, production adapter evidence, and a fail-closed
-  production readiness decision, but not live KMS/HSM calls;
+  execution-readiness gate, production adapter evidence, adapter verification
+  decisions, and a fail-closed production readiness decision, but not live
+  KMS/HSM calls;
 - OS-level process sandbox hardening; the readiness gate can require a hardened
   sandbox profile ref before production enablement, but does not implement the
   OS/container runtime itself;
@@ -301,7 +305,8 @@ Before credentialed or executable production actions, the architecture needs:
    verification decisions, tenant policy packs, quorum approval, break-glass,
    audit export records, tenant policy pack records, P1 execution-readiness
    profile records, P1 execution audit bundles, compliance export bundles,
-   production adapter evidence, and fail-closed production readiness gates.
+   production adapter evidence, adapter verification decisions, and fail-closed
+   production readiness gates.
 14. Build `moxi-hotpath` as the first low-latency control plane for ack,
    early-deny, route, exact/template cache hit, degrade plans, latency samples,
    p50/p95/p99 snapshots, and hot-path facts.

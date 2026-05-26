@@ -1,8 +1,10 @@
 use chrono::{DateTime, Utc};
+use moxi_contracts::EventResult;
 use moxi_runtime::{
     RuntimeAdoptionAction, RuntimeAdoptionProbeRecord, RuntimeAttemptStage, RuntimeGraphSnapshot,
     RuntimeQuerySnapshot, RuntimeResumePlan, RuntimeTaskAttempt, TaskState,
 };
+use moxi_store::StoredRunObservation;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -47,6 +49,14 @@ pub enum RuntimeFactKind {
     AdoptionProbeObserved,
     ResumeRecommendation,
     GraphCompleted,
+    StoreRunState,
+    PolicyDecisionRecorded,
+    ApprovalGrantRecorded,
+    ExecutionTicketRecorded,
+    SandboxResultRecorded,
+    ProofRecorded,
+    LedgerEventRecorded,
+    StoreRunCompleted,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -91,6 +101,21 @@ pub struct RunMetric {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct StoreRunMetric {
+    pub run_id: String,
+    pub policy_decision_count: usize,
+    pub approval_grant_count: usize,
+    pub execution_ticket_count: usize,
+    pub sandbox_result_count: usize,
+    pub proof_count: usize,
+    pub ledger_event_count: usize,
+    pub successful_ledger_event_count: usize,
+    pub failed_ledger_event_count: usize,
+    pub has_status: bool,
+    pub is_complete: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RunTimeline {
     pub graph_id: String,
     pub facts: Vec<RuntimeFact>,
@@ -104,6 +129,16 @@ pub struct ProjectionSnapshot {
     pub facts: Vec<RuntimeFact>,
     pub timeline: RunTimeline,
     pub metrics: RunMetric,
+    pub generated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct StoreProjectionSnapshot {
+    pub schema_version: u32,
+    pub run_id: String,
+    pub facts: Vec<RuntimeFact>,
+    pub timeline: RunTimeline,
+    pub metrics: StoreRunMetric,
     pub generated_at: DateTime<Utc>,
 }
 
@@ -194,6 +229,43 @@ impl EvidenceRef {
         )
     }
 
+    pub fn ledger_event(event: &moxi_contracts::LedgerEvent) -> Self {
+        Self::new(
+            EvidenceSource::LedgerEvent,
+            &event.ledger_event_id,
+            None,
+            Some(event.run_id.clone()),
+            None,
+            Some(stable_hash(event)),
+        )
+    }
+
+    pub fn proof(proof: &moxi_contracts::Proof) -> Self {
+        Self::new(
+            EvidenceSource::Proof,
+            &proof.proof_id,
+            None,
+            Some(proof.run_id.clone()),
+            None,
+            Some(stable_hash(proof)),
+        )
+    }
+
+    pub fn store_record(
+        id: impl Into<String>,
+        run_id: impl Into<String>,
+        record: &impl Serialize,
+    ) -> Self {
+        Self::new(
+            EvidenceSource::StoreRecord,
+            id,
+            None,
+            Some(run_id.into()),
+            None,
+            Some(stable_hash(record)),
+        )
+    }
+
     fn new(
         source: EvidenceSource,
         id: impl Into<String>,
@@ -258,12 +330,66 @@ impl ProjectionSnapshot {
     }
 }
 
+impl StoreProjectionSnapshot {
+    pub fn from_store_observation(observation: &StoredRunObservation) -> Self {
+        let generated_at = Utc::now();
+        let facts = store_facts_from_observation(observation);
+        let run_id = observation.run_id.clone();
+        let timeline = RunTimeline {
+            graph_id: run_id.clone(),
+            facts: facts.clone(),
+            generated_at,
+        };
+        let metrics = StoreRunMetric::from_store_observation(observation);
+        Self {
+            schema_version: OBSERVABILITY_SCHEMA_VERSION,
+            run_id,
+            facts,
+            timeline,
+            metrics,
+            generated_at,
+        }
+    }
+}
+
 impl RunTimeline {
     pub fn from_facts(graph_id: impl Into<String>, facts: Vec<RuntimeFact>) -> Self {
         Self {
             graph_id: graph_id.into(),
             facts: sort_facts(facts),
             generated_at: Utc::now(),
+        }
+    }
+}
+
+impl StoreRunMetric {
+    pub fn from_store_observation(observation: &StoredRunObservation) -> Self {
+        let successful_ledger_event_count = observation
+            .ledger_events
+            .iter()
+            .filter(|event| event.result == EventResult::Success)
+            .count();
+        let failed_ledger_event_count = observation
+            .ledger_events
+            .iter()
+            .filter(|event| event.result == EventResult::Failed)
+            .count();
+        Self {
+            run_id: observation.run_id.clone(),
+            policy_decision_count: observation.policy_decisions.len(),
+            approval_grant_count: observation.approval_grants.len(),
+            execution_ticket_count: observation.execution_tickets.len(),
+            sandbox_result_count: observation.sandbox_results.len(),
+            proof_count: observation.proofs.len(),
+            ledger_event_count: observation.ledger_events.len(),
+            successful_ledger_event_count,
+            failed_ledger_event_count,
+            has_status: observation.status.is_some(),
+            is_complete: observation
+                .ledger_events
+                .iter()
+                .any(|event| event.result == EventResult::Success)
+                || observation.status == Some(moxi_contracts::RunStatus::Completed),
         }
     }
 }
@@ -619,6 +745,242 @@ pub fn runtime_facts_from_query_snapshot(snapshot: &RuntimeQuerySnapshot) -> Vec
     sort_facts(facts)
 }
 
+pub fn store_facts_from_observation(observation: &StoredRunObservation) -> Vec<RuntimeFact> {
+    let run_id = observation.run_id.clone();
+    let mut facts = Vec::new();
+
+    if let Some(status) = observation.status {
+        facts.push(RuntimeFact::new(RuntimeFactInput {
+            kind: RuntimeFactKind::StoreRunState,
+            graph_id: run_id.clone(),
+            run_id: Some(run_id.clone()),
+            task_id: None,
+            message: format!("store run {run_id} status is {status:?}"),
+            evidence_refs: vec![EvidenceRef::store_record(
+                format!("run_state:{run_id}"),
+                &run_id,
+                &status,
+            )],
+            timestamp: store_observation_timestamp(observation),
+            payload: json!({
+                "run_id": run_id,
+                "status": status,
+            }),
+        }));
+    }
+
+    for policy in &observation.policy_decisions {
+        facts.push(RuntimeFact::new(RuntimeFactInput {
+            kind: RuntimeFactKind::PolicyDecisionRecorded,
+            graph_id: run_id.clone(),
+            run_id: Some(policy.run_id.clone()),
+            task_id: None,
+            message: format!(
+                "policy decision {} recorded {:?} for {}",
+                policy.decision_id, policy.decision, policy.capability_id
+            ),
+            evidence_refs: vec![EvidenceRef::store_record(
+                format!("policy_decision:{}", policy.decision_id),
+                &policy.run_id,
+                policy,
+            )],
+            timestamp: policy.expires_at,
+            payload: json!({
+                "decision_id": policy.decision_id,
+                "delta_id": policy.delta_id,
+                "actor_id": policy.actor_id,
+                "capability_id": policy.capability_id,
+                "decision": policy.decision,
+                "risk_level": policy.risk_level,
+                "reasons": policy.reasons,
+                "required_approval": policy.required_approval,
+                "expires_at": policy.expires_at,
+            }),
+        }));
+    }
+
+    for grant in &observation.approval_grants {
+        facts.push(RuntimeFact::new(RuntimeFactInput {
+            kind: RuntimeFactKind::ApprovalGrantRecorded,
+            graph_id: run_id.clone(),
+            run_id: Some(grant.run_id.clone()),
+            task_id: None,
+            message: format!(
+                "approval grant {} recorded for policy {}",
+                grant.grant_id, grant.policy_decision_ref
+            ),
+            evidence_refs: vec![EvidenceRef::store_record(
+                format!("approval_grant:{}", grant.grant_id),
+                &grant.run_id,
+                grant,
+            )],
+            timestamp: grant.granted_at,
+            payload: json!({
+                "grant_id": grant.grant_id,
+                "delta_id": grant.delta_id,
+                "policy_decision_ref": grant.policy_decision_ref,
+                "capability_id": grant.capability_id,
+                "approver_id": grant.approver_id,
+                "reason": grant.reason,
+                "expires_at": grant.expires_at,
+            }),
+        }));
+    }
+
+    for ticket in &observation.execution_tickets {
+        facts.push(RuntimeFact::new(RuntimeFactInput {
+            kind: RuntimeFactKind::ExecutionTicketRecorded,
+            graph_id: run_id.clone(),
+            run_id: Some(ticket.run_id.clone()),
+            task_id: None,
+            message: format!(
+                "execution ticket {} recorded for {}",
+                ticket.ticket_id, ticket.capability_id
+            ),
+            evidence_refs: vec![EvidenceRef::store_record(
+                format!("execution_ticket:{}", ticket.ticket_id),
+                &ticket.run_id,
+                ticket,
+            )],
+            timestamp: ticket.expires_at,
+            payload: json!({
+                "ticket_id": ticket.ticket_id,
+                "delta_id": ticket.delta_id,
+                "policy_decision_ref": ticket.policy_decision_ref,
+                "capability_id": ticket.capability_id,
+                "capability_contract_ref": ticket.capability_contract_ref,
+                "executor_ref": ticket.executor_ref,
+                "executor_version": ticket.executor_version,
+                "executor_isolation": ticket.executor_isolation,
+                "actor_id": ticket.actor_id,
+                "expires_at": ticket.expires_at,
+            }),
+        }));
+    }
+
+    for result in &observation.sandbox_results {
+        facts.push(RuntimeFact::new(RuntimeFactInput {
+            kind: RuntimeFactKind::SandboxResultRecorded,
+            graph_id: run_id.clone(),
+            run_id: Some(result.run_id.clone()),
+            task_id: None,
+            message: format!(
+                "sandbox result for ticket {} recorded success={}",
+                result.ticket_id, result.success
+            ),
+            evidence_refs: vec![EvidenceRef::store_record(
+                format!("sandbox_result:{}", result.ticket_id),
+                &result.run_id,
+                result,
+            )],
+            timestamp: result.finished_at,
+            payload: json!({
+                "ticket_id": result.ticket_id,
+                "capability_id": result.capability_id,
+                "policy_decision_ref": result.policy_decision_ref,
+                "capability_contract_ref": result.capability_contract_ref,
+                "executor_ref": result.executor_ref,
+                "success": result.success,
+                "input_hash": result.input_hash,
+                "output_hash": result.output_hash,
+                "started_at": result.started_at,
+                "finished_at": result.finished_at,
+                "error": result.error,
+            }),
+        }));
+    }
+
+    for proof in &observation.proofs {
+        facts.push(RuntimeFact::new(RuntimeFactInput {
+            kind: RuntimeFactKind::ProofRecorded,
+            graph_id: run_id.clone(),
+            run_id: Some(proof.run_id.clone()),
+            task_id: None,
+            message: format!(
+                "proof {} recorded from {}",
+                proof.proof_id, proof.source_ref
+            ),
+            evidence_refs: vec![EvidenceRef::proof(proof)],
+            timestamp: proof.collected_at,
+            payload: json!({
+                "proof_id": proof.proof_id,
+                "policy_decision_ref": proof.policy_decision_ref,
+                "capability_contract_ref": proof.capability_contract_ref,
+                "executor_ref": proof.executor_ref,
+                "source_type": proof.source_type,
+                "source_ref": proof.source_ref,
+                "hash": proof.hash,
+                "claim": proof.claim,
+                "confidence": proof.confidence,
+                "input_hash": proof.input_hash,
+                "output_hash": proof.output_hash,
+            }),
+        }));
+    }
+
+    for event in &observation.ledger_events {
+        facts.push(RuntimeFact::new(RuntimeFactInput {
+            kind: RuntimeFactKind::LedgerEventRecorded,
+            graph_id: run_id.clone(),
+            run_id: Some(event.run_id.clone()),
+            task_id: None,
+            message: format!(
+                "ledger event {} recorded {:?} for {}",
+                event.ledger_event_id, event.result, event.capability_id
+            ),
+            evidence_refs: vec![EvidenceRef::ledger_event(event)],
+            timestamp: event.timestamp,
+            payload: json!({
+                "ledger_event_id": event.ledger_event_id,
+                "event_type": event.event_type,
+                "actor_id": event.actor_id,
+                "resource_ref": event.resource_ref,
+                "delta_id": event.delta_id,
+                "capability_id": event.capability_id,
+                "policy_decision_ref": event.policy_decision_ref,
+                "execution_ticket_ref": event.execution_ticket_ref,
+                "proof_refs": event.proof_refs,
+                "input_hash": event.input_hash,
+                "output_hash": event.output_hash,
+                "previous_event_hash": event.previous_event_hash,
+                "event_hash": event.event_hash,
+                "result": event.result,
+            }),
+        }));
+    }
+
+    if observation
+        .ledger_events
+        .iter()
+        .any(|event| event.result == EventResult::Success)
+    {
+        facts.push(RuntimeFact::new(RuntimeFactInput {
+            kind: RuntimeFactKind::StoreRunCompleted,
+            graph_id: run_id.clone(),
+            run_id: Some(run_id.clone()),
+            task_id: None,
+            message: format!("store run {run_id} has successful ledger evidence"),
+            evidence_refs: observation
+                .ledger_events
+                .iter()
+                .filter(|event| event.result == EventResult::Success)
+                .map(EvidenceRef::ledger_event)
+                .collect(),
+            timestamp: store_observation_timestamp(observation),
+            payload: json!({
+                "run_id": run_id,
+                "successful_ledger_event_count": observation
+                    .ledger_events
+                    .iter()
+                    .filter(|event| event.result == EventResult::Success)
+                    .count(),
+            }),
+        }));
+    }
+
+    sort_facts(facts)
+}
+
 impl RuntimeFact {
     fn new(input: RuntimeFactInput) -> Self {
         let RuntimeFactInput {
@@ -762,6 +1124,28 @@ fn graph_timestamp(snapshot: &RuntimeGraphSnapshot) -> DateTime<Utc> {
         .unwrap_or_else(Utc::now)
 }
 
+fn store_observation_timestamp(observation: &StoredRunObservation) -> DateTime<Utc> {
+    observation
+        .ledger_events
+        .iter()
+        .map(|event| event.timestamp)
+        .chain(observation.proofs.iter().map(|proof| proof.collected_at))
+        .chain(
+            observation
+                .sandbox_results
+                .iter()
+                .map(|result| result.finished_at),
+        )
+        .chain(
+            observation
+                .approval_grants
+                .iter()
+                .map(|grant| grant.granted_at),
+        )
+        .min()
+        .unwrap_or_else(Utc::now)
+}
+
 fn count_recommendations(plan: &RuntimeResumePlan, action: RuntimeAdoptionAction) -> usize {
     plan.adoption_recommendations
         .values()
@@ -809,7 +1193,10 @@ fn stable_hash(value: &impl Serialize) -> String {
 mod tests {
     use super::*;
     use chrono::TimeZone;
-    use moxi_contracts::{DeltaTarget, ResourceType, RiskLevel};
+    use moxi_contracts::{
+        Confidence, Decision, DeltaTarget, EventResult, ExecutionTicket, ExecutorIsolation,
+        PolicyDecision, Proof, ResourceType, RetryPolicy, RiskLevel, RunStatus, SandboxResult,
+    };
     use moxi_runtime::{
         PlannerConstraint, PlannerPlan, PlannerSource, PlannerStep, ResumeBlocker,
         RunningTaskPolicy, RuntimeAdoptionProbeResult, RuntimeAdoptionProbeStatus,
@@ -992,6 +1379,137 @@ mod tests {
         }
     }
 
+    fn policy_decision() -> PolicyDecision {
+        PolicyDecision {
+            decision_id: "pd.store".into(),
+            run_id: "run.store".into(),
+            delta_id: "delta.store".into(),
+            actor_id: "kernel".into(),
+            capability_id: "file.read".into(),
+            decision: Decision::Allow,
+            risk_level: RiskLevel::Low,
+            reasons: vec!["read-only capability".into()],
+            required_approval: None,
+            expires_at: at(8),
+        }
+    }
+
+    fn execution_ticket() -> ExecutionTicket {
+        ExecutionTicket {
+            ticket_id: "ticket.store".into(),
+            run_id: "run.store".into(),
+            delta_id: "delta.store".into(),
+            policy_decision_ref: "pd.store".into(),
+            capability_contract_ref: "file.read".into(),
+            capability_contract_hash: "contract_hash".into(),
+            executor_ref: "moxi.builtin.fs.file_read".into(),
+            executor_version: "0.2.0".into(),
+            executor_artifact_hash: "sha256:artifact".into(),
+            executor_signature_ref: "builtin://signature".into(),
+            executor_signing_key_ref: "builtin://key".into(),
+            executor_manifest_hash: "manifest_hash".into(),
+            executor_isolation: ExecutorIsolation::InProcessTrusted,
+            retry_policy: RetryPolicy::default(),
+            sandbox_profile_ref: "fs-readonly".into(),
+            actor_id: "kernel".into(),
+            capability_id: "file.read".into(),
+            expires_at: at(9),
+        }
+    }
+
+    fn sandbox_result() -> SandboxResult {
+        SandboxResult {
+            ticket_id: "ticket.store".into(),
+            run_id: "run.store".into(),
+            capability_id: "file.read".into(),
+            policy_decision_ref: "pd.store".into(),
+            capability_contract_ref: "file.read".into(),
+            capability_contract_hash: "contract_hash".into(),
+            executor_ref: "moxi.builtin.fs.file_read".into(),
+            executor_version: "0.2.0".into(),
+            executor_artifact_hash: "sha256:artifact".into(),
+            executor_signature_ref: "builtin://signature".into(),
+            executor_signing_key_ref: "builtin://key".into(),
+            executor_manifest_hash: "manifest_hash".into(),
+            gateway_decision_ref: Some("gateway.store".into()),
+            input_hash: "input_hash".into(),
+            success: true,
+            output: json!({"content": "hello"}),
+            error: None,
+            started_at: at(10),
+            finished_at: at(11),
+            output_hash: "output_hash".into(),
+        }
+    }
+
+    fn proof() -> Proof {
+        Proof {
+            proof_id: "proof.store".into(),
+            run_id: "run.store".into(),
+            policy_decision_ref: "pd.store".into(),
+            capability_contract_ref: "file.read".into(),
+            capability_contract_hash: "contract_hash".into(),
+            executor_ref: "moxi.builtin.fs.file_read".into(),
+            executor_version: "0.2.0".into(),
+            executor_artifact_hash: "sha256:artifact".into(),
+            executor_signature_ref: "builtin://signature".into(),
+            executor_signing_key_ref: "builtin://key".into(),
+            executor_manifest_hash: "manifest_hash".into(),
+            gateway_decision_ref: Some("gateway.store".into()),
+            input_hash: "input_hash".into(),
+            output_hash: "output_hash".into(),
+            source_type: "sandbox_result".into(),
+            source_ref: "ticket.store".into(),
+            hash: "proof_hash".into(),
+            claim: "file.read completed".into(),
+            confidence: Confidence::High,
+            collected_at: at(12),
+        }
+    }
+
+    fn ledger_event() -> moxi_contracts::LedgerEvent {
+        moxi_contracts::LedgerEvent {
+            ledger_event_id: "ledger.store".into(),
+            run_id: "run.store".into(),
+            event_type: "tool.executed".into(),
+            actor_id: "kernel".into(),
+            resource_ref: "README.md".into(),
+            delta_id: "delta.store".into(),
+            capability_id: "file.read".into(),
+            policy_decision_ref: "pd.store".into(),
+            execution_ticket_ref: "ticket.store".into(),
+            capability_contract_ref: "file.read".into(),
+            capability_contract_hash: "contract_hash".into(),
+            executor_ref: "moxi.builtin.fs.file_read".into(),
+            executor_version: "0.2.0".into(),
+            executor_artifact_hash: "sha256:artifact".into(),
+            executor_signature_ref: "builtin://signature".into(),
+            executor_signing_key_ref: "builtin://key".into(),
+            executor_manifest_hash: "manifest_hash".into(),
+            gateway_decision_ref: Some("gateway.store".into()),
+            proof_refs: vec!["proof.store".into()],
+            input_hash: "input_hash".into(),
+            output_hash: "output_hash".into(),
+            previous_event_hash: String::new(),
+            event_hash: "event_hash".into(),
+            result: EventResult::Success,
+            timestamp: at(13),
+        }
+    }
+
+    fn store_observation() -> StoredRunObservation {
+        StoredRunObservation {
+            run_id: "run.store".into(),
+            status: Some(RunStatus::Completed),
+            policy_decisions: vec![policy_decision()],
+            approval_grants: vec![],
+            execution_tickets: vec![execution_ticket()],
+            sandbox_results: vec![sandbox_result()],
+            proofs: vec![proof()],
+            ledger_events: vec![ledger_event()],
+        }
+    }
+
     #[test]
     fn graph_projection_emits_facts_with_evidence() {
         let projection = ProjectionSnapshot::from_runtime_graph(&snapshot(), Some(&resume_plan()));
@@ -1026,6 +1544,41 @@ mod tests {
                 .as_deref()
                 .unwrap_or("")
                 .starts_with("sha256:")));
+    }
+
+    #[test]
+    fn store_projection_emits_p0_facts_with_evidence() {
+        let projection = StoreProjectionSnapshot::from_store_observation(&store_observation());
+        let kinds = projection
+            .facts
+            .iter()
+            .map(|fact| fact.kind)
+            .collect::<Vec<_>>();
+
+        assert_eq!(projection.schema_version, OBSERVABILITY_SCHEMA_VERSION);
+        assert_eq!(projection.run_id, "run.store");
+        assert_eq!(projection.metrics.policy_decision_count, 1);
+        assert_eq!(projection.metrics.execution_ticket_count, 1);
+        assert_eq!(projection.metrics.sandbox_result_count, 1);
+        assert_eq!(projection.metrics.proof_count, 1);
+        assert_eq!(projection.metrics.ledger_event_count, 1);
+        assert_eq!(projection.metrics.successful_ledger_event_count, 1);
+        assert!(projection.metrics.is_complete);
+        assert!(kinds.contains(&RuntimeFactKind::StoreRunState));
+        assert!(kinds.contains(&RuntimeFactKind::PolicyDecisionRecorded));
+        assert!(kinds.contains(&RuntimeFactKind::ExecutionTicketRecorded));
+        assert!(kinds.contains(&RuntimeFactKind::SandboxResultRecorded));
+        assert!(kinds.contains(&RuntimeFactKind::ProofRecorded));
+        assert!(kinds.contains(&RuntimeFactKind::LedgerEventRecorded));
+        assert!(kinds.contains(&RuntimeFactKind::StoreRunCompleted));
+        assert!(projection
+            .facts
+            .iter()
+            .all(|fact| fact.run_id.as_deref() == Some("run.store")));
+        assert!(projection
+            .facts
+            .iter()
+            .all(|fact| !fact.evidence_refs.is_empty()));
     }
 
     #[test]

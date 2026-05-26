@@ -1,15 +1,41 @@
 # Project Status
 
-Updated: 2026-05-25
+Updated: 2026-05-26
+
+Note: the latest R10 `moxi-cli` pass is verified locally. The CLI `admit`,
+`manifest`, `status`, `watch`, `tui`, `boundary`, and minimal `repl` commands
+pass formatting, tests, clippy, and real command/REPL checks. `status --text`
+now renders the same read-only shell projection in a readable status view,
+`status --panel` renders a static terminal panel preview, `watch --input
+<snapshot.json>` refreshes the same file-backed projection preview,
+`tui --input <snapshot.json>` renders a read-only Ratatui dashboard skeleton,
+`tui --keys tab,o,g,t,a,b,?,j,k,/filter,r,q` can replay a bounded read-only
+pane/task-selection/filter/refresh/quit sequence, `tui --interactive` starts
+a raw-mode read-only snapshot dashboard that accepts only Tab, o/O, g/G, t/T, a/A,
+b/B, ?, j/J, k/K, Up/Down, r/R, q/Q, and Esc. Task Detail remains
+projection-only and compactly shows selected-task state, stage, progress,
+capability, skill, blocker, and message. The approvals/blockers pane now
+summarizes awaiting approvals as display-only and states that shell approval
+actions are unavailable. Graph Summary now shows compact task/done/running/
+waiting/blocking/failure counts from the same projection. `--limit` can cap
+rendered rows without truncating JSON projection output, and `boundary` renders the
+shell-vs-P0 authority split.
+`moxi-cli` remains a
+submit/projection/approval-display shell only; it cannot execute, approve,
+issue tickets, verify results, or commit ledger events.
 
 ## Current State
 
 MOXI Essence Agent is in v0 trusted-kernel buildout. The current repository is
-a Rust workspace with nine library crates:
+a Rust workspace with twenty library crates:
 
 - `moxi-entry`: inbound entry adapter primitives. Converts external channel
   requests into an intent candidate plus entry metadata and requested
   `PermissionMode`.
+- `moxi-cli`: first CLI shell binary. It exposes `admit`, `manifest`,
+  `status`, file-backed snapshot `watch`, read-only snapshot `tui`,
+  `boundary`, and minimal `repl` commands over `moxi-shells`; it cannot
+  execute, approve, issue tickets, verify, or commit ledger events.
 - `moxi-gateway`: first trusted ingress boundary for deterministic tenant/user
   checks, per-principal request limiting, blocked input scanning, and obvious
   secret redaction.
@@ -37,6 +63,58 @@ a Rust workspace with nine library crates:
   `RunMetric`, and `ProjectionSnapshot` DTOs so shells, eval, adaptive control,
   and audits can cite planner, task, event, attempt, adoption-probe, and resume
   evidence without mutating runtime or kernel state.
+- `moxi-eval`: first P1.5 regression gate. It turns observability facts and
+  store/ledger projections into `EvalSuite`, `EvalCase`, `ReplayProfile`,
+  `EvalRun`, `EvalScore`, `RegressionReport`, and `SafetyFinding` records, and
+  blocks adaptive promotion when required P0 evidence is missing.
+- `moxi-skills`: first P1 skill package layer. It loads and writes
+  `SkillPackage` manifests, lints read-only `SkillManifest` packages, checks
+  package-root entrypoints, builds trigger/non-trigger eval cases through
+  `SkillEvalBinding`, and hands valid packages to `RuntimeManifestRegistry`
+  without executing skill code.
+- `moxi-model-gateway`: first P1 model gateway control plane. It defines
+  provider descriptors, `ModelRouteRequest`, `ModelRouteDecision`,
+  `StructuredOutputAttempt`, and `ModelGatewayFact`, selects local/cloud model
+  providers under risk, cost, latency, structured-output, and fallback
+  constraints, validates structured outputs, and emits non-authorizing
+  `UnderstandingProposal` records.
+- `moxi-memory`: first P1 memory control plane. It defines `MemoryCrystal`,
+  `MemoryWriteDraft`, `MemoryWriteProposal`, `MemoryReadQuery`,
+  `MemoryCitation`, `WorkingMemoryProjection`, `ForgetRequest`,
+  `MemoryAuditEvent`, and `MemoryContaminationFinding`, enforcing provider
+  scopes, source tracking, consent/ledger gates, contamination checks, recall
+  citations, and soft-delete/forget audit events without letting models write
+  durable memory directly.
+- `moxi-swarm`: first P1 multi-agent orchestration control plane. It defines
+  `SwarmPlan`, `SwarmTask`, typed `AgentMessage`, `HandoffContract`,
+  `SubagentSidechain`, `ReviewGate`, `MergeEvidence`, `ParentMerge`,
+  `SwarmMetric`, and `SwarmSafetyFinding`, enforcing subagent capability
+  bounds, memory-scope bounds, data-only messages, review gates, and evidence
+  requirements before parent merges.
+- `moxi-adaptive`: first P1.5 self-improvement proposal layer. It defines
+  `ReflectionReport`, `RootCauseHypothesis`, `OptimizationDelta`,
+  `ExperimentPlan`, and `ExperimentResult`, deriving optimization proposals
+  from regression reports and requiring eval evidence for every delta.
+- `moxi-governance`: first P1.5 promotion and evolution ledger layer. It
+  defines `PromotionDecision`, `RolloutPlan`, `RollbackPlan`,
+  `EvolutionEvent`, and `EvolutionLedger`, requiring passed experiments,
+  evidence refs, and human approval for protected or high-risk deltas before
+  rollout planning.
+- `moxi-vault`: first P0 production-hardening control plane. It defines
+  credential references, secret-use requests/decisions, tenant trust roots,
+  executor signature verification decisions, tenant policy packs, quorum
+  approvals, break-glass decisions, and redacted audit export records without
+  storing raw secret material.
+- `moxi-hotpath`: first low-latency control plane. It defines latency budgets,
+  hot-path requests, cache entries, hot-path decisions, degrade plans, latency
+  samples, latency snapshots, and hot-path facts for ack/deny/route/cache-hit
+  first-packet paths without executing tools or authorizing actions.
+- `moxi-shells`: first P2 shell control plane. It defines shell request
+  drafts, admissions, approval prompts, adapter manifests, graph/task
+  projection DTOs, and runtime-profile compatibility checks for CLI/MCP/API
+  style shells. It normalizes requests through `moxi-entry` and renders
+  runtime snapshots, but cannot authorize, execute, issue tickets, verify
+  results, or commit ledger events.
 - `moxi-sandbox`: local read-only file sandbox with workspace-root locking and
   path escape protection, plus v0 process-sandbox JSON protocol execution.
 - `moxi-store`: SQLite-backed run state, budget counters, append-only
@@ -72,12 +150,25 @@ The current code is best described as **P0+ with a narrow P1 runtime and P1.5
 observability start**.
 The trusted kernel loop is implemented end to end, and several P0 concerns have
 moved beyond "minimal" into replayable/auditable behavior. P1 now has a
-deterministic planner IR and task runtime, but model-backed planning, model
-gateway, context manager, verifier-as-a-separate-runtime, rollback manager,
+deterministic planner IR, task runtime, and a non-authorizing model-proposal to
+planner bridge plus an R4 model-gateway control plane MVP, but richer
+model-backed strategy planning, real provider adapters, streaming model
+calls, context manager, verifier-as-a-separate-runtime, rollback manager,
 code graph, and retrieval engine are not implemented as current Rust workspace
-runtime modules. P1.5 now has a read-only runtime fact projection, but
-store/ledger-backed fact ingestion, metrics export, eval suites, and adaptive
-promotion governance are not implemented yet.
+runtime modules. P1.5 now has a read-only runtime fact projection, an R1
+store/ledger ingestion MVP for persisted P0 run facts, and an R2 `moxi-eval`
+MVP for fact-derived regression reports. Metrics export, trace sinks, concrete
+benchmark fixtures, and adaptive promotion governance are not implemented yet.
+P1 now also has an R3 `moxi-skills` package/lint/eval-binding MVP, an R4
+`moxi-model-gateway` routing/proposal MVP, and an R5 `moxi-memory` control
+plane MVP, and an R6 `moxi-swarm` orchestration-control MVP. P1.5 now has an
+R7 `moxi-adaptive` + `moxi-governance` self-improvement governance MVP, but
+signed package trust, registry install/publish, quarantine, rollback, MCP risk
+scanning, real model provider adapters, streaming, cache safety policy, quality
+facts, persistent memory storage, retrieval ranking, memory eval history,
+memory consent ledger integration, real subagent execution, distributed
+scheduling, swarm topology benchmarks, persistent evolution ledgers, and live
+rollout controllers are not implemented yet.
 
 P1 has started with a narrow `moxi-runtime` v0 skeleton. It is not a full agent
 runtime yet: it covers deterministic `PlannerPlan` creation, planner hash
@@ -92,12 +183,114 @@ recommendations and can consult provider probes before retry. Multi-task graphs
 currently open one P0 run per task and aggregate outcomes at the runtime layer.
 
 P1.5 has started with `moxi-observability`. It is intentionally not an event
-bus or control authority: it converts runtime graph/query snapshots into
-citeable facts and timelines. The first surface covers planner binding, graph
-planning, task state, runtime events, task attempts, adoption probes, resume
-recommendations, graph completion, and aggregate run metrics. It does not
-write runtime state, issue tickets, execute capabilities, verify outputs, or
-commit ledger events.
+bus or control authority: it converts runtime graph/query snapshots and
+read-only store observations into citeable facts and timelines. The runtime
+surface covers planner binding, graph planning, task state, runtime events,
+task attempts, adoption probes, resume recommendations, graph completion, and
+aggregate run metrics. The R1 store surface covers persisted run status, policy
+decisions, approval grants, execution tickets, sandbox results, proofs, ledger
+events, and store-derived completion metrics. It does not write runtime state,
+issue tickets, execute capabilities, verify outputs, or commit ledger events.
+
+R2 has started with `moxi-eval`. It is also read-only: it consumes
+observability facts/projections, builds replay/regression cases, runs local
+case checks, emits scores and safety findings, and marks adaptive promotion as
+blocked when required P0 evidence is missing. It does not execute tasks, call
+models, issue tickets, verify outputs, or mutate the store/ledger.
+
+R3 has started with `moxi-skills`. It keeps skill packaging separate from
+execution: packages can be loaded, linted, converted into runtime manifests,
+and bound to eval cases, but actual task execution still flows through
+`moxi-runtime` and P0 capability/ticket/proof/ledger boundaries.
+
+R4 has started with `moxi-model-gateway`. It keeps model selection and
+understanding advisory: provider descriptors can be routed against risk,
+capability, structured-output, cost, latency, local/cloud, and fallback
+constraints; route decisions can become cost/latency facts; structured output
+attempts are schema-validated with retry delay hints; and
+`UnderstandingProposal` is explicitly marked as unable to authorize. It does
+not call providers, stream tokens, execute actions, or issue tickets.
+
+R5 has started with `moxi-memory`. It keeps long-term memory proposal-based
+and evidence-bound: write requests become `MemoryWriteProposal` records with
+source, scope, confidence, retention, risk, consent, ledger, tags, and evidence
+refs; provider scope and access modes are enforced; contamination findings can
+block instruction-like content; accepted `MemoryCrystal` records carry source,
+consent, and ledger refs; recall returns citations; working-memory projections
+stay read-only; and forget requests produce auditable soft-delete or forget
+events. It does not provide a production vector store, ranking engine, consent
+ledger, or memory persistence backend yet.
+
+R6 has started with `moxi-swarm`. It keeps multi-agent orchestration
+evidence-gated: plans list bounded `SubagentManifest` records and tasks,
+handoffs constrain allowed capabilities and memory scopes, typed messages
+distinguish claims/evidence/instructions/tool proposals/risk/review decisions,
+sidechains collect message and evidence ids, review gates approve or reject
+sidechains, merge evidence is required before parent merge proposals, and
+parent merges are explicitly unable to commit ledger events. It does not run
+subagents, open tool tickets, replace P0 proof, or implement production swarm
+scheduling yet.
+
+R7 has started with `moxi-adaptive` and `moxi-governance`. Adaptive converts
+regression reports into `ReflectionReport` records, root-cause hypotheses,
+evidence-bound `OptimizationDelta` proposals, and experiment plans/results.
+Governance converts passed experiments into promotion decisions, rollout
+plans, rollback plans, and evolution ledger events. Protected
+`PolicyPack`/`Capability` deltas and high-risk deltas require human approval,
+and every promotion or rollback must carry eval evidence. These crates do not
+modify P0 policy, issue tickets, execute rollouts, or persist a production
+evolution ledger yet.
+
+R8 has locally completed the P0 production-hardening control-plane closure with
+`moxi-vault`. It models the first P0 production-hardening
+control plane for credential references, secret-use boundaries, tenant trust
+roots, executor signature verification decisions, tenant policy packs,
+quorum approvals, break-glass decisions, redacted audit exports, production
+adapter evidence, and a
+fail-closed production readiness gate. The gate records missing production auth,
+external secret-manager/KMS/HSM, cryptographic verifier, hardened sandbox,
+secret injection, rotation, tenant policy, executor trust-root, and compliance
+audit-export evidence before credentialed or executable production enablement.
+It keeps raw secrets out of model, log, and durable payload paths. It does not
+yet integrate concrete KMS/HSM/secret-manager adapters, perform real
+cryptographic verification, inject credentials into OS sandboxes, or generate
+persisted compliance export bundles.
+
+R9 has started with `moxi-hotpath`. It turns the 5ms claim into a bounded
+first-packet contract for ack, early deny, route, and exact/template cache-hit
+decisions. It also records degrade plans, latency samples, p50/p95/p99
+snapshots, and hot-path facts. It does not execute tools, authorize actions,
+serve semantic cache entries as trusted facts, or claim that complete LLM
+answers can be produced in 5ms.
+
+R10 has started with `moxi-shells`. It makes product shells explicit as
+submit-only, projection-only, and approval-display-only surfaces. The MVP
+supports shell request drafts, entry normalization, shell adapter manifests,
+runtime shell profile compatibility, event-feed projection, query-snapshot
+projection, and high-risk approval hints. `moxi-cli` now adds the first CLI
+binary with verified `admit`, `manifest`, `status`, `watch`, `tui`, `boundary`,
+and minimal `repl` commands. `status` renders runtime event-feed and query
+snapshots as shell projections without executing or authorizing work,
+including readable `--text` output and a static ASCII `--panel` preview.
+`watch` repeats that same rendering from an explicit snapshot file for bounded
+ticks, so it is a preview loop rather than live runtime control. `tui` renders
+a Ratatui snapshot dashboard with overview, graph summary, tasks,
+approvals/blockers, task detail, boundary, and key-hint panes. Its `--keys`
+replay model covers `tab`,
+`o`, `g`, `t`, `a`, `b`, `?`, `j`, `k`, `/filter`, `r`, and `q`, allowing pane
+cycling/focus, task selection, filtering, refresh count, and quit state to be
+verified without opening a terminal. `tui --interactive` starts a crossterm
+raw-mode event-loop skeleton for the same explicit snapshot file and only
+accepts Tab, o/O, g/G, t/T, a/A, b/B, ?, j/J, k/K, Up/Down, r/R, q/Q, and Esc. Its
+Task Detail pane follows the selected task and compactly shows state, stage,
+progress, capability, skill, blocker, and message without action controls; it
+also renders awaiting-approval counts as display-only in the approvals/blockers
+pane, shows compact graph task counters, and still has no live runtime polling.
+`--limit` only caps rendered blocker/graph/task rows for text or panel output;
+JSON projection output remains complete. `boundary` renders the
+no-execution/no-authority contract. It does not include a full runtime-control
+TUI, MCP server, SDK, HTTP
+transport, desktop UI, web UI, mobile approval app, or digital-human shell yet.
 
 P0 coverage in current code:
 
@@ -105,13 +298,20 @@ P0 coverage in current code:
   compiler, kernel admission, configurable policy engine, approval grants,
   capability registry, run contract, capability contract, state store, local
   file sandbox, v0 process-sandbox protocol, proof collection, append-only
-  ledger, schema migrations, and ledger replay/audit verification.
+  ledger, schema migrations, ledger replay/audit verification, reference-only
+  credential-use decisions, tenant trust-root signature verification decisions,
+  quorum approvals, break-glass decision records, and redacted audit export
+  records.
 - Partial: scheduler is represented by kernel-driven run status transitions and
   heartbeat/budget accounting, but not an independent scheduler runtime.
 - Partial: execution event bus is represented by persisted ledger/state facts,
   but no separate streaming event bus exists yet.
 - Production gates before enabling credentialed or executable external actions:
-  credential/key store and production-grade OS sandbox hardening.
+  `moxi-vault` now exposes a fail-closed readiness decision for auth,
+  credential/key-store, cryptographic verifier, hardened sandbox, secret
+  injection, rotation, tenant policy, executor trust-root, and compliance export
+  evidence. Concrete adapters for these gates remain required before production
+  exposure.
 
 P0 boundary decisions:
 
@@ -210,6 +410,10 @@ P0 boundary decisions:
   filtering, and session loading.
 - Runtime `PlannerPlan` IR and `ExecutionPlan` with deterministic dependency
   ordering for simple multi-step graphs.
+- Runtime model-proposal bridge: `RuntimeSession::planner_plan_from_understanding`
+  converts evidence-bound, non-authorizing `UnderstandingProposal` task
+  decompositions into `PlannerSource::ModelProposed` plans, rejects capability
+  expansion, and still compiles through profile validation before any P0 action.
 - Runtime `RuntimePlannerRecord` binds planner IR to graph id, source,
   step count, and stable plan hash for live query, journal replay, and SQLite
   store recovery.
@@ -287,6 +491,88 @@ P0 boundary decisions:
   `EvidenceRef`, `RunTimeline`, `RunMetric`, and `ProjectionSnapshot` records.
   Every generated fact carries evidence back to a runtime graph, planner, task,
   event, attempt, adoption probe, or resume plan record.
+- Store/ledger observability facts: `moxi-store::StoredRunObservation` exposes
+  a read-only run observation spanning persisted run state, policy decisions,
+  approval grants, execution tickets, sandbox results, proofs, and ledger
+  events; `moxi-observability::StoreProjectionSnapshot` converts it into
+  citeable `RuntimeFact`, `EvidenceRef`, `RunTimeline`, and `StoreRunMetric`
+  records without issuing tickets, executing capabilities, verifying outputs,
+  or committing ledger events.
+- Eval regression gate: `moxi-eval` exposes `EvalSuite`, `EvalCase`,
+  `ReplayProfile`, `EvalRun`, `EvalScore`, `RegressionReport`, and
+  `SafetyFinding`, can build a P0 replay/audit suite from
+  `StoreProjectionSnapshot`, and blocks adaptive promotion if required policy,
+  ticket, sandbox result, proof, or ledger facts are missing.
+- Skill package MVP: `moxi-skills` exposes `SkillPackage`,
+  `SkillTriggerTest`, `SkillEvalBinding`, `SkillLintReport`, and
+  `SkillLintFinding`; it loads/writes package manifests, rejects package-root
+  path escapes, lints read-only skill manifests, converts valid packages into
+  `RuntimeManifestRegistry`, and generates trigger/non-trigger eval cases.
+- Model gateway MVP: `moxi-model-gateway` exposes provider descriptors,
+  `ModelRouteRequest`, `ModelRouteDecision`, `StructuredOutputAttempt`, and
+  `ModelGatewayFact`; it routes local/cloud providers with fallback lists,
+  records cost/latency estimates, rejects high-risk downgrade to insufficient
+  providers, validates structured outputs, and creates non-authorizing
+  `UnderstandingProposal` records.
+- Memory control-plane MVP: `moxi-memory` exposes `MemoryCrystal`,
+  `MemoryWriteDraft`, `MemoryWriteProposal`, `MemoryReadQuery`,
+  `MemoryCitation`, `WorkingMemoryProjection`, `ForgetRequest`,
+  `MemoryAuditEvent`, and `MemoryContaminationFinding`; it enforces provider
+  scopes, source refs, consent/ledger gates, contamination blocking, recall
+  citations, working-memory projections, and auditable forget events.
+- Swarm orchestration-control MVP: `moxi-swarm` exposes `SwarmPlan`,
+  `SwarmTask`, typed `AgentMessage`, `HandoffContract`, `SubagentSidechain`,
+  `ReviewGate`, `MergeEvidence`, `ParentMerge`, `SwarmMetric`, and
+  `SwarmSafetyFinding`; it blocks subagent capability expansion, enforces
+  memory scopes, treats untrusted content as data, requires review-backed merge
+  evidence, and keeps parent merge proposals unable to commit ledger events.
+- Adaptive/governance MVP: `moxi-adaptive` exposes `ReflectionReport`,
+  `RootCauseHypothesis`, `OptimizationDelta`, `ExperimentPlan`, and
+  `ExperimentResult`; `moxi-governance` exposes `PromotionDecision`,
+  `RolloutPlan`, `RollbackPlan`, `EvolutionEvent`, and `EvolutionLedger`. The
+  loop requires eval evidence, passed experiments, and human approval for
+  protected/high-risk deltas before rollout planning.
+- P0 production-hardening MVP: `moxi-vault` exposes `CredentialRef`,
+  `SecretUseRequest`, `SecretUseDecision`, `TrustRoot`, `ExecutorSignature`,
+  `SignatureVerificationDecision`, `TenantPolicyPack`, `QuorumApproval`,
+  `BreakGlassRequest`, `BreakGlassDecision`, `AuditExportRecord`,
+  `ProductionHardeningEvidence`, `ProductionAdapterEvidence`, and
+  `ProductionReadinessDecision`. It rejects
+  raw secret-looking references, requires quorum for high-risk secret use,
+  checks executor signatures against tenant trust-root metadata, binds signature
+  decisions to tenant ids, exports redacted audit records, rejects placeholder
+  adapter evidence, and blocks production readiness until all P0 hardening gates
+  have tenant-bound adapter evidence.
+- Low-latency control-plane MVP: `moxi-hotpath` exposes `LatencyBudget`,
+  `HotPathRequest`, `CacheEntry`, `HotPathDecision`, `DegradePlan`,
+  `LatencySample`, `LatencySnapshot`, and `HotPathFact`. It enforces cache
+  scope/freshness/risk gates, early-denies unsafe capabilities, defers
+  high-risk work to trusted execution, and reports p50/p95/p99 first-packet
+  latency snapshots.
+- Shell control-plane MVP: `moxi-shells` exposes `ShellRequestDraft`,
+  `ShellAdmission`, `ApprovalPrompt`, `ShellProjection`, `ShellGraphView`,
+  and `ShellTaskView`. It binds shell surfaces to compatible
+  `RuntimePolicyProfile` values, normalizes shell requests through
+  `moxi-entry`, and renders runtime event/query snapshots without granting any
+  execution or approval authority.
+- CLI shell MVP: `moxi-cli` exposes `admit`, `manifest`, `status`, `watch`,
+  `tui`, `boundary`, and `repl` commands that emit JSON shell contracts. The latest
+  R10 verification passed for formatting, workspace tests, workspace clippy,
+  real `admit`/`manifest`/`boundary` runs, and piped REPL input. `status`
+  reads event-feed or query-snapshot JSON from stdin or a file and projects it
+  through `moxi-shells`, either as JSON, a readable `--text` status view, or a
+  static ASCII `--panel` preview. `watch` rereads an explicit snapshot file
+  and rerenders the same projection for bounded ticks; it does not add runtime
+  polling, execution, approval, ticket, verification, or ledger authority.
+  `tui` renders the same snapshot as a Ratatui multi-pane dashboard and remains
+  read-only; `--keys` can replay `tab`, `o`, `t`, `a`, `b`, `?`, `j`, `k`, `/filter`, `r`, and `q` for deterministic
+  tests, while `--interactive` starts a raw-mode snapshot dashboard that accepts
+  only Tab, o/O, t/T, a/A, b/B, ?, j/J, k/K, Up/Down, r/R, q/Q, and Esc. It is still not an interactive runtime
+  controller.
+  `--limit` is a render-only row cap for text and panel output and does not
+  truncate JSON projection output. `boundary` reports supported and forbidden
+  shell commands plus the P0-owned authority fields. It intentionally rejects
+  unknown commands such as `execute`, preserving the shell-vs-kernel boundary.
 - Failed attempt recovery now distinguishes retry-safe/no-ticket attempts from
   attempts with ticket, ledger, pending provider, or unknown side-effect
   evidence. Only the former can be made retry-ready automatically; the latter
@@ -310,31 +596,52 @@ P0 boundary decisions:
 - Production gateway integration for external authentication providers,
   cryptographic tenant/session trust, distributed rate limiting, and compliance
   grade redaction.
+- Production vault integration beyond the current R8 adapter evidence gate:
+  concrete KMS/HSM/secret-manager calls, real cryptographic signature
+  verification, secret injection into hardened sandboxes, tenant trust-root
+  persistence, and compliance export bundle generation. Adapter evidence and
+  rotation/compliance requirements are now modeled as fail-closed readiness
+  gates, but live external infrastructure still needs to be connected.
+- Low-latency hardening beyond the current R9 control-plane MVP: real
+  benchmark harnesses, latency fact ingestion into observability/eval,
+  model-serving adapters, queue/backpressure integration, exact/template cache
+  storage, semantic cache safety eval, and per-tenant p50/p95/p99 SLO reports.
 - Model-backed or policy-backed intent compilation beyond the current
   deterministic v0 compiler.
-- Model-backed/strategy-backed P1 planner beyond deterministic and skill-registry
-  plans, cross-host distributed locking beyond local SQLite arbitration,
+- P1 planner hardening beyond deterministic, skill-registry, and the current
+  non-authorizing model-proposal bridge: richer strategy planning, plan repair,
+  cross-host distributed locking beyond local SQLite arbitration,
   concrete provider-specific adoption adapter implementations against real idempotency APIs,
   ledger-backed adoption of already-committed external effects, profile schema
   migrations, and packaged profile distribution.
-- Store/ledger-backed observability ingestion beyond the current runtime
-  snapshot/query projection, metrics export, trace sinks, eval-case generation,
-  and adaptive-control promotion gates.
-- Concrete CLI, HTTP API, SDK, MCP server, desktop UI, or web UI transports.
-- Model provider adapters, model gateway, tool gateway, plugin host, browser
-  daemon, remote bridge, swarm runtime, workflow runtime, and long-term memory
-  runtime.
-- Swarm runtime contracts beyond the current `SubagentManifest`: `SwarmPlan`,
-  typed `AgentMessage`, `HandoffContract`, `SubagentSidechain`, `ReviewGate`,
-  `MergeEvidence`, topology evaluation, faulty-agent injection, and malicious
-  input regression coverage.
+- Observability export metrics, trace sinks, concrete benchmark fixtures,
+  persisted eval history, failure-to-eval-case generation, and adaptive-control
+  promotion gates beyond the current runtime/R1 facts and R2 eval MVP.
+- Signed skill package metadata, trust roots, registry publish/install,
+  quarantine/disable/rollback lifecycle, and MCP server risk scanner beyond the
+  current R3 skill package/lint/eval-binding MVP.
+- Full CLI TUI, HTTP API transport, SDK package, MCP server, desktop UI, web
+  UI, mobile approval app, and digital-human shell.
+- Real model provider adapters, streaming model calls, model cache safety
+  policy, gateway-to-observability export, model quality facts, persistent
+  memory storage, memory retrieval ranking, consent ledger integration, real
+  subagent execution adapters, distributed swarm scheduling, topology
+  benchmark suites, persistent evolution ledger storage, live rollout/rollback
+  executor, governance approval UI, tool gateway, plugin host, browser daemon,
+  remote bridge, and workflow runtime.
+- Adaptive/governance hardening beyond the current R7 MVP: durable experiment
+  history, real rollout controllers, rollback execution, policy-pack review
+  workflows, audit export integration, and longitudinal promotion metrics.
+- Swarm hardening beyond the current R6 MVP: real sidechain persistence,
+  reviewer assignment policy, topology evaluation, faulty-agent injection,
+  malicious input regression coverage, budget enforcement, and latency/token
+  accounting.
 - Advanced manifest registry features: schema migrations, signatures, signed
   trust roots, and concrete packaged registries.
 - Concrete production executors beyond the current built-in `file.read`,
   process-sandbox protocol harness, and test-only custom executor.
 - OS-level process sandbox hardening beyond direct child-process execution,
   protocol checks, and timeout kill.
-- Cryptographic executor signature verification against production trust roots.
 - Production transcript/WAL hardening, database-backed durable projections,
   concrete push transports such as WebSocket/SSE/IPC, GitNexus harness, release
   binaries, and package-manager installers.
@@ -350,6 +657,33 @@ cargo test
 ```
 
 Expected result: formatting, lint, and all workspace tests pass.
+
+Latest targeted R10 recovery verification:
+
+```powershell
+cargo fmt --all --check
+cargo test -p moxi-cli --locked --target-dir C:\MOXI-Essence-agent\MOXI-Essence-agent\target-codex-r10-repl-verify
+cargo test -p moxi-shells --locked --target-dir C:\MOXI-Essence-agent\MOXI-Essence-agent\target-codex-r10-repl-verify
+cargo clippy -p moxi-cli --all-targets --locked --target-dir C:\MOXI-Essence-agent\MOXI-Essence-agent\target-codex-r10-repl-verify -- -D warnings
+cargo run -p moxi-cli --locked --target-dir C:\MOXI-Essence-agent\MOXI-Essence-agent\target-codex-r10-repl-verify -- admit --tenant local --user codex --workspace C:\MOXI-Essence-agent\MOXI-Essence-agent --goal "read project status" --capability file.read
+cargo run -p moxi-cli --locked --target-dir C:\MOXI-Essence-agent\MOXI-Essence-agent\target-codex-r10-repl-verify -- manifest --surface cli
+```
+
+Result: passed. Later full-workspace verification also passed after extending
+the read-only `status` projection command to both event-feed and query-snapshot
+inputs. The piped REPL checks passed for `admit`, `manifest`, `status`,
+`execute` as `unknown command`, and `exit`. The latest `moxi-cli` focused test
+run covers 41 tests after adding file-backed `watch` preview coverage,
+read-only Ratatui `tui` skeleton, compact Graph Summary coverage, compact Task
+Detail coverage, approval display-only panel coverage, scriptable `tui --keys`
+pane/task-selection/filter/refresh/quit coverage, graph-pane focus replay,
+raw-mode key mapping,
+pane-focus key replay, task-selection key replay, and `--poll-ms` validation,
+boundary reporting, PowerShell/Windows UTF-8 BOM handling for REPL commands
+and piped status JSON, and render-only `--limit` coverage for text/panel output
+and JSON non-truncation. The latest graph-focus pass used
+`target-codex-r10-tui-graph-focus`, with `moxi-cli` at 41 passed and
+`moxi-shells` at 7 passed.
 
 ## Architecture Direction
 
@@ -371,8 +705,16 @@ See [optimized-core-architecture.md](optimized-core-architecture.md) for the
 target P0/P1/P2 boundary, extension manifest surface, swarm-native runtime
 shape, memory rules, and commercial readiness gates.
 
-Swarm-specific architecture is research-backed but not implemented yet. The
-current direction is P1-native, evidence-gated swarm orchestration: subagents
-may plan, review, and propose, but they cannot expand authority or merge into a
-parent run without sidechain evidence and P0-controlled execution for external
-effects.
+Swarm-specific architecture now has a P1 control-plane MVP in `moxi-swarm`.
+The current direction remains evidence-gated: subagents may plan, review, and
+propose, but they cannot expand authority or merge into a parent run without
+sidechain evidence and P0-controlled execution for external effects. Real
+subagent execution, sidechain persistence, topology eval, and production budget
+enforcement are still future hardening work.
+
+
+
+
+
+
+

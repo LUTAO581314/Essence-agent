@@ -127,6 +127,18 @@ pub struct AuditReplayReport {
     pub last_event_hash: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct StoredRunObservation {
+    pub run_id: String,
+    pub status: Option<RunStatus>,
+    pub policy_decisions: Vec<PolicyDecision>,
+    pub approval_grants: Vec<ApprovalGrant>,
+    pub execution_tickets: Vec<ExecutionTicket>,
+    pub sandbox_results: Vec<SandboxResult>,
+    pub proofs: Vec<Proof>,
+    pub ledger_events: Vec<LedgerEvent>,
+}
+
 pub struct Store {
     conn: Connection,
 }
@@ -777,6 +789,17 @@ impl Store {
             .transpose()
     }
 
+    pub fn policy_decisions_for_run(&self, run_id: &str) -> StoreResult<Vec<PolicyDecision>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT payload_json FROM policy_decisions WHERE run_id = ?1 ORDER BY rowid ASC",
+        )?;
+        let decisions = stmt
+            .query_map(params![run_id], |row| row.get::<_, String>(0))?
+            .map(|payload| Ok(serde_json::from_str(&payload?)?))
+            .collect::<StoreResult<Vec<_>>>()?;
+        Ok(decisions)
+    }
+
     pub fn record_ticket(&self, ticket: &ExecutionTicket) -> StoreResult<()> {
         self.conn.execute(
             r#"
@@ -809,6 +832,17 @@ impl Store {
         payload
             .map(|payload| Ok(serde_json::from_str(&payload)?))
             .transpose()
+    }
+
+    pub fn execution_tickets_for_run(&self, run_id: &str) -> StoreResult<Vec<ExecutionTicket>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT payload_json FROM execution_tickets WHERE run_id = ?1 ORDER BY rowid ASC",
+        )?;
+        let tickets = stmt
+            .query_map(params![run_id], |row| row.get::<_, String>(0))?
+            .map(|payload| Ok(serde_json::from_str(&payload?)?))
+            .collect::<StoreResult<Vec<_>>>()?;
+        Ok(tickets)
     }
 
     pub fn consume_ticket(&self, ticket_id: &str) -> StoreResult<()> {
@@ -867,6 +901,17 @@ impl Store {
         } else {
             Ok(None)
         }
+    }
+
+    pub fn approval_grants_for_run(&self, run_id: &str) -> StoreResult<Vec<ApprovalGrant>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT payload_json FROM approval_grants WHERE run_id = ?1 ORDER BY rowid ASC",
+        )?;
+        let grants = stmt
+            .query_map(params![run_id], |row| row.get::<_, String>(0))?
+            .map(|payload| Ok(serde_json::from_str(&payload?)?))
+            .collect::<StoreResult<Vec<_>>>()?;
+        Ok(grants)
     }
 
     pub fn approval_grants_for_policy_decision(
@@ -931,6 +976,17 @@ impl Store {
         }
     }
 
+    pub fn sandbox_results_for_run(&self, run_id: &str) -> StoreResult<Vec<SandboxResult>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT payload_json FROM sandbox_results WHERE run_id = ?1 ORDER BY rowid ASC",
+        )?;
+        let results = stmt
+            .query_map(params![run_id], |row| row.get::<_, String>(0))?
+            .map(|payload| Ok(serde_json::from_str(&payload?)?))
+            .collect::<StoreResult<Vec<_>>>()?;
+        Ok(results)
+    }
+
     pub fn record_proof(&self, proof: &Proof) -> StoreResult<()> {
         self.conn.execute(
             r#"
@@ -977,6 +1033,17 @@ impl Store {
         } else {
             Ok(None)
         }
+    }
+
+    pub fn proofs_for_run(&self, run_id: &str) -> StoreResult<Vec<Proof>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT payload_json FROM proofs WHERE run_id = ?1 ORDER BY rowid ASC")?;
+        let proofs = stmt
+            .query_map(params![run_id], |row| row.get::<_, String>(0))?
+            .map(|payload| Ok(serde_json::from_str(&payload?)?))
+            .collect::<StoreResult<Vec<_>>>()?;
+        Ok(proofs)
     }
 
     pub fn append_ledger_event(&self, mut event: LedgerEvent) -> StoreResult<LedgerEvent> {
@@ -1037,6 +1104,19 @@ impl Store {
             .map(|payload| Ok(serde_json::from_str(&payload?)?))
             .collect::<StoreResult<Vec<_>>>()?;
         Ok(events)
+    }
+
+    pub fn observe_run(&self, run_id: &str) -> StoreResult<StoredRunObservation> {
+        Ok(StoredRunObservation {
+            run_id: run_id.into(),
+            status: self.get_run_status(run_id)?,
+            policy_decisions: self.policy_decisions_for_run(run_id)?,
+            approval_grants: self.approval_grants_for_run(run_id)?,
+            execution_tickets: self.execution_tickets_for_run(run_id)?,
+            sandbox_results: self.sandbox_results_for_run(run_id)?,
+            proofs: self.proofs_for_run(run_id)?,
+            ledger_events: self.ledger_events_for_run(run_id)?,
+        })
     }
 
     pub fn latest_event_hash(&self) -> StoreResult<Option<String>> {
@@ -2413,6 +2493,32 @@ mod tests {
         assert_eq!(report.sandbox_results, 1);
         assert_eq!(report.proofs, 1);
         assert_eq!(report.last_event_hash, Some(committed.event_hash));
+    }
+
+    #[test]
+    fn observe_run_collects_read_only_execution_facts() {
+        let store = Store::open_memory().unwrap();
+        let (policy, ticket, result, proof, event) = audited_chain();
+        store
+            .transition_run_status("run_1", RunStatus::Admitted)
+            .unwrap();
+        store
+            .transition_run_status("run_1", RunStatus::Executing)
+            .unwrap();
+        record_registry_facts(&store, &event);
+        record_execution_facts(&store, &policy, &ticket, &result, &proof);
+        let event = store.append_ledger_event(event).unwrap();
+
+        let observation = store.observe_run("run_1").unwrap();
+
+        assert_eq!(observation.run_id, "run_1");
+        assert_eq!(observation.status, Some(RunStatus::Executing));
+        assert_eq!(observation.policy_decisions, vec![policy]);
+        assert_eq!(observation.execution_tickets, vec![ticket]);
+        assert_eq!(observation.sandbox_results, vec![result]);
+        assert_eq!(observation.proofs, vec![proof]);
+        assert_eq!(observation.ledger_events, vec![event]);
+        assert!(observation.approval_grants.is_empty());
     }
 
     #[test]

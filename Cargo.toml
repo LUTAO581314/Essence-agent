@@ -1,14 +1,25 @@
 [workspace]
 members = [
+    "crates/moxi-adaptive",
+    "crates/moxi-cli",
     "crates/moxi-contracts",
     "crates/moxi-core",
     "crates/moxi-entry",
+    "crates/moxi-eval",
     "crates/moxi-gateway",
+    "crates/moxi-governance",
+    "crates/moxi-hotpath",
     "crates/moxi-intent",
+    "crates/moxi-memory",
+    "crates/moxi-model-gateway",
     "crates/moxi-observability",
     "crates/moxi-runtime",
     "crates/moxi-sandbox",
+    "crates/moxi-shells",
+    "crates/moxi-skills",
+    "crates/moxi-swarm",
     "crates/moxi-store",
+    "crates/moxi-vault",
 ]
 resolver = "2"
 

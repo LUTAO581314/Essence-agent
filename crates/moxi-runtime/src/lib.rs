@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use moxi_contracts::{
     CapabilityContract, DeltaState, DeltaTarget, EventResult, ExecutionTicket, Intent, LedgerEvent,
     ModuleManifest, PermissionMode, ResourceType, RiskLevel, RunContract, RuntimeInputMetadata,
-    SandboxInput, SkillManifest, WorldDelta,
+    SandboxInput, SkillManifest, UnderstandingProposal, UnderstandingProposalKind, WorldDelta,
 };
 use moxi_core::{capability_contract_hash, CoreError, Kernel};
 use serde::{Deserialize, Serialize};
@@ -77,6 +77,8 @@ pub enum RuntimeError {
         step_id: String,
         dependency_id: String,
     },
+    #[error("runtime model proposal is invalid: {0}")]
+    InvalidModelProposal(String),
     #[error("runtime profile not found: {0}")]
     ProfileNotFound(String),
     #[error("runtime profile inheritance cycle: {0}")]
@@ -2774,6 +2776,72 @@ impl RuntimeSession {
         Ok(graph)
     }
 
+    pub fn planner_plan_from_understanding(
+        &self,
+        intent: &Intent,
+        proposal: &UnderstandingProposal,
+    ) -> RuntimeResult<PlannerPlan> {
+        validate_understanding_proposal(intent, proposal)?;
+        let steps = proposal
+            .proposed_steps
+            .iter()
+            .enumerate()
+            .map(|(index, summary)| {
+                let capability_id = proposal
+                    .suggested_capabilities
+                    .get(index)
+                    .or_else(|| proposal.suggested_capabilities.first())
+                    .cloned()
+                    .ok_or_else(|| {
+                        RuntimeError::InvalidModelProposal(
+                            "model proposal did not suggest a capability".into(),
+                        )
+                    })?;
+                if !intent.requested_capabilities.contains(&capability_id) {
+                    return Err(RuntimeError::InvalidModelProposal(format!(
+                        "model proposal suggested capability outside intent: {capability_id}"
+                    )));
+                }
+                let target = DeltaTarget {
+                    resource_type: ResourceType::File,
+                    resource_ref: extract_file_path(summary)
+                        .or_else(|| extract_file_path(&intent.goal))
+                        .unwrap_or_else(|| "README.md".into()),
+                };
+                Ok(PlannerStep {
+                    step_id: format!("model_step_{index}"),
+                    skill_id: None,
+                    input: serde_json::json!({ "path": target.resource_ref.clone() }),
+                    target,
+                    capability_id,
+                    risk_level: std::cmp::max(intent.risk_level, proposal.risk_level),
+                    depends_on: if index == 0 {
+                        vec![]
+                    } else {
+                        vec![format!("model_step_{}", index - 1)]
+                    },
+                    rationale: format!("model proposal {}: {}", proposal.proposal_id, summary),
+                })
+            })
+            .collect::<RuntimeResult<Vec<_>>>()?;
+
+        Ok(PlannerPlan {
+            plan_id: stable_runtime_id(
+                "model_plan",
+                &(
+                    intent.intent_id.as_str(),
+                    proposal.proposal_id.as_str(),
+                    &steps,
+                ),
+            )?,
+            intent_id: intent.intent_id.clone(),
+            goal: intent.goal.clone(),
+            source: PlannerSource::ModelProposed,
+            constraints: planner_constraints_for_profile(&self.policy_profile),
+            steps,
+        })
+    }
+
     pub fn execution_plan(&self, intent: &Intent) -> RuntimeResult<ExecutionPlan> {
         let planner = self.planner_plan(intent)?;
         let graph = self.compile_planner_plan(planner.clone())?;
@@ -3433,6 +3501,41 @@ fn validate_planner_plan(plan: &PlannerPlan) -> RuntimeResult<()> {
     Ok(())
 }
 
+fn validate_understanding_proposal(
+    intent: &Intent,
+    proposal: &UnderstandingProposal,
+) -> RuntimeResult<()> {
+    if proposal.intent_id != intent.intent_id {
+        return Err(RuntimeError::InvalidModelProposal(
+            "proposal belongs to another intent".into(),
+        ));
+    }
+    if proposal.kind != UnderstandingProposalKind::TaskDecomposition {
+        return Err(RuntimeError::InvalidModelProposal(
+            "proposal is not a task decomposition".into(),
+        ));
+    }
+    if !proposal.cannot_authorize {
+        return Err(RuntimeError::InvalidModelProposal(
+            "model proposal must be non-authorizing".into(),
+        ));
+    }
+    if proposal.evidence_refs.is_empty() {
+        return Err(RuntimeError::InvalidModelProposal(
+            "model proposal requires evidence refs".into(),
+        ));
+    }
+    if proposal.proposed_steps.is_empty() {
+        return Err(RuntimeError::EmptyPlan);
+    }
+    if proposal.suggested_capabilities.is_empty() {
+        return Err(RuntimeError::InvalidModelProposal(
+            "model proposal requires suggested capabilities".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn task_id_from_step_id(step_id: &str) -> String {
     if let Some(suffix) = step_id.strip_prefix("step_") {
         format!("task_{suffix}")
@@ -3458,8 +3561,12 @@ fn runtime_planner_record(
 }
 
 fn planner_plan_hash(plan: &PlannerPlan) -> RuntimeResult<String> {
-    let bytes = serde_json::to_vec(plan)?;
-    Ok(format!("sha256:{}", hex::encode(Sha256::digest(bytes))))
+    stable_runtime_id("sha256", plan)
+}
+
+fn stable_runtime_id(prefix: &str, value: &impl Serialize) -> RuntimeResult<String> {
+    let bytes = serde_json::to_vec(value)?;
+    Ok(format!("{prefix}:{}", hex::encode(Sha256::digest(bytes))))
 }
 
 fn graph_snapshot_from(
@@ -4517,7 +4624,9 @@ pub fn read_only_intent(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use moxi_contracts::{ModuleKind, ModuleStability, PermissionMode, SkillInvocationMode};
+    use moxi_contracts::{
+        Confidence, ModuleKind, ModuleStability, PermissionMode, SkillInvocationMode,
+    };
     use moxi_core::{file_read_capability, Kernel};
     use std::fs;
     use tempfile::tempdir;
@@ -4606,6 +4715,24 @@ mod tests {
             }],
         };
         runtime_planner_record(&plan, graph).unwrap()
+    }
+
+    fn model_proposal(intent: &Intent) -> UnderstandingProposal {
+        UnderstandingProposal {
+            proposal_id: "proposal.model.1".into(),
+            intent_id: intent.intent_id.clone(),
+            kind: UnderstandingProposalKind::TaskDecomposition,
+            summary: "read project files".into(),
+            proposed_steps: vec![
+                "read README.md for project overview".into(),
+                "read docs/status.md for current status".into(),
+            ],
+            suggested_capabilities: vec!["file.read".into()],
+            risk_level: RiskLevel::Low,
+            confidence: Confidence::Medium,
+            evidence_refs: vec!["model.route.1".into()],
+            cannot_authorize: true,
+        }
     }
 
     struct StaticAdoptionProbe {
@@ -4729,6 +4856,63 @@ mod tests {
             planner.plan_hash,
             planner_plan_hash(&execution.planner).unwrap()
         );
+    }
+
+    #[test]
+    fn model_understanding_proposal_compiles_to_non_authorizing_planner_plan() {
+        let temp = tempdir().unwrap();
+        let mut kernel = Kernel::new_in_memory(temp.path()).unwrap();
+        kernel.register_capability(file_read_capability()).unwrap();
+        let runtime = RuntimeSession::new(kernel);
+        let intent = read_only_intent("read README.md", temp.path().to_string_lossy(), "file.read");
+
+        let plan = runtime
+            .planner_plan_from_understanding(&intent, &model_proposal(&intent))
+            .unwrap();
+        let graph = runtime.compile_planner_plan(plan.clone()).unwrap();
+
+        assert_eq!(plan.source, PlannerSource::ModelProposed);
+        assert_eq!(plan.steps.len(), 2);
+        assert!(plan.plan_id.starts_with("model_plan:"));
+        assert_eq!(graph.path, RuntimePath::TaskPath);
+        assert_eq!(graph.tasks[0].capability_id, "file.read");
+        assert_eq!(graph.tasks[0].depends_on, Vec::<String>::new());
+        assert_eq!(
+            graph.tasks[1].depends_on,
+            vec![graph.tasks[0].task_id.clone()]
+        );
+    }
+
+    #[test]
+    fn model_understanding_proposal_cannot_expand_capability_scope() {
+        let temp = tempdir().unwrap();
+        let kernel = Kernel::new_in_memory(temp.path()).unwrap();
+        let runtime = RuntimeSession::new(kernel);
+        let intent = read_only_intent("read README.md", temp.path().to_string_lossy(), "file.read");
+        let mut proposal = model_proposal(&intent);
+        proposal.suggested_capabilities = vec!["workspace.write".into()];
+
+        let error = runtime
+            .planner_plan_from_understanding(&intent, &proposal)
+            .unwrap_err();
+
+        assert!(matches!(error, RuntimeError::InvalidModelProposal(_)));
+    }
+
+    #[test]
+    fn model_understanding_proposal_must_remain_non_authorizing() {
+        let temp = tempdir().unwrap();
+        let kernel = Kernel::new_in_memory(temp.path()).unwrap();
+        let runtime = RuntimeSession::new(kernel);
+        let intent = read_only_intent("read README.md", temp.path().to_string_lossy(), "file.read");
+        let mut proposal = model_proposal(&intent);
+        proposal.cannot_authorize = false;
+
+        let error = runtime
+            .planner_plan_from_understanding(&intent, &proposal)
+            .unwrap_err();
+
+        assert!(matches!(error, RuntimeError::InvalidModelProposal(_)));
     }
 
     #[test]

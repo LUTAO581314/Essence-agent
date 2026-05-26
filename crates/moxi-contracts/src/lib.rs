@@ -447,6 +447,29 @@ pub struct ModelGatewayManifest {
     pub redaction_policy_ref: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UnderstandingProposalKind {
+    Clarification,
+    TaskDecomposition,
+    RiskWarning,
+    CapabilitySuggestion,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+pub struct UnderstandingProposal {
+    pub proposal_id: String,
+    pub intent_id: String,
+    pub kind: UnderstandingProposalKind,
+    pub summary: String,
+    pub proposed_steps: Vec<String>,
+    pub suggested_capabilities: Vec<String>,
+    pub risk_level: RiskLevel,
+    pub confidence: Confidence,
+    pub evidence_refs: Vec<String>,
+    pub cannot_authorize: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct ShellAdapterManifest {
     pub shell_id: String,
@@ -720,6 +743,7 @@ mod tests {
         assert_eq!(schema_for::<SubagentManifest>()["type"], "object");
         assert_eq!(schema_for::<MemoryProviderManifest>()["type"], "object");
         assert_eq!(schema_for::<ModelGatewayManifest>()["type"], "object");
+        assert_eq!(schema_for::<UnderstandingProposal>()["type"], "object");
         assert_eq!(schema_for::<ShellAdapterManifest>()["type"], "object");
         assert_eq!(schema_for::<AgentPersonaManifest>()["type"], "object");
     }

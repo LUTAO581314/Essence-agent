@@ -50,6 +50,13 @@ P0 responsibilities:
 - produce proofs and append hash-chained ledger events;
 - replay audit facts from persisted policy decisions, approval grants, tickets,
   results, proofs, and events.
+- keep credential use reference-only, bind secret-use decisions to evidence,
+  verify executor signature metadata against tenant trust roots, and export
+  redacted audit records without persisting raw secret material.
+- evaluate production readiness fail-closed before credentialed or executable
+  production enablement, covering production auth, external secret management,
+  cryptographic verification, hardened sandboxing, secret injection, rotation,
+  tenant policy, executor trust roots, and compliance audit export evidence.
 
 P0 must not become a model gateway, planner, memory database, plugin host,
 workflow engine, product database, or UI runtime.
@@ -210,14 +217,26 @@ current evidence, policy, approval, ticket, proof, and ledger facts.
 
 Before credentialed or executable production actions, the architecture needs:
 
-- production credential/key store;
-- OS-level process sandbox hardening;
-- cryptographic executor signature verification against trust roots;
-- compliance-grade redaction and audit export;
+- production credential/key store; the current `moxi-vault` MVP models
+  reference-only credential use, quorum approvals, trust roots, signature
+  verification decisions, break-glass decisions, redacted audit records,
+  production adapter evidence, and a fail-closed production readiness decision,
+  but not live KMS/HSM calls;
+- OS-level process sandbox hardening; the readiness gate can require a hardened
+  sandbox profile ref before production enablement, but does not implement the
+  OS/container runtime itself;
+- cryptographic executor signature verification against trust roots; current
+  verification is a control-plane decision over tenant-bound metadata and
+  evidence refs;
+- compliance-grade redaction and audit export; current audit export records
+  carry redaction profile refs and hashes without raw secret material, and the
+  readiness gate requires compliance export evidence before production enablement;
+- bounded hot-path control for ack/deny/route/cache-hit first packets, with
+  measured p50/p95/p99 facts and no tool execution authority;
 - model gateway cost controls and fallback;
 - memory consent ledger and retention controls;
-- store/ledger-backed observability ingestion and export beyond the current
-  runtime snapshot fact projection;
+- hardened observability export, trace sinks, and eval/adaptive promotion gates
+  beyond the current runtime and R1 store/ledger fact projections;
 - regression tests for manifest schema compatibility.
 
 ## Build Order
@@ -230,16 +249,57 @@ Before credentialed or executable production actions, the architecture needs:
 5. Build `moxi-observability` as the first P1.5 read-only fact layer for
    `RuntimeFact`, `EvidenceRef`, `RunTimeline`, `RunMetric`, and
    `ProjectionSnapshot`.
-6. Add skill loading through `SkillManifest`, but route all executable effects
-   through `CapabilityContract` and P0.
-7. Add swarm contracts first: `SwarmPlan`, typed `AgentMessage`,
-   `HandoffContract`, `SubagentSidechain`, `ReviewGate`, and `MergeEvidence`.
-8. Add subagent sidechains and parent-run merge summaries with evaluator
-   coverage for faulty agents and malicious input.
-9. Add memory provider runtime with source tracking and ledger-bound writes.
-10. Add model gateway runtime with routing, fallback, redaction, and cost budget
-   integration.
-11. Add shell adapters only as projections and entry surfaces.
+6. Build `moxi-eval` as the first P1.5 regression gate for `EvalSuite`,
+   `EvalCase`, `ReplayProfile`, `EvalRun`, `EvalScore`, `RegressionReport`,
+   and `SafetyFinding` over observability facts.
+7. Build `moxi-skills` as the first skill package/lint/eval-binding layer over
+   `SkillManifest`, while routing all executable effects through
+   `CapabilityContract` and P0.
+8. Build `moxi-swarm` as the first multi-agent orchestration control plane for
+   `SwarmPlan`, typed `AgentMessage`, `HandoffContract`,
+   `SubagentSidechain`, `ReviewGate`, `MergeEvidence`, `ParentMerge`,
+   safety findings, and evidence-gated parent merge proposals.
+9. Add persistent subagent sidechains, real reviewer assignment policy, and
+   evaluator coverage for topology regressions, faulty agents, and malicious
+   input.
+10. Build `moxi-adaptive` and `moxi-governance` as the first eval-gated
+   self-improvement loop for reflection reports, optimization deltas,
+   experiments, promotion decisions, rollout/rollback plans, and evolution
+   ledger events.
+11. Build `moxi-model-gateway` as the first model-routing control plane for
+   provider selection, fallback lists, structured-output attempts,
+   cost/latency facts, and non-authorizing `UnderstandingProposal` records.
+12. Build `moxi-memory` as the first memory control plane for
+   source-tracked `MemoryCrystal` records, write proposals, consent/ledger
+   gates, contamination findings, recall citations, working-memory
+   projections, and forget audit events.
+13. Build `moxi-vault` as the first P0 production-hardening control plane for
+   credential references, secret-use decisions, trust roots, signature
+   verification decisions, tenant policy packs, quorum approval, break-glass,
+   audit export records, production adapter evidence, and fail-closed production
+   readiness gates.
+14. Build `moxi-hotpath` as the first low-latency control plane for ack,
+   early-deny, route, exact/template cache hit, degrade plans, latency samples,
+   p50/p95/p99 snapshots, and hot-path facts.
+15. Add cache-plane persistence, serving-plane adapters, queue/backpressure
+   integration, and SLO eval gates.
+16. Build `moxi-shells` as the first P2 shell control plane for shell request
+    drafts, entry normalization, adapter manifests, runtime profile
+    compatibility, approval-display hints, and runtime event/query projections.
+17. Build `moxi-cli` as the first CLI binary over `moxi-shells` for JSON
+    admission, adapter-manifest output, read-only runtime event-feed/query
+    projection, a file-backed snapshot watch preview, a read-only Ratatui TUI
+    skeleton with scriptable pane-focus/task-selection/filter/refresh/quit replay including graph focus, a raw-mode
+    read-only snapshot loop and compact projection-only Task Detail preview
+    behind `tui --interactive`, and a verified minimal REPL loop only. Task
+    Detail may show selected-task state, stage, progress, capability, skill,
+    blocker, and message, and the approvals/blockers pane may summarize
+    awaiting approvals as display-only. Graph Summary may show compact
+    task/done/running/waiting/blocking/failure counts from the same projection,
+    but no TUI pane may expose action controls.
+18. Add a full runtime-control CLI TUI, MCP, API/SDK, IDE, desktop, web,
+    mobile approval, and digital-human transports on top of the shell control
+    plane.
 
 ## Non-Negotiable Invariants
 
@@ -252,6 +312,19 @@ Before credentialed or executable production actions, the architecture needs:
 - No untrusted external content becomes an agent instruction without an
   explicit trusted handoff path.
 - No high-risk action completes without policy allow or approval.
+- No raw secret material is stored in model context, ordinary logs, durable
+  memory, or audit exports.
+- No high-risk executor is promoted to production without a tenant trust-root
+  verification decision.
+- No break-glass action proceeds without bounded scope, evidence, quorum when
+  required, and audit export coverage.
+- No "5ms" claim covers complete LLM answers or external effects; it only
+  covers bounded first-packet ack/deny/route/cache-hit decisions.
+- No hot-path cache hit is served without scope, freshness, risk, and evidence
+  gates.
 - No successful action commits without proof.
 - No ledger event mutates in place; correction is another event.
 - No private memory leaves local scope unless a policy and consent path allow it.
+
+
+

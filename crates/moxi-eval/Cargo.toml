@@ -1,14 +1,12 @@
 [package]
-name = "moxi-observability"
+name = "moxi-eval"
 edition.workspace = true
 license.workspace = true
 version.workspace = true
 
 [dependencies]
 chrono.workspace = true
-moxi-contracts = { path = "../moxi-contracts" }
-moxi-runtime = { path = "../moxi-runtime" }
-moxi-store = { path = "../moxi-store" }
+moxi-observability = { path = "../moxi-observability" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

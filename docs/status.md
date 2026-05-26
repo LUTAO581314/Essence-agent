@@ -265,8 +265,10 @@ auth, external secret-manager/KMS/HSM, cryptographic verifier, hardened sandbox,
 secret injection, rotation, tenant policy, executor trust-root, and compliance
 audit-export evidence before credentialed or executable production enablement.
 Production adapter evidence is now verified into tenant-bound
-`ProductionAdapterVerificationDecision` records, and production readiness
-requires every adapter evidence item to bind to its matching verified decision.
+`ProductionAdapterVerificationDecision` records, credential rotation refs are
+verified into `RotationEnforcementDecision` records, and production readiness
+requires every adapter evidence item and configured credential rotation ref to
+bind to its matching verified decision.
 P1 execution audit bundles now bind the runtime request, sealed profile record,
 readiness decision, optional production readiness ref, redaction profile, and
 evidence refs for review without granting ticket, execution, verification, or
@@ -334,8 +336,9 @@ P0 coverage in current code:
   `moxi-vault` now exposes a fail-closed readiness decision for auth,
   credential/key-store, cryptographic verifier, hardened sandbox, secret
   injection, rotation, tenant policy, executor trust-root, and compliance export
-  evidence. Concrete adapters for these gates remain required before production
-  exposure.
+  evidence. Adapter evidence and credential rotation refs are verified into
+  tenant-bound decisions before production readiness can cite them. Concrete
+  adapters for these gates remain required before production exposure.
 - P1 execution gates before runtime task execution: `moxi-runtime` now asks
   `moxi-vault` for `P1ExecutionReadinessDecision` before ticket issuing. Ready
   local read-only tasks still execute through
@@ -572,7 +575,8 @@ P0 boundary decisions:
   `TenantPolicyPackRecord`, `QuorumApproval`, `BreakGlassRequest`,
   `BreakGlassDecision`, `AuditExportRecord`,
   `ProductionHardeningEvidence`, `ProductionAdapterEvidence`,
-  `ProductionAdapterVerificationDecision`, and `ProductionReadinessDecision`,
+  `ProductionAdapterVerificationDecision`, `RotationEnforcementDecision`, and
+  `ProductionReadinessDecision`,
   plus `P1ExecutionReadinessProfile`, `P1ExecutionReadinessProfileRecord`,
   `P1ExecutionReadinessRequest`, and `P1ExecutionReadinessDecision`,
   `P1ExecutionAuditBundle`, and `ComplianceExportBundle`. It rejects raw
@@ -582,8 +586,9 @@ P0 boundary decisions:
   signature decisions to tenant ids, exports redacted
   audit records, P1 execution audit bundles, and local compliance export
   bundles, rejects placeholder adapter evidence, verifies adapter evidence into
-  tenant-bound decisions, blocks production readiness until all P0 hardening
-  gates have tenant-bound adapter evidence and matching verified decisions,
+  tenant-bound decisions, verifies credential rotation refs into tenant-bound
+  decisions, blocks production readiness until all P0 hardening gates have
+  tenant-bound adapter/rotation evidence and matching verified decisions,
   seals tenant policy packs with stable hashes, seals P1 execution
   profiles against tenant policy record refs and policy/profile hashes,
   requires ready production readiness before sealing production or
@@ -646,10 +651,10 @@ P0 boundary decisions:
   concrete KMS/HSM/secret-manager calls, real cryptographic signature
   verification, secret injection into hardened sandboxes, external tenant
   trust-root storage, and external compliance export bundle storage/delivery.
-  Hash-bound trust-root records, adapter evidence, and rotation/compliance
-  requirements are now modeled as fail-closed readiness gates, and local
-  redacted compliance bundles can be assembled, but live external infrastructure
-  still needs to be connected.
+  Hash-bound trust-root records, adapter evidence, rotation enforcement
+  decisions, and rotation/compliance requirements are now modeled as fail-closed
+  readiness gates, and local redacted compliance bundles can be assembled, but
+  live external infrastructure still needs to be connected.
 - P1 execution readiness beyond the default local read-only profile: production
   profiles, credentialed execution, and high-risk runtime tasks still require
   production-ready P0 evidence and concrete external adapters.

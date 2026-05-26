@@ -80,6 +80,13 @@ pub enum ProductionAdapterVerificationKind {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
+pub enum RotationEnforcementDecisionKind {
+    Verified,
+    Rejected,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
 pub enum ProductionReadinessGate {
     ProductionAuth,
     ExternalSecretManager,
@@ -145,6 +152,20 @@ pub struct CredentialRef {
     pub rotation_ref: Option<String>,
     pub expires_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RotationEnforcementDecision {
+    pub decision_id: String,
+    pub tenant_id: String,
+    pub credential_id: String,
+    pub rotation_ref: Option<String>,
+    pub rotation_policy_ref: Option<String>,
+    pub decision: RotationEnforcementDecisionKind,
+    pub reasons: Vec<String>,
+    pub evidence_refs: Vec<String>,
+    pub verified_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1418,6 +1439,84 @@ impl VaultController {
         }
     }
 
+    pub fn verify_rotation_enforcement(
+        credential: &CredentialRef,
+        hardening: &ProductionHardeningEvidence,
+    ) -> RotationEnforcementDecision {
+        let mut reasons = Vec::new();
+        let mut evidence_refs = vec![credential.credential_id.clone()];
+
+        let tenant_mismatch = credential.tenant_id != hardening.tenant_id;
+        if tenant_mismatch {
+            reasons.push(
+                "credential and production hardening evidence belong to different tenants".into(),
+            );
+        }
+        if credential
+            .rotation_ref
+            .as_deref()
+            .is_none_or(is_placeholder_ref)
+        {
+            reasons.push(format!(
+                "credential {} is missing enforceable rotation metadata",
+                credential.credential_id
+            ));
+        }
+        if hardening
+            .rotation_policy_ref
+            .as_deref()
+            .is_none_or(is_placeholder_ref)
+        {
+            reasons.push("production rotation enforcement policy is not configured".into());
+        }
+        if hardening.evidence_refs.is_empty() {
+            reasons.push("production hardening evidence refs are missing".into());
+        }
+        evidence_refs.extend(hardening.evidence_refs.clone());
+        if let Some(rotation_ref) = &credential.rotation_ref {
+            evidence_refs.push(rotation_ref.clone());
+        }
+        if let Some(rotation_policy_ref) = &hardening.rotation_policy_ref {
+            evidence_refs.push(rotation_policy_ref.clone());
+        }
+        evidence_refs.sort();
+        evidence_refs.dedup();
+        reasons.sort();
+        reasons.dedup();
+
+        let decision = if reasons.is_empty() {
+            reasons.push("credential rotation enforcement is verified".into());
+            RotationEnforcementDecisionKind::Verified
+        } else {
+            RotationEnforcementDecisionKind::Rejected
+        };
+
+        RotationEnforcementDecision {
+            decision_id: stable_id(
+                "rotation_enforcement",
+                &(
+                    credential.tenant_id.as_str(),
+                    credential.credential_id.as_str(),
+                    &credential.rotation_ref,
+                    &hardening.rotation_policy_ref,
+                    &decision,
+                    &evidence_refs,
+                ),
+            ),
+            tenant_id: credential.tenant_id.clone(),
+            credential_id: credential.credential_id.clone(),
+            rotation_ref: credential.rotation_ref.clone(),
+            rotation_policy_ref: hardening.rotation_policy_ref.clone(),
+            decision,
+            reasons,
+            evidence_refs,
+            verified_at: Utc::now(),
+            expires_at: credential
+                .expires_at
+                .unwrap_or_else(|| Utc::now() + chrono::Duration::hours(1)),
+        }
+    }
+
     pub fn evaluate_production_readiness(
         policy: &TenantPolicyPack,
         credentials: &[CredentialRef],
@@ -1429,13 +1528,18 @@ impl VaultController {
             .iter()
             .map(Self::verify_production_adapter_evidence)
             .collect::<Vec<_>>();
-        Self::evaluate_production_readiness_with_adapter_decisions(
+        let rotation_decisions = credentials
+            .iter()
+            .map(|credential| Self::verify_rotation_enforcement(credential, hardening))
+            .collect::<Vec<_>>();
+        Self::evaluate_production_readiness_with_decisions(
             policy,
             credentials,
             signature_decisions,
             hardening,
             adapter_evidence,
             &adapter_decisions,
+            &rotation_decisions,
         )
     }
 
@@ -1446,6 +1550,30 @@ impl VaultController {
         hardening: &ProductionHardeningEvidence,
         adapter_evidence: &[ProductionAdapterEvidence],
         adapter_decisions: &[ProductionAdapterVerificationDecision],
+    ) -> Result<ProductionReadinessDecision, VaultError> {
+        let rotation_decisions = credentials
+            .iter()
+            .map(|credential| Self::verify_rotation_enforcement(credential, hardening))
+            .collect::<Vec<_>>();
+        Self::evaluate_production_readiness_with_decisions(
+            policy,
+            credentials,
+            signature_decisions,
+            hardening,
+            adapter_evidence,
+            adapter_decisions,
+            &rotation_decisions,
+        )
+    }
+
+    pub fn evaluate_production_readiness_with_decisions(
+        policy: &TenantPolicyPack,
+        credentials: &[CredentialRef],
+        signature_decisions: &[SignatureVerificationDecision],
+        hardening: &ProductionHardeningEvidence,
+        adapter_evidence: &[ProductionAdapterEvidence],
+        adapter_decisions: &[ProductionAdapterVerificationDecision],
+        rotation_decisions: &[RotationEnforcementDecision],
     ) -> Result<ProductionReadinessDecision, VaultError> {
         if hardening.evidence_refs.is_empty() {
             return Err(VaultError::MissingEvidence);
@@ -1463,6 +1591,9 @@ impl VaultController {
             || adapter_decisions
                 .iter()
                 .any(|decision| decision.tenant_id != policy.tenant_id)
+            || rotation_decisions
+                .iter()
+                .any(|decision| decision.tenant_id != policy.tenant_id)
         {
             return Err(VaultError::TenantMismatch);
         }
@@ -1477,7 +1608,6 @@ impl VaultController {
             validate_adapter_decision(decision)?;
         }
         require_verified_adapter_decisions(adapter_evidence, adapter_decisions)?;
-
         let mut missing_gates = Vec::new();
         let mut reasons = Vec::new();
 
@@ -1590,6 +1720,22 @@ impl VaultController {
                 ));
             }
         }
+        let rotation_refs_configured = hardening
+            .rotation_policy_ref
+            .as_deref()
+            .is_some_and(|value| !is_placeholder_ref(value))
+            && credentials.iter().all(|credential| {
+                credential
+                    .rotation_ref
+                    .as_deref()
+                    .is_some_and(|value| !is_placeholder_ref(value))
+            });
+        if rotation_refs_configured {
+            for decision in rotation_decisions {
+                validate_rotation_decision(decision)?;
+            }
+            require_verified_rotation_decisions(credentials, hardening, rotation_decisions)?;
+        }
 
         if signature_decisions.is_empty()
             || signature_decisions
@@ -1638,6 +1784,11 @@ impl VaultController {
         );
         evidence_refs.extend(
             adapter_decisions
+                .iter()
+                .map(|decision| decision.decision_id.clone()),
+        );
+        evidence_refs.extend(
+            rotation_decisions
                 .iter()
                 .map(|decision| decision.decision_id.clone()),
         );
@@ -1901,6 +2052,31 @@ fn validate_adapter_decision(
     Ok(())
 }
 
+fn validate_rotation_decision(decision: &RotationEnforcementDecision) -> Result<(), VaultError> {
+    if decision.decision != RotationEnforcementDecisionKind::Verified
+        || decision.evidence_refs.is_empty()
+        || decision.expires_at <= Utc::now()
+        || decision
+            .rotation_ref
+            .as_deref()
+            .is_none_or(is_placeholder_ref)
+        || decision
+            .rotation_policy_ref
+            .as_deref()
+            .is_none_or(is_placeholder_ref)
+    {
+        return Err(VaultError::MissingEvidence);
+    }
+    if decision
+        .evidence_refs
+        .iter()
+        .any(|value| is_placeholder_ref(value))
+    {
+        return Err(VaultError::MissingEvidence);
+    }
+    Ok(())
+}
+
 fn require_verified_adapter_decisions(
     adapter_evidence: &[ProductionAdapterEvidence],
     adapter_decisions: &[ProductionAdapterVerificationDecision],
@@ -1926,6 +2102,38 @@ fn require_verified_adapter_decisions(
             || decision.provider_ref != evidence.provider_ref
             || decision.expires_at != evidence.expires_at
             || !decision.evidence_refs.contains(&evidence.evidence_id)
+        {
+            return Err(VaultError::MissingEvidence);
+        }
+    }
+
+    Ok(())
+}
+
+fn require_verified_rotation_decisions(
+    credentials: &[CredentialRef],
+    hardening: &ProductionHardeningEvidence,
+    rotation_decisions: &[RotationEnforcementDecision],
+) -> Result<(), VaultError> {
+    if credentials.len() != rotation_decisions.len() {
+        return Err(VaultError::MissingEvidence);
+    }
+
+    let decisions_by_credential = rotation_decisions
+        .iter()
+        .map(|decision| (decision.credential_id.as_str(), decision))
+        .collect::<BTreeMap<_, _>>();
+    if decisions_by_credential.len() != rotation_decisions.len() {
+        return Err(VaultError::MissingEvidence);
+    }
+
+    for credential in credentials {
+        let Some(decision) = decisions_by_credential.get(credential.credential_id.as_str()) else {
+            return Err(VaultError::MissingEvidence);
+        };
+        if decision.rotation_ref != credential.rotation_ref
+            || decision.rotation_policy_ref != hardening.rotation_policy_ref
+            || !decision.evidence_refs.contains(&credential.credential_id)
         {
             return Err(VaultError::MissingEvidence);
         }
@@ -3132,6 +3340,113 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(tenant_error, VaultError::TenantMismatch);
+    }
+
+    #[test]
+    fn rotation_enforcement_decision_is_evidence_bound_and_fail_closed() {
+        let credential = credential();
+        let hardening = hardening_evidence();
+        let decision = VaultController::verify_rotation_enforcement(&credential, &hardening);
+
+        assert_eq!(decision.decision, RotationEnforcementDecisionKind::Verified);
+        assert_eq!(decision.tenant_id, credential.tenant_id);
+        assert_eq!(decision.credential_id, credential.credential_id);
+        assert_eq!(decision.rotation_ref, credential.rotation_ref);
+        assert_eq!(decision.rotation_policy_ref, hardening.rotation_policy_ref);
+        assert!(decision.evidence_refs.contains(&credential.credential_id));
+        assert!(decision
+            .evidence_refs
+            .contains(&"rotation://tenant.a/30d-enforced".into()));
+
+        let mut missing_rotation = credential;
+        missing_rotation.rotation_ref = Some("mock-rotation".into());
+        let rejected = VaultController::verify_rotation_enforcement(&missing_rotation, &hardening);
+
+        assert_eq!(rejected.decision, RotationEnforcementDecisionKind::Rejected);
+        assert!(!rejected.reasons.is_empty());
+    }
+
+    #[test]
+    fn production_readiness_requires_verified_rotation_decisions_when_refs_exist() {
+        let policy = tenant_policy();
+        let credential = credential();
+        let hardening = hardening_evidence();
+        let signature_decision = VaultController::verify_executor_signature(
+            &signature(),
+            &[trust_root()],
+            RiskLevel::High,
+        );
+        let adapters = all_adapter_evidence();
+        let adapter_decisions = all_adapter_decisions(&adapters);
+        let rotation_decision =
+            VaultController::verify_rotation_enforcement(&credential, &hardening);
+
+        let ready = VaultController::evaluate_production_readiness_with_decisions(
+            &policy,
+            std::slice::from_ref(&credential),
+            std::slice::from_ref(&signature_decision),
+            &hardening,
+            &adapters,
+            &adapter_decisions,
+            std::slice::from_ref(&rotation_decision),
+        )
+        .unwrap();
+
+        assert_eq!(ready.decision, ProductionReadinessDecisionKind::Ready);
+        assert!(ready.evidence_refs.contains(&rotation_decision.decision_id));
+
+        let missing_decision_error = VaultController::evaluate_production_readiness_with_decisions(
+            &policy,
+            std::slice::from_ref(&credential),
+            std::slice::from_ref(&signature_decision),
+            &hardening,
+            &adapters,
+            &adapter_decisions,
+            &[],
+        )
+        .unwrap_err();
+        assert_eq!(missing_decision_error, VaultError::MissingEvidence);
+
+        let duplicate_decisions = vec![rotation_decision.clone(), rotation_decision.clone()];
+        let duplicate_error = VaultController::evaluate_production_readiness_with_decisions(
+            &policy,
+            std::slice::from_ref(&credential),
+            std::slice::from_ref(&signature_decision),
+            &hardening,
+            &adapters,
+            &adapter_decisions,
+            &duplicate_decisions,
+        )
+        .unwrap_err();
+        assert_eq!(duplicate_error, VaultError::MissingEvidence);
+
+        let mut mismatched_decision = rotation_decision.clone();
+        mismatched_decision.rotation_ref = Some("rotation://tenant.a/other".into());
+        let mismatched_error = VaultController::evaluate_production_readiness_with_decisions(
+            &policy,
+            std::slice::from_ref(&credential),
+            std::slice::from_ref(&signature_decision),
+            &hardening,
+            &adapters,
+            &adapter_decisions,
+            &[mismatched_decision],
+        )
+        .unwrap_err();
+        assert_eq!(mismatched_error, VaultError::MissingEvidence);
+
+        let mut rejected_decision = rotation_decision;
+        rejected_decision.decision = RotationEnforcementDecisionKind::Rejected;
+        let rejected_error = VaultController::evaluate_production_readiness_with_decisions(
+            &policy,
+            std::slice::from_ref(&credential),
+            std::slice::from_ref(&signature_decision),
+            &hardening,
+            &adapters,
+            &adapter_decisions,
+            &[rejected_decision],
+        )
+        .unwrap_err();
+        assert_eq!(rejected_error, VaultError::MissingEvidence);
     }
 
     #[test]

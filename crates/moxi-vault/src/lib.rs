@@ -59,6 +59,7 @@ pub enum AuditExportRecordKind {
     CredentialUse,
     SignatureVerification,
     BreakGlass,
+    P1ExecutionReadiness,
     Evolution,
 }
 
@@ -332,6 +333,19 @@ pub struct P1ExecutionReadinessProfile {
     pub require_production_readiness_for_high_risk: bool,
     pub evidence_refs: Vec<String>,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct P1ExecutionReadinessProfileRecord {
+    pub record_id: String,
+    pub tenant_id: String,
+    pub profile_id: String,
+    pub tenant_policy_pack_ref: String,
+    pub profile_hash: String,
+    pub profile: P1ExecutionReadinessProfile,
+    pub evidence_refs: Vec<String>,
+    pub sealed_by: String,
+    pub sealed_at: DateTime<Utc>,
 }
 
 impl P1ExecutionReadinessProfile {
@@ -673,6 +687,92 @@ impl VaultController {
             export_hash,
             generated_at: Utc::now(),
         })
+    }
+
+    pub fn seal_p1_execution_readiness_profile(
+        policy: &TenantPolicyPack,
+        profile: P1ExecutionReadinessProfile,
+        sealed_by: impl Into<String>,
+    ) -> Result<P1ExecutionReadinessProfileRecord, VaultError> {
+        if profile.evidence_refs.is_empty() || policy.credential_scope_refs.is_empty() {
+            return Err(VaultError::MissingEvidence);
+        }
+        if profile.tenant_id != policy.tenant_id {
+            return Err(VaultError::TenantMismatch);
+        }
+        let profile_hash = stable_id("p1_execution_profile_hash", &profile);
+        let mut evidence_refs = profile.evidence_refs.clone();
+        evidence_refs.push(policy.pack_id.clone());
+        evidence_refs.extend(policy.credential_scope_refs.clone());
+        evidence_refs.sort();
+        evidence_refs.dedup();
+        if evidence_refs.is_empty() {
+            return Err(VaultError::MissingEvidence);
+        }
+
+        Ok(P1ExecutionReadinessProfileRecord {
+            record_id: stable_id(
+                "p1_execution_profile_record",
+                &(
+                    policy.pack_id.as_str(),
+                    profile.profile_id.as_str(),
+                    profile_hash.as_str(),
+                    &evidence_refs,
+                ),
+            ),
+            tenant_id: profile.tenant_id.clone(),
+            profile_id: profile.profile_id.clone(),
+            tenant_policy_pack_ref: policy.pack_id.clone(),
+            profile_hash,
+            profile,
+            evidence_refs,
+            sealed_by: sealed_by.into(),
+            sealed_at: Utc::now(),
+        })
+    }
+
+    pub fn load_p1_execution_readiness_profile(
+        record: &P1ExecutionReadinessProfileRecord,
+        policy: &TenantPolicyPack,
+    ) -> Result<P1ExecutionReadinessProfile, VaultError> {
+        if record.evidence_refs.is_empty() {
+            return Err(VaultError::MissingEvidence);
+        }
+        if record.tenant_id != policy.tenant_id
+            || record.profile.tenant_id != policy.tenant_id
+            || record.tenant_policy_pack_ref != policy.pack_id
+        {
+            return Err(VaultError::TenantMismatch);
+        }
+        let expected_hash = stable_id("p1_execution_profile_hash", &record.profile);
+        if record.profile_hash != expected_hash || record.profile_id != record.profile.profile_id {
+            return Err(VaultError::MissingEvidence);
+        }
+
+        Ok(record.profile.clone())
+    }
+
+    pub fn audit_p1_execution_readiness(
+        decision: &P1ExecutionReadinessDecision,
+        profile_record: &P1ExecutionReadinessProfileRecord,
+        redaction_profile_ref: impl Into<String>,
+        generated_by: impl Into<String>,
+    ) -> Result<AuditExportRecord, VaultError> {
+        if decision.tenant_id != profile_record.tenant_id {
+            return Err(VaultError::TenantMismatch);
+        }
+        Self::audit_export_record(
+            decision.tenant_id.clone(),
+            decision.request_id.clone(),
+            AuditExportRecordKind::P1ExecutionReadiness,
+            redaction_profile_ref,
+            vec![
+                profile_record.record_id.clone(),
+                decision.decision_id.clone(),
+                decision.request_id.clone(),
+            ],
+            generated_by,
+        )
     }
 
     pub fn evaluate_production_readiness(
@@ -1422,6 +1522,98 @@ mod tests {
             "auditor.1",
         )
         .is_err());
+    }
+
+    #[test]
+    fn p1_execution_profile_record_roundtrips_with_policy_binding() {
+        let policy = tenant_policy();
+        let profile = P1ExecutionReadinessProfile::local_read_only("tenant.a");
+        let record = VaultController::seal_p1_execution_readiness_profile(
+            &policy,
+            profile.clone(),
+            "vault.controller",
+        )
+        .unwrap();
+
+        let loaded =
+            VaultController::load_p1_execution_readiness_profile(&record, &policy).unwrap();
+
+        assert_eq!(loaded, profile);
+        assert_eq!(record.tenant_policy_pack_ref, policy.pack_id);
+        assert!(record.evidence_refs.contains(&"cred.github".into()));
+        assert!(record
+            .profile_hash
+            .starts_with("p1_execution_profile_hash."));
+    }
+
+    #[test]
+    fn p1_execution_profile_record_rejects_tamper_and_cross_tenant_policy() {
+        let policy = tenant_policy();
+        let profile = P1ExecutionReadinessProfile::local_read_only("tenant.a");
+        let mut record = VaultController::seal_p1_execution_readiness_profile(
+            &policy,
+            profile,
+            "vault.controller",
+        )
+        .unwrap();
+        record
+            .profile
+            .allowed_capabilities
+            .push("network.http".into());
+
+        let tamper_error =
+            VaultController::load_p1_execution_readiness_profile(&record, &policy).unwrap_err();
+        assert_eq!(tamper_error, VaultError::MissingEvidence);
+
+        let other_policy = TenantPolicyPack {
+            tenant_id: "tenant.b".into(),
+            ..tenant_policy()
+        };
+        let tenant_error =
+            VaultController::load_p1_execution_readiness_profile(&record, &other_policy)
+                .unwrap_err();
+        assert_eq!(tenant_error, VaultError::TenantMismatch);
+    }
+
+    #[test]
+    fn p1_execution_readiness_audit_export_is_redacted_and_event_bound() {
+        let policy = tenant_policy();
+        let profile = P1ExecutionReadinessProfile::local_read_only("tenant.a");
+        let record = VaultController::seal_p1_execution_readiness_profile(
+            &policy,
+            profile.clone(),
+            "vault.controller",
+        )
+        .unwrap();
+        let request = P1ExecutionReadinessRequest {
+            request_id: "p1.req.audit".into(),
+            run_id: "run.audit".into(),
+            tenant_id: "tenant.a".into(),
+            actor_id: "moxi-runtime".into(),
+            capability_id: "file.read".into(),
+            permission_mode: PermissionMode::ReadOnly,
+            risk_level: RiskLevel::Low,
+            requires_credential: false,
+            evidence_refs: vec!["policy.decision.audit".into()],
+            requested_at: Utc::now(),
+        };
+        let loaded =
+            VaultController::load_p1_execution_readiness_profile(&record, &policy).unwrap();
+        let decision =
+            VaultController::evaluate_p1_execution_readiness(&loaded, &request, None).unwrap();
+
+        let audit = VaultController::audit_p1_execution_readiness(
+            &decision,
+            &record,
+            "redaction.compliance.v1",
+            "auditor.1",
+        )
+        .unwrap();
+
+        assert_eq!(audit.kind, AuditExportRecordKind::P1ExecutionReadiness);
+        assert!(!audit.contains_secret_material);
+        assert!(audit.event_refs.contains(&record.record_id));
+        assert!(audit.event_refs.contains(&decision.decision_id));
     }
 
     #[test]

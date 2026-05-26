@@ -106,7 +106,8 @@ a Rust workspace with twenty library crates:
   executor signature verification decisions, tenant policy packs, quorum
   approvals, break-glass decisions, and redacted audit export records without
   storing raw secret material. It now also defines P1 execution-readiness
-  profiles, requests, and decisions so bounded P1 runtime tasks can enter the
+  profiles, tenant-policy-bound profile records, requests, decisions, and
+  redacted P1 readiness audit exports so bounded P1 runtime tasks can enter the
   P0 execution chain only when explicitly allowed.
 - `moxi-hotpath`: first low-latency control plane. It defines latency budgets,
   hot-path requests, cache entries, hot-path decisions, degrade plans, latency
@@ -554,13 +555,15 @@ P0 boundary decisions:
   `BreakGlassRequest`, `BreakGlassDecision`, `AuditExportRecord`,
   `ProductionHardeningEvidence`, `ProductionAdapterEvidence`, and
   `ProductionReadinessDecision`, plus `P1ExecutionReadinessProfile`,
-  `P1ExecutionReadinessRequest`, and `P1ExecutionReadinessDecision`. It rejects
-  raw secret-looking references, requires quorum for high-risk secret use,
-  checks executor signatures against tenant trust-root metadata, binds signature
-  decisions to tenant ids, exports redacted audit records, rejects placeholder
-  adapter evidence, blocks production readiness until all P0 hardening gates
-  have tenant-bound adapter evidence, and blocks P1 runtime tasks before ticket
-  issuance unless the P1 execution profile allows them into the P0 chain.
+  `P1ExecutionReadinessProfileRecord`, `P1ExecutionReadinessRequest`, and
+  `P1ExecutionReadinessDecision`. It rejects raw secret-looking references,
+  requires quorum for high-risk secret use, checks executor signatures against
+  tenant trust-root metadata, binds signature decisions to tenant ids, exports
+  redacted audit records, rejects placeholder adapter evidence, blocks
+  production readiness until all P0 hardening gates have tenant-bound adapter
+  evidence, seals P1 execution profiles against tenant policy pack refs and
+  profile hashes, and blocks P1 runtime tasks before ticket issuance unless the
+  P1 execution profile allows them into the P0 chain.
 - Low-latency control-plane MVP: `moxi-hotpath` exposes `LatencyBudget`,
   `HotPathRequest`, `CacheEntry`, `HotPathDecision`, `DegradePlan`,
   `LatencySample`, `LatencySnapshot`, and `HotPathFact`. It enforces cache

@@ -295,6 +295,25 @@ pub struct AuditExportRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ComplianceExportBundle {
+    pub bundle_id: String,
+    pub tenant_id: String,
+    pub scope_ref: String,
+    pub tenant_policy_record_ref: String,
+    pub tenant_policy_hash: String,
+    pub production_readiness_ref: Option<String>,
+    pub redaction_profile_ref: String,
+    pub audit_export_refs: Vec<String>,
+    pub p1_execution_bundle_refs: Vec<String>,
+    pub event_refs: Vec<String>,
+    pub evidence_refs: Vec<String>,
+    pub contains_secret_material: bool,
+    pub bundle_hash: String,
+    pub generated_by: String,
+    pub generated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ProductionHardeningEvidence {
     pub tenant_id: String,
     pub auth_provider_ref: Option<String>,
@@ -1067,6 +1086,159 @@ impl VaultController {
             contains_secret_material: false,
             bundle_hash,
             generated_by: audit_export.generated_by.clone(),
+            generated_at: Utc::now(),
+        })
+    }
+
+    pub fn compliance_export_bundle(
+        scope_ref: impl Into<String>,
+        policy_record: &TenantPolicyPackRecord,
+        audit_exports: &[AuditExportRecord],
+        p1_execution_bundles: &[P1ExecutionAuditBundle],
+        production_readiness: Option<&ProductionReadinessDecision>,
+        generated_by: impl Into<String>,
+    ) -> Result<ComplianceExportBundle, VaultError> {
+        let policy = Self::load_tenant_policy_pack(policy_record)?;
+        if audit_exports.is_empty() && p1_execution_bundles.is_empty() {
+            return Err(VaultError::MissingAuditEvents);
+        }
+        if !policy.audit_export_required {
+            return Err(VaultError::MissingEvidence);
+        }
+        if audit_exports
+            .iter()
+            .any(|export| export.tenant_id != policy.tenant_id)
+            || p1_execution_bundles
+                .iter()
+                .any(|bundle| bundle.tenant_id != policy.tenant_id)
+            || production_readiness.is_some_and(|decision| decision.tenant_id != policy.tenant_id)
+        {
+            return Err(VaultError::TenantMismatch);
+        }
+        if audit_exports
+            .iter()
+            .any(|export| export.event_refs.is_empty() || export.contains_secret_material)
+            || p1_execution_bundles
+                .iter()
+                .any(|bundle| bundle.evidence_refs.is_empty() || bundle.contains_secret_material)
+        {
+            return Err(VaultError::MissingEvidence);
+        }
+        if let Some(production_readiness) = production_readiness {
+            if production_readiness.decision != ProductionReadinessDecisionKind::Ready
+                || !production_readiness.missing_gates.is_empty()
+            {
+                return Err(VaultError::MissingEvidence);
+            }
+        }
+
+        let mut redaction_profiles = audit_exports
+            .iter()
+            .map(|export| export.redaction_profile_ref.clone())
+            .chain(
+                p1_execution_bundles
+                    .iter()
+                    .map(|bundle| bundle.redaction_profile_ref.clone()),
+            )
+            .collect::<Vec<_>>();
+        redaction_profiles.sort();
+        redaction_profiles.dedup();
+        if redaction_profiles.len() != 1 {
+            return Err(VaultError::MissingEvidence);
+        }
+        let redaction_profile_ref = redaction_profiles.remove(0);
+
+        let mut audit_export_refs = audit_exports
+            .iter()
+            .map(|export| export.export_id.clone())
+            .collect::<Vec<_>>();
+        audit_export_refs.sort();
+        audit_export_refs.dedup();
+
+        let mut p1_execution_bundle_refs = p1_execution_bundles
+            .iter()
+            .map(|bundle| bundle.bundle_id.clone())
+            .collect::<Vec<_>>();
+        p1_execution_bundle_refs.sort();
+        p1_execution_bundle_refs.dedup();
+
+        let mut event_refs = audit_exports
+            .iter()
+            .flat_map(|export| {
+                export
+                    .event_refs
+                    .iter()
+                    .cloned()
+                    .chain(std::iter::once(export.export_hash.clone()))
+            })
+            .chain(
+                p1_execution_bundles
+                    .iter()
+                    .flat_map(|bundle| bundle.evidence_refs.iter().cloned()),
+            )
+            .collect::<Vec<_>>();
+        event_refs.sort();
+        event_refs.dedup();
+        if event_refs.is_empty() {
+            return Err(VaultError::MissingAuditEvents);
+        }
+
+        let mut evidence_refs = policy_record.evidence_refs.clone();
+        evidence_refs.push(policy_record.record_id.clone());
+        evidence_refs.push(policy_record.policy_hash.clone());
+        evidence_refs.extend(audit_export_refs.clone());
+        evidence_refs.extend(p1_execution_bundle_refs.clone());
+        evidence_refs.extend(event_refs.clone());
+        if let Some(production_readiness) = production_readiness {
+            evidence_refs.push(production_readiness.decision_id.clone());
+            evidence_refs.extend(production_readiness.evidence_refs.clone());
+        }
+        evidence_refs.sort();
+        evidence_refs.dedup();
+        if evidence_refs.is_empty() {
+            return Err(VaultError::MissingEvidence);
+        }
+
+        let scope_ref = scope_ref.into();
+        let generated_by = generated_by.into();
+        let production_readiness_ref =
+            production_readiness.map(|decision| decision.decision_id.clone());
+        let bundle_hash = stable_id(
+            "compliance_export_bundle_hash",
+            &(
+                policy_record.record_id.as_str(),
+                policy_record.policy_hash.as_str(),
+                scope_ref.as_str(),
+                redaction_profile_ref.as_str(),
+                &audit_export_refs,
+                &p1_execution_bundle_refs,
+                &production_readiness_ref,
+                &evidence_refs,
+            ),
+        );
+
+        Ok(ComplianceExportBundle {
+            bundle_id: stable_id(
+                "compliance_export_bundle",
+                &(
+                    policy.tenant_id.as_str(),
+                    scope_ref.as_str(),
+                    bundle_hash.as_str(),
+                ),
+            ),
+            tenant_id: policy.tenant_id,
+            scope_ref,
+            tenant_policy_record_ref: policy_record.record_id.clone(),
+            tenant_policy_hash: policy_record.policy_hash.clone(),
+            production_readiness_ref,
+            redaction_profile_ref,
+            audit_export_refs,
+            p1_execution_bundle_refs,
+            event_refs,
+            evidence_refs,
+            contains_secret_material: false,
+            bundle_hash,
+            generated_by,
             generated_at: Utc::now(),
         })
     }
@@ -2284,6 +2456,202 @@ mod tests {
             &record,
             &audit,
             None,
+        )
+        .unwrap_err();
+        assert_eq!(tenant_error, VaultError::TenantMismatch);
+    }
+
+    #[test]
+    fn compliance_export_bundle_is_redacted_and_evidence_bound() {
+        let policy = tenant_policy();
+        let policy_record = VaultController::seal_tenant_policy_pack(
+            policy.clone(),
+            vec!["policy.approved.1".into()],
+            "vault.controller",
+        )
+        .unwrap();
+        let profile = P1ExecutionReadinessProfile::local_read_only("tenant.a");
+        let profile_record =
+            VaultController::seal_p1_execution_readiness_profile_with_policy_record(
+                &policy_record,
+                profile.clone(),
+                None,
+                "vault.controller",
+            )
+            .unwrap();
+        let request = P1ExecutionReadinessRequest {
+            request_id: "p1.req.compliance".into(),
+            run_id: "run.compliance".into(),
+            tenant_id: "tenant.a".into(),
+            actor_id: "moxi-runtime".into(),
+            capability_id: "file.read".into(),
+            permission_mode: PermissionMode::ReadOnly,
+            risk_level: RiskLevel::Low,
+            requires_credential: false,
+            evidence_refs: vec!["policy.decision.compliance".into()],
+            requested_at: Utc::now(),
+        };
+        let decision =
+            VaultController::evaluate_p1_execution_readiness(&profile, &request, None).unwrap();
+        let readiness_export = VaultController::audit_p1_execution_readiness(
+            &decision,
+            &profile_record,
+            "redaction.compliance.v1",
+            "auditor.1",
+        )
+        .unwrap();
+        let p1_bundle = VaultController::p1_execution_audit_bundle(
+            &request,
+            &decision,
+            &profile_record,
+            &readiness_export,
+            None,
+        )
+        .unwrap();
+        let run_export = VaultController::audit_export_record(
+            "tenant.a",
+            "run.compliance",
+            AuditExportRecordKind::Run,
+            "redaction.compliance.v1",
+            vec![
+                "ledger.run.compliance".into(),
+                "proof.run.compliance".into(),
+            ],
+            "auditor.1",
+        )
+        .unwrap();
+
+        let bundle = VaultController::compliance_export_bundle(
+            "run.compliance",
+            &policy_record,
+            &[run_export.clone(), readiness_export.clone()],
+            std::slice::from_ref(&p1_bundle),
+            None,
+            "auditor.1",
+        )
+        .unwrap();
+
+        assert_eq!(bundle.tenant_id, "tenant.a");
+        assert_eq!(bundle.scope_ref, "run.compliance");
+        assert_eq!(bundle.tenant_policy_record_ref, policy_record.record_id);
+        assert_eq!(bundle.tenant_policy_hash, policy_record.policy_hash);
+        assert_eq!(bundle.redaction_profile_ref, "redaction.compliance.v1");
+        assert!(bundle.production_readiness_ref.is_none());
+        assert!(!bundle.contains_secret_material);
+        assert!(bundle.audit_export_refs.contains(&run_export.export_id));
+        assert!(bundle
+            .audit_export_refs
+            .contains(&readiness_export.export_id));
+        assert!(bundle
+            .p1_execution_bundle_refs
+            .contains(&p1_bundle.bundle_id));
+        assert!(bundle.event_refs.contains(&"ledger.run.compliance".into()));
+        assert!(bundle.evidence_refs.contains(&policy_record.policy_hash));
+        assert!(bundle
+            .bundle_hash
+            .starts_with("compliance_export_bundle_hash."));
+    }
+
+    #[test]
+    fn compliance_export_bundle_preserves_production_readiness_ref() {
+        let policy = tenant_policy();
+        let policy_record = VaultController::seal_tenant_policy_pack(
+            policy.clone(),
+            vec!["policy.approved.1".into()],
+            "vault.controller",
+        )
+        .unwrap();
+        let signature_decision = VaultController::verify_executor_signature(
+            &signature(),
+            &[trust_root()],
+            RiskLevel::High,
+        );
+        let production_readiness = VaultController::evaluate_production_readiness(
+            &policy,
+            &[credential()],
+            &[signature_decision],
+            &hardening_evidence(),
+            &all_adapter_evidence(),
+        )
+        .unwrap();
+        let export = VaultController::audit_export_record(
+            "tenant.a",
+            "production.enablement",
+            AuditExportRecordKind::Run,
+            "redaction.compliance.v1",
+            vec![production_readiness.decision_id.clone()],
+            "auditor.1",
+        )
+        .unwrap();
+
+        let bundle = VaultController::compliance_export_bundle(
+            "production.enablement",
+            &policy_record,
+            &[export],
+            &[],
+            Some(&production_readiness),
+            "auditor.1",
+        )
+        .unwrap();
+
+        assert_eq!(
+            bundle.production_readiness_ref,
+            Some(production_readiness.decision_id.clone())
+        );
+        assert!(bundle
+            .evidence_refs
+            .contains(&production_readiness.decision_id));
+    }
+
+    #[test]
+    fn compliance_export_bundle_rejects_cross_tenant_or_inconsistent_redaction() {
+        let policy = tenant_policy();
+        let policy_record = VaultController::seal_tenant_policy_pack(
+            policy,
+            vec!["policy.approved.1".into()],
+            "vault.controller",
+        )
+        .unwrap();
+        let export = VaultController::audit_export_record(
+            "tenant.a",
+            "run.compliance.reject",
+            AuditExportRecordKind::Run,
+            "redaction.compliance.v1",
+            vec!["ledger.reject".into()],
+            "auditor.1",
+        )
+        .unwrap();
+        let other_redaction = VaultController::audit_export_record(
+            "tenant.a",
+            "run.compliance.reject",
+            AuditExportRecordKind::CredentialUse,
+            "redaction.other.v1",
+            vec!["secret.reject".into()],
+            "auditor.1",
+        )
+        .unwrap();
+        let redaction_error = VaultController::compliance_export_bundle(
+            "run.compliance.reject",
+            &policy_record,
+            &[export.clone(), other_redaction],
+            &[],
+            None,
+            "auditor.1",
+        )
+        .unwrap_err();
+        assert_eq!(redaction_error, VaultError::MissingEvidence);
+
+        let cross_tenant = AuditExportRecord {
+            tenant_id: "tenant.b".into(),
+            ..export
+        };
+        let tenant_error = VaultController::compliance_export_bundle(
+            "run.compliance.reject",
+            &policy_record,
+            &[cross_tenant],
+            &[],
+            None,
+            "auditor.1",
         )
         .unwrap_err();
         assert_eq!(tenant_error, VaultError::TenantMismatch);

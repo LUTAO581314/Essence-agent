@@ -107,10 +107,10 @@ a Rust workspace with twenty library crates:
   policy records, quorum approvals, break-glass decisions, and redacted audit
   export records without storing raw secret material. It now also defines P1
   execution-readiness profiles, tenant-policy-record-bound profile records,
-  requests, decisions, and
-  redacted P1 readiness audit exports plus typed P1 execution audit bundles so
-  bounded P1 runtime tasks can enter the P0 execution chain only when
-  explicitly allowed and later review the request/profile/decision evidence.
+  requests, decisions, redacted P1 readiness audit exports, typed P1 execution
+  audit bundles, and redacted compliance export bundles so bounded P1 runtime
+  tasks can enter the P0 execution chain only when explicitly allowed and later
+  review the request/profile/decision evidence.
   Production or
   credential-capable P1 profile records must attach a ready
   `ProductionReadinessDecision`.
@@ -267,10 +267,13 @@ P1 execution audit bundles now bind the runtime request, sealed profile record,
 readiness decision, optional production readiness ref, redaction profile, and
 evidence refs for review without granting ticket, execution, verification, or
 ledger authority to P1.
+Compliance export bundles now aggregate redacted audit export records and P1
+execution audit bundles under a sealed tenant policy record/hash for review,
+without persisting raw secrets or calling an external compliance backend.
 It keeps raw secrets out of model, log, and durable payload paths. It does not
 yet integrate concrete KMS/HSM/secret-manager adapters, perform real
 cryptographic verification, inject credentials into OS sandboxes, or generate
-persisted compliance export bundles.
+externally persisted compliance export bundles.
 
 R9 has started with `moxi-hotpath`. It turns the 5ms claim into a bounded
 first-packet contract for ack, early deny, route, and exact/template cache-hit
@@ -566,11 +569,12 @@ P0 boundary decisions:
   `ProductionHardeningEvidence`, `ProductionAdapterEvidence`, and
   `ProductionReadinessDecision`, plus `P1ExecutionReadinessProfile`,
   `P1ExecutionReadinessProfileRecord`, `P1ExecutionReadinessRequest`, and
-  `P1ExecutionReadinessDecision`, and `P1ExecutionAuditBundle`. It rejects raw
-  secret-looking references, requires quorum for high-risk secret use, checks
-  executor signatures against tenant trust-root metadata, binds signature
-  decisions to tenant ids, exports redacted audit records and P1 execution
-  audit bundles, rejects placeholder adapter evidence, blocks
+  `P1ExecutionReadinessDecision`, `P1ExecutionAuditBundle`, and
+  `ComplianceExportBundle`. It rejects raw secret-looking references, requires
+  quorum for high-risk secret use, checks executor signatures against tenant
+  trust-root metadata, binds signature decisions to tenant ids, exports redacted
+  audit records, P1 execution audit bundles, and local compliance export
+  bundles, rejects placeholder adapter evidence, blocks
   production readiness until all P0 hardening gates have tenant-bound adapter
   evidence, seals tenant policy packs with stable hashes, seals P1 execution
   profiles against tenant policy record refs and policy/profile hashes,
@@ -633,9 +637,10 @@ P0 boundary decisions:
 - Production vault integration beyond the current R8 adapter evidence gate:
   concrete KMS/HSM/secret-manager calls, real cryptographic signature
   verification, secret injection into hardened sandboxes, tenant trust-root
-  persistence, and compliance export bundle generation. Adapter evidence and
-  rotation/compliance requirements are now modeled as fail-closed readiness
-  gates, but live external infrastructure still needs to be connected.
+  persistence, and external compliance export bundle storage/delivery. Adapter
+  evidence and rotation/compliance requirements are now modeled as fail-closed
+  readiness gates, and local redacted compliance bundles can be assembled, but
+  live external infrastructure still needs to be connected.
 - P1 execution readiness beyond the default local read-only profile: production
   profiles, credentialed execution, and high-risk runtime tasks still require
   production-ready P0 evidence and concrete external adapters.

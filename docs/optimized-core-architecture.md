@@ -70,6 +70,10 @@ P0 responsibilities:
   redaction profile, and evidence refs. This makes the P0/P1 execution interlock
   reviewable without turning P0 into a runtime profile database or granting P1
   direct ticket/execution authority.
+- package redacted compliance export bundles from audit export records and P1
+  execution audit bundles under a sealed tenant policy record/hash. The bundle is
+  review evidence only; external compliance storage/delivery remains an adapter
+  responsibility.
 - require production or credential-capable P1 execution profiles to attach a
   ready production-readiness decision before they can be sealed. Local read-only
   profiles remain bounded local records and do not imply production authority.
@@ -246,9 +250,10 @@ Before credentialed or executable production actions, the architecture needs:
 - cryptographic executor signature verification against trust roots; current
   verification is a control-plane decision over tenant-bound metadata and
   evidence refs;
-- compliance-grade redaction and audit export; current audit export records
-  carry redaction profile refs and hashes without raw secret material, and the
-  readiness gate requires compliance export evidence before production enablement;
+- compliance-grade redaction and audit export; current audit export records and
+  local compliance export bundles carry redaction profile refs and hashes without
+  raw secret material, and the readiness gate requires compliance export
+  evidence before production enablement;
 - bounded hot-path control for ack/deny/route/cache-hit first packets, with
   measured p50/p95/p99 facts and no tool execution authority;
 - model gateway cost controls and fallback;
@@ -295,8 +300,8 @@ Before credentialed or executable production actions, the architecture needs:
    credential references, secret-use decisions, trust roots, signature
    verification decisions, tenant policy packs, quorum approval, break-glass,
    audit export records, tenant policy pack records, P1 execution-readiness
-   profile records, P1 execution audit bundles, production adapter evidence,
-   and fail-closed production readiness gates.
+   profile records, P1 execution audit bundles, compliance export bundles,
+   production adapter evidence, and fail-closed production readiness gates.
 14. Build `moxi-hotpath` as the first low-latency control plane for ack,
    early-deny, route, exact/template cache hit, degrade plans, latency samples,
    p50/p95/p99 snapshots, and hot-path facts.

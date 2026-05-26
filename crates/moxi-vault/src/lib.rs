@@ -194,6 +194,19 @@ pub struct TrustRoot {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TrustRootRecord {
+    pub record_id: String,
+    pub tenant_id: String,
+    pub root_id: String,
+    pub signing_key_ref: String,
+    pub trust_root_hash: String,
+    pub trust_root: TrustRoot,
+    pub evidence_refs: Vec<String>,
+    pub sealed_by: String,
+    pub sealed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ExecutorSignature {
     pub signature_id: String,
     pub tenant_id: String,
@@ -654,6 +667,86 @@ impl VaultController {
             evidence_refs,
             verified_at: now,
         }
+    }
+
+    pub fn seal_trust_root(
+        trust_root: TrustRoot,
+        evidence_refs: Vec<String>,
+        sealed_by: impl Into<String>,
+    ) -> Result<TrustRootRecord, VaultError> {
+        validate_trust_root(&trust_root)?;
+        if evidence_refs.is_empty() {
+            return Err(VaultError::MissingEvidence);
+        }
+        let trust_root_hash = stable_id("trust_root_hash", &trust_root);
+        let mut combined_evidence = evidence_refs;
+        combined_evidence.push(trust_root.root_id.clone());
+        combined_evidence.extend(trust_root.evidence_refs.clone());
+        combined_evidence.sort();
+        combined_evidence.dedup();
+
+        Ok(TrustRootRecord {
+            record_id: stable_id(
+                "trust_root_record",
+                &(
+                    trust_root.tenant_id.as_str(),
+                    trust_root.root_id.as_str(),
+                    trust_root.signing_key_ref.as_str(),
+                    trust_root_hash.as_str(),
+                    &combined_evidence,
+                ),
+            ),
+            tenant_id: trust_root.tenant_id.clone(),
+            root_id: trust_root.root_id.clone(),
+            signing_key_ref: trust_root.signing_key_ref.clone(),
+            trust_root_hash,
+            trust_root,
+            evidence_refs: combined_evidence,
+            sealed_by: sealed_by.into(),
+            sealed_at: Utc::now(),
+        })
+    }
+
+    pub fn load_trust_root(record: &TrustRootRecord) -> Result<TrustRoot, VaultError> {
+        validate_trust_root(&record.trust_root)?;
+        if record.evidence_refs.is_empty() {
+            return Err(VaultError::MissingEvidence);
+        }
+        if record.tenant_id != record.trust_root.tenant_id
+            || record.root_id != record.trust_root.root_id
+            || record.signing_key_ref != record.trust_root.signing_key_ref
+        {
+            return Err(VaultError::TenantMismatch);
+        }
+        let expected_hash = stable_id("trust_root_hash", &record.trust_root);
+        if record.trust_root_hash != expected_hash {
+            return Err(VaultError::MissingEvidence);
+        }
+
+        Ok(record.trust_root.clone())
+    }
+
+    pub fn verify_executor_signature_with_trust_root_records(
+        signature: &ExecutorSignature,
+        trust_root_records: &[TrustRootRecord],
+        risk_level: RiskLevel,
+    ) -> Result<SignatureVerificationDecision, VaultError> {
+        let trust_roots = trust_root_records
+            .iter()
+            .map(Self::load_trust_root)
+            .collect::<Result<Vec<_>, _>>()?;
+        if trust_roots
+            .iter()
+            .any(|trust_root| trust_root.tenant_id != signature.tenant_id)
+        {
+            return Err(VaultError::TenantMismatch);
+        }
+
+        Ok(Self::verify_executor_signature(
+            signature,
+            &trust_roots,
+            risk_level,
+        ))
     }
 
     pub fn decide_break_glass(
@@ -1700,6 +1793,25 @@ fn looks_like_raw_secret(value: &str) -> bool {
         || lower.starts_with("xoxb-")
 }
 
+fn validate_trust_root(trust_root: &TrustRoot) -> Result<(), VaultError> {
+    if trust_root.evidence_refs.is_empty()
+        || trust_root.valid_from >= trust_root.valid_until
+        || [
+            trust_root.root_id.as_str(),
+            trust_root.issuer.as_str(),
+            trust_root.algorithm.as_str(),
+            trust_root.signing_key_ref.as_str(),
+            trust_root.fingerprint.as_str(),
+        ]
+        .iter()
+        .any(|value| is_placeholder_ref(value))
+    {
+        return Err(VaultError::MissingEvidence);
+    }
+
+    Ok(())
+}
+
 fn require_production_ref_and_adapter(
     value: &Option<String>,
     adapter_evidence: &[ProductionAdapterEvidence],
@@ -2119,6 +2231,70 @@ mod tests {
 
         assert_eq!(decision.decision, SignatureVerificationKind::Rejected);
         assert!(!decision.can_issue_high_risk_ticket);
+    }
+
+    #[test]
+    fn trust_root_record_roundtrips_and_verifies_executor_signature() {
+        let root = trust_root();
+        let record = VaultController::seal_trust_root(
+            root.clone(),
+            vec!["security.import.review".into()],
+            "vault.controller",
+        )
+        .unwrap();
+
+        let loaded = VaultController::load_trust_root(&record).unwrap();
+        let decision = VaultController::verify_executor_signature_with_trust_root_records(
+            &signature(),
+            std::slice::from_ref(&record),
+            RiskLevel::High,
+        )
+        .unwrap();
+
+        assert_eq!(loaded, root);
+        assert_eq!(record.tenant_id, "tenant.a");
+        assert_eq!(record.root_id, "root.1");
+        assert!(record.trust_root_hash.starts_with("trust_root_hash."));
+        assert!(record.evidence_refs.contains(&"trust.root.import".into()));
+        assert!(record
+            .evidence_refs
+            .contains(&"security.import.review".into()));
+        assert_eq!(decision.decision, SignatureVerificationKind::Verified);
+        assert_eq!(decision.trust_root_ref, Some("root.1".into()));
+        assert!(decision.evidence_refs.contains(&"trust.root.import".into()));
+    }
+
+    #[test]
+    fn trust_root_record_rejects_tamper_missing_evidence_and_cross_tenant_records() {
+        let missing_error =
+            VaultController::seal_trust_root(trust_root(), vec![], "vault.controller").unwrap_err();
+        assert_eq!(missing_error, VaultError::MissingEvidence);
+
+        let mut record = VaultController::seal_trust_root(
+            trust_root(),
+            vec!["security.import.review".into()],
+            "vault.controller",
+        )
+        .unwrap();
+        record.trust_root.fingerprint = "sha256:tampered".into();
+        let tamper_error = VaultController::load_trust_root(&record).unwrap_err();
+        assert_eq!(tamper_error, VaultError::MissingEvidence);
+
+        let mut other_tenant_root = trust_root();
+        other_tenant_root.tenant_id = "tenant.b".into();
+        let other_tenant_record = VaultController::seal_trust_root(
+            other_tenant_root,
+            vec!["security.import.review".into()],
+            "vault.controller",
+        )
+        .unwrap();
+        let tenant_error = VaultController::verify_executor_signature_with_trust_root_records(
+            &signature(),
+            &[other_tenant_record],
+            RiskLevel::High,
+        )
+        .unwrap_err();
+        assert_eq!(tenant_error, VaultError::TenantMismatch);
     }
 
     #[test]

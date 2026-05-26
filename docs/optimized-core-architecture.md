@@ -51,8 +51,9 @@ P0 responsibilities:
 - replay audit facts from persisted policy decisions, approval grants, tickets,
   results, proofs, and events.
 - keep credential use reference-only, bind secret-use decisions to evidence,
-  verify executor signature metadata against tenant trust roots, and export
-  redacted audit records without persisting raw secret material.
+  seal tenant trust roots into hash-bound records, verify executor signature
+  metadata against tenant trust-root records, and export redacted audit records
+  without persisting raw secret material.
 - evaluate production readiness fail-closed before credentialed or executable
   production enablement, covering production auth, external secret management,
   cryptographic verification, hardened sandboxing, secret injection, rotation,
@@ -244,16 +245,16 @@ Before credentialed or executable production actions, the architecture needs:
 
 - production credential/key store; the current `moxi-vault` MVP models
   reference-only credential use, quorum approvals, trust roots, signature
-  verification decisions, break-glass decisions, redacted audit records, a P1
-  execution-readiness gate, production adapter evidence, adapter verification
-  decisions, and a fail-closed production readiness decision, but not live
-  KMS/HSM calls;
+  verification decisions, hash-bound trust-root records, break-glass decisions,
+  redacted audit records, a P1 execution-readiness gate, production adapter
+  evidence, adapter verification decisions, and a fail-closed production
+  readiness decision, but not live KMS/HSM calls or external trust-root storage;
 - OS-level process sandbox hardening; the readiness gate can require a hardened
   sandbox profile ref before production enablement, but does not implement the
   OS/container runtime itself;
 - cryptographic executor signature verification against trust roots; current
-  verification is a control-plane decision over tenant-bound metadata and
-  evidence refs;
+  verification is a control-plane decision over tenant-bound trust-root records,
+  metadata, and evidence refs;
 - compliance-grade redaction and audit export; current audit export records and
   local compliance export bundles carry redaction profile refs and hashes without
   raw secret material, and the readiness gate requires compliance export
@@ -301,12 +302,12 @@ Before credentialed or executable production actions, the architecture needs:
    gates, contamination findings, recall citations, working-memory
    projections, and forget audit events.
 13. Build `moxi-vault` as the first P0 production-hardening control plane for
-   credential references, secret-use decisions, trust roots, signature
-   verification decisions, tenant policy packs, quorum approval, break-glass,
-   audit export records, tenant policy pack records, P1 execution-readiness
-   profile records, P1 execution audit bundles, compliance export bundles,
-   production adapter evidence, adapter verification decisions, and fail-closed
-   production readiness gates.
+   credential references, secret-use decisions, trust roots, hash-bound
+   trust-root records, signature verification decisions, tenant policy packs,
+   quorum approval, break-glass, audit export records, tenant policy pack
+   records, P1 execution-readiness profile records, P1 execution audit bundles,
+   compliance export bundles, production adapter evidence, adapter verification
+   decisions, and fail-closed production readiness gates.
 14. Build `moxi-hotpath` as the first low-latency control plane for ack,
    early-deny, route, exact/template cache hit, degrade plans, latency samples,
    p50/p95/p99 snapshots, and hot-path facts.

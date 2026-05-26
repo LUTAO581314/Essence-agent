@@ -103,8 +103,9 @@ a Rust workspace with twenty library crates:
   rollout planning.
 - `moxi-vault`: first P0 production-hardening control plane. It defines
   credential references, secret-use requests/decisions, tenant trust roots,
-  executor signature verification decisions, tenant policy packs, sealed tenant
-  policy records, quorum approvals, break-glass decisions, and redacted audit
+  sealed trust-root records, executor signature verification decisions, tenant
+  policy packs, sealed tenant policy records, quorum approvals, break-glass
+  decisions, and redacted audit
   export records without storing raw secret material. It now also defines P1
   execution-readiness profiles, tenant-policy-record-bound profile records,
   requests, decisions, redacted P1 readiness audit exports, typed P1 execution
@@ -253,7 +254,7 @@ evolution ledger yet.
 R8 has locally completed the P0 production-hardening control-plane closure with
 `moxi-vault`. It models the first P0 production-hardening
 control plane for credential references, secret-use boundaries, tenant trust
-roots, executor signature verification decisions, tenant policy packs,
+roots, sealed trust-root records, executor signature verification decisions, tenant policy packs,
 quorum approvals, break-glass decisions, redacted audit exports, production
 adapter evidence, a P1 execution-readiness gate, and a fail-closed production
 readiness gate. The P1 execution-readiness gate lets the default local profile
@@ -321,9 +322,10 @@ P0 coverage in current code:
   capability registry, run contract, capability contract, state store, local
   file sandbox, v0 process-sandbox protocol, proof collection, append-only
   ledger, schema migrations, ledger replay/audit verification, reference-only
-  credential-use decisions, tenant trust-root signature verification decisions,
-  quorum approvals, break-glass decision records, redacted audit export records,
-  and a P0-controlled P1 execution-readiness gate for bounded runtime execution.
+  credential-use decisions, hash-bound tenant trust-root records, tenant
+  trust-root signature verification decisions, quorum approvals, break-glass
+  decision records, redacted audit export records, and a P0-controlled P1
+  execution-readiness gate for bounded runtime execution.
 - Partial: scheduler is represented by kernel-driven run status transitions and
   heartbeat/budget accounting, but not an independent scheduler runtime.
 - Partial: execution event bus is represented by persisted ledger/state facts,
@@ -565,7 +567,7 @@ P0 boundary decisions:
   loop requires eval evidence, passed experiments, and human approval for
   protected/high-risk deltas before rollout planning.
 - P0 production-hardening MVP: `moxi-vault` exposes `CredentialRef`,
-  `SecretUseRequest`, `SecretUseDecision`, `TrustRoot`, `ExecutorSignature`,
+  `SecretUseRequest`, `SecretUseDecision`, `TrustRoot`, `TrustRootRecord`, `ExecutorSignature`,
   `SignatureVerificationDecision`, `TenantPolicyPack`,
   `TenantPolicyPackRecord`, `QuorumApproval`, `BreakGlassRequest`,
   `BreakGlassDecision`, `AuditExportRecord`,
@@ -575,8 +577,9 @@ P0 boundary decisions:
   `P1ExecutionReadinessRequest`, and `P1ExecutionReadinessDecision`,
   `P1ExecutionAuditBundle`, and `ComplianceExportBundle`. It rejects raw
   secret-looking references, requires
-  quorum for high-risk secret use, checks executor signatures against tenant
-  trust-root metadata, binds signature decisions to tenant ids, exports redacted
+  quorum for high-risk secret use, seals tenant trust roots into hash-bound
+  records, checks executor signatures against tenant trust-root records, binds
+  signature decisions to tenant ids, exports redacted
   audit records, P1 execution audit bundles, and local compliance export
   bundles, rejects placeholder adapter evidence, verifies adapter evidence into
   tenant-bound decisions, blocks production readiness until all P0 hardening
@@ -641,11 +644,12 @@ P0 boundary decisions:
   grade redaction.
 - Production vault integration beyond the current R8 adapter evidence gate:
   concrete KMS/HSM/secret-manager calls, real cryptographic signature
-  verification, secret injection into hardened sandboxes, tenant trust-root
-  persistence, and external compliance export bundle storage/delivery. Adapter
-  evidence and rotation/compliance requirements are now modeled as fail-closed
-  readiness gates, and local redacted compliance bundles can be assembled, but
-  live external infrastructure still needs to be connected.
+  verification, secret injection into hardened sandboxes, external tenant
+  trust-root storage, and external compliance export bundle storage/delivery.
+  Hash-bound trust-root records, adapter evidence, and rotation/compliance
+  requirements are now modeled as fail-closed readiness gates, and local
+  redacted compliance bundles can be assembled, but live external infrastructure
+  still needs to be connected.
 - P1 execution readiness beyond the default local read-only profile: production
   profiles, credentialed execution, and high-risk runtime tasks still require
   production-ready P0 evidence and concrete external adapters.

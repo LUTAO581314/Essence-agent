@@ -148,11 +148,11 @@ now pass locally.
   rollout planning.
 - `moxi-vault`: first P0 production-hardening control plane. It defines
   `CredentialRef`, `SecretUseRequest`, `SecretUseDecision`, `TrustRoot`,
-  `ExecutorSignature`, `SignatureVerificationDecision`, `TenantPolicyPack`,
+  `TrustRootRecord`, `ExecutorSignature`, `SignatureVerificationDecision`, `TenantPolicyPack`,
   `QuorumApproval`, `BreakGlassRequest`, `BreakGlassDecision`, and
   `AuditExportRecord`, plus sealed `TenantPolicyPackRecord` values, enforcing
-  reference-only secrets, quorum gates, tenant trust-root checks, redacted audit
-  export metadata, and a
+  reference-only secrets, quorum gates, tenant trust-root checks, hash-bound
+  trust-root records, redacted audit export metadata, and a
   fail-closed `P1ExecutionReadinessDecision` gate plus
   `ProductionAdapterEvidence`, `ProductionAdapterVerificationDecision`, and
   `ProductionReadinessDecision` gates over production auth, external secret
@@ -511,8 +511,10 @@ publishable docs:
   match the ledger event.
 - Execution tickets are issued by the kernel and can be consumed only once.
 - High-risk executor hardening now has a control-plane decision model:
-  `moxi-vault` verifies executor signatures against tenant trust-root
-  metadata before a future ticket gate can require signed executors.
+  `moxi-vault` seals tenant trust roots into hash-bound `TrustRootRecord`
+  values, reloads them with tenant/hash checks, and verifies executor
+  signatures against those tenant trust-root records before a future ticket gate
+  can require signed executors.
 - Production enablement now has a fail-closed readiness model:
   `moxi-vault` produces `ProductionAdapterEvidence`, verifies it into
   tenant-bound `ProductionAdapterVerificationDecision` records, and then
@@ -579,9 +581,9 @@ is verified into tenant-bound decisions before readiness can cite it. P1 may
 only enter the P0
 execution chain when that readiness decision is ready; it still cannot issue
 tickets, execute without P0, verify, or commit. Real cryptographic verification,
-OS credential injection, HSM/KMS integration, production secret rotation, and
-external compliance export persistence still require concrete external adapters
-before production exposure.
+external trust-root storage, OS credential injection, HSM/KMS integration,
+production secret rotation, and external compliance export persistence still
+require concrete external adapters before production exposure.
 
 `process_sandbox` is a runnable v0 JSON protocol boundary. It is not yet
 production OS isolation; enabling executable external actions in production is

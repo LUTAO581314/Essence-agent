@@ -87,6 +87,13 @@ pub enum RotationEnforcementDecisionKind {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
+pub enum ComplianceExportDeliveryDecisionKind {
+    Verified,
+    Rejected,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
 pub enum ProductionReadinessGate {
     ProductionAuth,
     ExternalSecretManager,
@@ -353,6 +360,36 @@ pub struct ComplianceExportBundle {
     pub bundle_hash: String,
     pub generated_by: String,
     pub generated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ComplianceExportDeliveryEvidence {
+    pub evidence_id: String,
+    pub tenant_id: String,
+    pub bundle_id: String,
+    pub bundle_hash: String,
+    pub delivery_ref: String,
+    pub storage_provider_ref: String,
+    pub attestation_ref: String,
+    pub receipt_ref: String,
+    pub retention_policy_ref: String,
+    pub delivered_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ComplianceExportDeliveryDecision {
+    pub decision_id: String,
+    pub tenant_id: String,
+    pub bundle_id: String,
+    pub bundle_hash: String,
+    pub delivery_ref: String,
+    pub storage_provider_ref: String,
+    pub decision: ComplianceExportDeliveryDecisionKind,
+    pub reasons: Vec<String>,
+    pub evidence_refs: Vec<String>,
+    pub verified_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1380,6 +1417,87 @@ impl VaultController {
         })
     }
 
+    pub fn verify_compliance_export_delivery(
+        bundle: &ComplianceExportBundle,
+        evidence: &ComplianceExportDeliveryEvidence,
+    ) -> ComplianceExportDeliveryDecision {
+        let mut reasons = Vec::new();
+        let mut evidence_refs = vec![
+            bundle.bundle_id.clone(),
+            bundle.bundle_hash.clone(),
+            evidence.evidence_id.clone(),
+            evidence.delivery_ref.clone(),
+            evidence.storage_provider_ref.clone(),
+            evidence.attestation_ref.clone(),
+            evidence.receipt_ref.clone(),
+            evidence.retention_policy_ref.clone(),
+        ];
+
+        if bundle.tenant_id != evidence.tenant_id {
+            reasons
+                .push("compliance bundle and delivery evidence belong to different tenants".into());
+        }
+        if bundle.bundle_id != evidence.bundle_id || bundle.bundle_hash != evidence.bundle_hash {
+            reasons.push("delivery evidence is not bound to the compliance bundle hash".into());
+        }
+        if bundle.contains_secret_material {
+            reasons.push("compliance export bundle contains secret material".into());
+        }
+        if evidence.delivered_at >= evidence.expires_at || evidence.expires_at <= Utc::now() {
+            reasons.push("compliance export delivery evidence is expired or invalid".into());
+        }
+        if [
+            evidence.evidence_id.as_str(),
+            evidence.delivery_ref.as_str(),
+            evidence.storage_provider_ref.as_str(),
+            evidence.attestation_ref.as_str(),
+            evidence.receipt_ref.as_str(),
+            evidence.retention_policy_ref.as_str(),
+        ]
+        .iter()
+        .any(|value| is_placeholder_ref(value))
+        {
+            reasons.push("compliance export delivery evidence contains placeholder refs".into());
+        }
+
+        evidence_refs.sort();
+        evidence_refs.dedup();
+        reasons.sort();
+        reasons.dedup();
+
+        let decision = if reasons.is_empty() {
+            reasons.push("compliance export delivery evidence is verified".into());
+            ComplianceExportDeliveryDecisionKind::Verified
+        } else {
+            ComplianceExportDeliveryDecisionKind::Rejected
+        };
+
+        ComplianceExportDeliveryDecision {
+            decision_id: stable_id(
+                "compliance_export_delivery",
+                &(
+                    bundle.tenant_id.as_str(),
+                    bundle.bundle_id.as_str(),
+                    bundle.bundle_hash.as_str(),
+                    evidence.evidence_id.as_str(),
+                    evidence.delivery_ref.as_str(),
+                    &decision,
+                    &evidence_refs,
+                ),
+            ),
+            tenant_id: bundle.tenant_id.clone(),
+            bundle_id: bundle.bundle_id.clone(),
+            bundle_hash: bundle.bundle_hash.clone(),
+            delivery_ref: evidence.delivery_ref.clone(),
+            storage_provider_ref: evidence.storage_provider_ref.clone(),
+            decision,
+            reasons,
+            evidence_refs,
+            verified_at: Utc::now(),
+            expires_at: evidence.expires_at,
+        }
+    }
+
     pub fn verify_production_adapter_evidence(
         evidence: &ProductionAdapterEvidence,
     ) -> ProductionAdapterVerificationDecision {
@@ -2361,6 +2479,24 @@ mod tests {
             .collect()
     }
 
+    fn compliance_delivery_evidence(
+        bundle: &ComplianceExportBundle,
+    ) -> ComplianceExportDeliveryEvidence {
+        ComplianceExportDeliveryEvidence {
+            evidence_id: "compliance.delivery.evidence.1".into(),
+            tenant_id: bundle.tenant_id.clone(),
+            bundle_id: bundle.bundle_id.clone(),
+            bundle_hash: bundle.bundle_hash.clone(),
+            delivery_ref: "compliance-delivery://tenant.a/export/run.compliance".into(),
+            storage_provider_ref: "compliance-store://tenant.a/prod-archive".into(),
+            attestation_ref: "attestation://tenant.a/compliance-delivery/2026-05".into(),
+            receipt_ref: "receipt://tenant.a/compliance-delivery/run.compliance".into(),
+            retention_policy_ref: "retention://tenant.a/seven-years".into(),
+            delivered_at: Utc::now(),
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+        }
+    }
+
     #[test]
     fn low_risk_secret_use_is_reference_only_and_never_exposes_raw_secret() {
         let decision = VaultController::decide_secret_use(
@@ -3164,6 +3300,67 @@ mod tests {
         assert!(bundle
             .evidence_refs
             .contains(&production_readiness.decision_id));
+    }
+
+    #[test]
+    fn compliance_export_delivery_decision_is_bundle_hash_bound_and_fail_closed() {
+        let policy = tenant_policy();
+        let policy_record = VaultController::seal_tenant_policy_pack(
+            policy,
+            vec!["policy.approved.1".into()],
+            "vault.controller",
+        )
+        .unwrap();
+        let export = VaultController::audit_export_record(
+            "tenant.a",
+            "run.compliance.delivery",
+            AuditExportRecordKind::Run,
+            "redaction.compliance.v1",
+            vec!["ledger.delivery".into(), "proof.delivery".into()],
+            "auditor.1",
+        )
+        .unwrap();
+        let bundle = VaultController::compliance_export_bundle(
+            "run.compliance.delivery",
+            &policy_record,
+            std::slice::from_ref(&export),
+            &[],
+            None,
+            "auditor.1",
+        )
+        .unwrap();
+        let evidence = compliance_delivery_evidence(&bundle);
+        let decision = VaultController::verify_compliance_export_delivery(&bundle, &evidence);
+
+        assert_eq!(
+            decision.decision,
+            ComplianceExportDeliveryDecisionKind::Verified
+        );
+        assert_eq!(decision.tenant_id, bundle.tenant_id);
+        assert_eq!(decision.bundle_id, bundle.bundle_id);
+        assert_eq!(decision.bundle_hash, bundle.bundle_hash);
+        assert!(decision.evidence_refs.contains(&bundle.bundle_hash));
+        assert!(decision.evidence_refs.contains(&evidence.receipt_ref));
+
+        let mut hash_mismatch = evidence.clone();
+        hash_mismatch.bundle_hash = "compliance_export_bundle_hash.tampered".into();
+        let rejected_hash =
+            VaultController::verify_compliance_export_delivery(&bundle, &hash_mismatch);
+        assert_eq!(
+            rejected_hash.decision,
+            ComplianceExportDeliveryDecisionKind::Rejected
+        );
+        assert!(!rejected_hash.reasons.is_empty());
+
+        let mut placeholder_receipt = evidence;
+        placeholder_receipt.receipt_ref = "mock-receipt".into();
+        let rejected_placeholder =
+            VaultController::verify_compliance_export_delivery(&bundle, &placeholder_receipt);
+        assert_eq!(
+            rejected_placeholder.decision,
+            ComplianceExportDeliveryDecisionKind::Rejected
+        );
+        assert!(!rejected_placeholder.reasons.is_empty());
     }
 
     #[test]

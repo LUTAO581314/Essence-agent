@@ -80,8 +80,9 @@ P0 responsibilities:
   direct ticket/execution authority.
 - package redacted compliance export bundles from audit export records and P1
   execution audit bundles under a sealed tenant policy record/hash. The bundle is
-  review evidence only; external compliance storage/delivery remains an adapter
-  responsibility.
+  review evidence only; delivery evidence can be verified into tenant-bound
+  compliance export delivery decisions, while real external compliance
+  storage/delivery remains an adapter responsibility.
 - require production or credential-capable P1 execution profiles to attach a
   ready production-readiness decision before they can be sealed. Local read-only
   profiles remain bounded local records and do not imply production authority.
@@ -263,7 +264,9 @@ Before credentialed or executable production actions, the architecture needs:
 - compliance-grade redaction and audit export; current audit export records and
   local compliance export bundles carry redaction profile refs and hashes without
   raw secret material, and the readiness gate requires compliance export
-  evidence before production enablement;
+  evidence before production enablement. Delivery receipts can be verified
+  against the bundle hash, but the real external storage/delivery backend is
+  still outside the local control plane;
 - bounded hot-path control for ack/deny/route/cache-hit first packets, with
   measured p50/p95/p99 facts and no tool execution authority;
 - model gateway cost controls and fallback;
@@ -312,8 +315,8 @@ Before credentialed or executable production actions, the architecture needs:
    quorum approval, break-glass, audit export records, tenant policy pack
    records, P1 execution-readiness profile records, P1 execution audit bundles,
    compliance export bundles, production adapter evidence, adapter verification
-   decisions, rotation enforcement decisions, and fail-closed production
-   readiness gates.
+   decisions, rotation enforcement decisions, compliance export delivery
+   decisions, and fail-closed production readiness gates.
 14. Build `moxi-hotpath` as the first low-latency control plane for ack,
    early-deny, route, exact/template cache hit, degrade plans, latency samples,
    p50/p95/p99 snapshots, and hot-path facts.

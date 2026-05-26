@@ -21,7 +21,8 @@ logic modify P0 directly. `moxi-vault` adds the first P0 production-hardening
 control plane for credential references, secret-use decisions, tenant trust
 roots, executor signature verification decisions, quorum approvals,
 break-glass decisions, redacted audit export records, redacted P1 execution
-audit bundles, and redacted compliance export bundles without storing raw
+audit bundles, redacted compliance export bundles, and compliance export
+delivery decisions without storing raw
 secret material, plus a P1 execution-readiness gate for bounded local runtime execution and a production
 readiness gate that blocks credentialed or
 executable production enablement until production auth, real external secret
@@ -155,7 +156,8 @@ now pass locally.
   trust-root records, redacted audit export metadata, and a
   fail-closed `P1ExecutionReadinessDecision` gate plus
   `ProductionAdapterEvidence`, `ProductionAdapterVerificationDecision`,
-  `RotationEnforcementDecision`, and `ProductionReadinessDecision` gates over
+  `RotationEnforcementDecision`, `ComplianceExportDeliveryDecision`, and
+  `ProductionReadinessDecision` gates over
   production auth, external secret manager, crypto verifier, hardened sandbox,
   secret injection, rotation, tenant policy, executor trust roots, and
   compliance export evidence. It
@@ -520,14 +522,16 @@ publishable docs:
 - Production enablement now has a fail-closed readiness model:
   `moxi-vault` produces `ProductionAdapterEvidence`, verifies it into
   tenant-bound `ProductionAdapterVerificationDecision` records, verifies
-  credential rotation refs into `RotationEnforcementDecision` records, and then
-  produces `ProductionReadinessDecision` records only when each adapter evidence
-  item and configured credential rotation ref is precisely bound to its matching
-  verified decision. It blocks production readiness whenever production auth,
-  real secret-manager/KMS/HSM references, cryptographic verifier evidence,
-  hardened sandbox profiles, secret injection, rotation enforcement, tenant
-  quorum/audit policy, verified executor trust roots, or compliance export
-  profiles are missing.
+  credential rotation refs into `RotationEnforcementDecision` records, verifies
+  compliance export bundle delivery evidence into
+  `ComplianceExportDeliveryDecision` records, and then produces
+  `ProductionReadinessDecision` records only when each adapter evidence item and
+  configured credential rotation ref is precisely bound to its matching verified
+  decision. It blocks production readiness whenever production auth, real
+  secret-manager/KMS/HSM references, cryptographic verifier evidence, hardened
+  sandbox profiles, secret injection, rotation enforcement, tenant quorum/audit
+  policy, verified executor trust roots, or compliance export profiles are
+  missing.
 - P1 runtime enablement now has a separate P0-controlled readiness model:
   `moxi-vault` produces `P1ExecutionReadinessDecision` records. The default
   local profile permits only bounded read-only `file.read` requests to enter the
@@ -577,17 +581,18 @@ commit.
 
 `moxi-vault` is a control-plane MVP, not a production HSM or secret manager. It
 keeps raw secret material out of the model/log/ledger path, can assemble
-redacted local compliance export bundles, and now evaluates a fail-closed P1
+redacted local compliance export bundles, verifies compliance export delivery
+evidence against the bundle hash, and now evaluates a fail-closed P1
 execution-readiness decision plus production readiness decisions over trust-root,
 quorum, break-glass, audit-export, auth, secret-manager, crypto-verifier,
-sandbox, secret-injection, and rotation evidence. Production adapter evidence
-and credential rotation refs are verified into tenant-bound decisions before
-readiness can cite them. P1 may only enter the P0
+sandbox, secret-injection, and rotation evidence. Production adapter evidence,
+credential rotation refs, and compliance export delivery receipts are verified
+into tenant-bound decisions before readiness or review can cite them. P1 may only enter the P0
 execution chain when that readiness decision is ready; it still cannot issue
 tickets, execute without P0, verify, or commit. Real cryptographic verification,
 external trust-root storage, OS credential injection, HSM/KMS integration,
-production secret rotation adapters, and external compliance export persistence
-still require concrete external adapters before production exposure.
+production secret rotation adapters, and real external compliance export storage
+or delivery still require concrete external adapters before production exposure.
 
 `process_sandbox` is a runnable v0 JSON protocol boundary. It is not yet
 production OS isolation; enabling executable external actions in production is

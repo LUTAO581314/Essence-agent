@@ -275,7 +275,9 @@ evidence refs for review without granting ticket, execution, verification, or
 ledger authority to P1.
 Compliance export bundles now aggregate redacted audit export records and P1
 execution audit bundles under a sealed tenant policy record/hash for review,
-without persisting raw secrets or calling an external compliance backend.
+and compliance export delivery evidence can be verified against the bundle hash
+as a tenant-bound `ComplianceExportDeliveryDecision`, without persisting raw
+secrets or calling an external compliance backend.
 It keeps raw secrets out of model, log, and durable payload paths. It does not
 yet integrate concrete KMS/HSM/secret-manager adapters, perform real
 cryptographic verification, inject credentials into OS sandboxes, or generate
@@ -575,7 +577,8 @@ P0 boundary decisions:
   `TenantPolicyPackRecord`, `QuorumApproval`, `BreakGlassRequest`,
   `BreakGlassDecision`, `AuditExportRecord`,
   `ProductionHardeningEvidence`, `ProductionAdapterEvidence`,
-  `ProductionAdapterVerificationDecision`, `RotationEnforcementDecision`, and
+  `ProductionAdapterVerificationDecision`, `RotationEnforcementDecision`,
+  `ComplianceExportDeliveryEvidence`, `ComplianceExportDeliveryDecision`, and
   `ProductionReadinessDecision`,
   plus `P1ExecutionReadinessProfile`, `P1ExecutionReadinessProfileRecord`,
   `P1ExecutionReadinessRequest`, and `P1ExecutionReadinessDecision`,
@@ -587,7 +590,8 @@ P0 boundary decisions:
   audit records, P1 execution audit bundles, and local compliance export
   bundles, rejects placeholder adapter evidence, verifies adapter evidence into
   tenant-bound decisions, verifies credential rotation refs into tenant-bound
-  decisions, blocks production readiness until all P0 hardening gates have
+  decisions, verifies compliance export delivery evidence against bundle hashes
+  into tenant-bound decisions, blocks production readiness until all P0 hardening gates have
   tenant-bound adapter/rotation evidence and matching verified decisions,
   seals tenant policy packs with stable hashes, seals P1 execution
   profiles against tenant policy record refs and policy/profile hashes,
@@ -652,9 +656,10 @@ P0 boundary decisions:
   verification, secret injection into hardened sandboxes, external tenant
   trust-root storage, and external compliance export bundle storage/delivery.
   Hash-bound trust-root records, adapter evidence, rotation enforcement
-  decisions, and rotation/compliance requirements are now modeled as fail-closed
-  readiness gates, and local redacted compliance bundles can be assembled, but
-  live external infrastructure still needs to be connected.
+  decisions, compliance export delivery decisions, and rotation/compliance
+  requirements are now modeled as fail-closed gates, and local redacted
+  compliance bundles can be assembled, but live external infrastructure still
+  needs to be connected.
 - P1 execution readiness beyond the default local read-only profile: production
   profiles, credentialed execution, and high-risk runtime tasks still require
   production-ready P0 evidence and concrete external adapters.

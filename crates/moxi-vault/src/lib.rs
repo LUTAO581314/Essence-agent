@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use moxi_contracts::{ApprovalPolicy, PermissionMode, RiskLevel};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 pub const VAULT_SCHEMA_VERSION: u32 = 1;
@@ -671,6 +671,18 @@ pub struct ProductionReadinessDecision {
     pub reasons: Vec<String>,
     pub evidence_refs: Vec<String>,
     pub evaluated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ProductionHardeningDecisionSet<'a> {
+    pub auth_decision: Option<&'a ProductionAuthDecision>,
+    pub external_secret_manager_decisions: &'a [ExternalSecretManagerDecision],
+    pub cryptographic_verifier_decisions: &'a [CryptographicVerifierDecision],
+    pub hardened_sandbox_decisions: &'a [HardenedSandboxDecision],
+    pub rotation_decisions: &'a [RotationEnforcementDecision],
+    pub secret_injection_decisions: &'a [SecretInjectionDecision],
+    pub compliance_export_delivery_decisions: &'a [ComplianceExportDeliveryDecision],
+    pub trust_root_storage_decisions: &'a [TrustRootStorageDecision],
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -2760,6 +2772,104 @@ impl VaultController {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_production_readiness_with_hardening_decision_set(
+        policy: &TenantPolicyPack,
+        credentials: &[CredentialRef],
+        signature_decisions: &[SignatureVerificationDecision],
+        hardening: &ProductionHardeningEvidence,
+        adapter_evidence: &[ProductionAdapterEvidence],
+        adapter_decisions: &[ProductionAdapterVerificationDecision],
+        decision_set: ProductionHardeningDecisionSet<'_>,
+    ) -> Result<ProductionReadinessDecision, VaultError> {
+        Self::validate_production_hardening_decision_set(
+            policy,
+            credentials,
+            signature_decisions,
+            hardening,
+            adapter_decisions,
+            &decision_set,
+        )?;
+
+        let mut readiness = Self::evaluate_production_readiness_inner(
+            policy,
+            credentials,
+            signature_decisions,
+            hardening,
+            adapter_evidence,
+            adapter_decisions,
+            decision_set.rotation_decisions,
+            Some(decision_set.hardened_sandbox_decisions),
+        )?;
+
+        extend_readiness_evidence_refs_from_decision_set(
+            &mut readiness.evidence_refs,
+            &decision_set,
+        );
+        readiness.decision_id = stable_id(
+            "production_readiness",
+            &(
+                policy.pack_id.as_str(),
+                &readiness.decision,
+                &readiness.missing_gates,
+                &readiness.evidence_refs,
+            ),
+        );
+
+        Ok(readiness)
+    }
+
+    fn validate_production_hardening_decision_set(
+        policy: &TenantPolicyPack,
+        credentials: &[CredentialRef],
+        signature_decisions: &[SignatureVerificationDecision],
+        hardening: &ProductionHardeningEvidence,
+        adapter_decisions: &[ProductionAdapterVerificationDecision],
+        decision_set: &ProductionHardeningDecisionSet<'_>,
+    ) -> Result<(), VaultError> {
+        require_tenant_match_for_hardening_decision_set(policy, decision_set)?;
+        require_verified_production_auth_decision(hardening, decision_set.auth_decision)?;
+        require_verified_external_secret_manager_decisions(
+            credentials,
+            hardening,
+            adapter_decisions,
+            decision_set.external_secret_manager_decisions,
+        )?;
+        require_verified_cryptographic_verifier_decisions(
+            signature_decisions,
+            hardening,
+            adapter_decisions,
+            decision_set.cryptographic_verifier_decisions,
+        )?;
+        require_verified_hardened_sandbox_decision(
+            hardening,
+            decision_set.hardened_sandbox_decisions,
+        )?;
+        for decision in decision_set.rotation_decisions {
+            validate_rotation_decision(decision, adapter_decisions)?;
+        }
+        require_verified_rotation_decisions(
+            credentials,
+            hardening,
+            decision_set.rotation_decisions,
+        )?;
+        require_verified_secret_injection_decisions(
+            credentials,
+            hardening,
+            adapter_decisions,
+            decision_set.secret_injection_decisions,
+        )?;
+        require_verified_compliance_export_delivery_decisions(
+            hardening,
+            adapter_decisions,
+            decision_set.compliance_export_delivery_decisions,
+        )?;
+        require_verified_trust_root_storage_decisions(
+            signature_decisions,
+            decision_set.trust_root_storage_decisions,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn evaluate_production_readiness_inner(
         policy: &TenantPolicyPack,
         credentials: &[CredentialRef],
@@ -3341,6 +3451,369 @@ fn validate_hardened_sandbox_decision(
     Ok(())
 }
 
+fn require_tenant_match_for_hardening_decision_set(
+    policy: &TenantPolicyPack,
+    decision_set: &ProductionHardeningDecisionSet<'_>,
+) -> Result<(), VaultError> {
+    let tenant_id = policy.tenant_id.as_str();
+    if decision_set
+        .auth_decision
+        .is_some_and(|decision| decision.tenant_id != tenant_id)
+        || decision_set
+            .external_secret_manager_decisions
+            .iter()
+            .any(|decision| decision.tenant_id != tenant_id)
+        || decision_set
+            .cryptographic_verifier_decisions
+            .iter()
+            .any(|decision| decision.tenant_id != tenant_id)
+        || decision_set
+            .hardened_sandbox_decisions
+            .iter()
+            .any(|decision| decision.tenant_id != tenant_id)
+        || decision_set
+            .rotation_decisions
+            .iter()
+            .any(|decision| decision.tenant_id != tenant_id)
+        || decision_set
+            .secret_injection_decisions
+            .iter()
+            .any(|decision| decision.tenant_id != tenant_id)
+        || decision_set
+            .compliance_export_delivery_decisions
+            .iter()
+            .any(|decision| decision.tenant_id != tenant_id)
+        || decision_set
+            .trust_root_storage_decisions
+            .iter()
+            .any(|decision| decision.tenant_id != tenant_id)
+    {
+        return Err(VaultError::TenantMismatch);
+    }
+
+    Ok(())
+}
+
+fn require_verified_production_auth_decision(
+    hardening: &ProductionHardeningEvidence,
+    decision: Option<&ProductionAuthDecision>,
+) -> Result<(), VaultError> {
+    let Some(decision) = decision else {
+        return Err(VaultError::MissingEvidence);
+    };
+    if decision.decision != ProductionAuthDecisionKind::Verified
+        || decision.evidence_refs.is_empty()
+        || decision.expires_at <= Utc::now()
+        || hardening.auth_provider_ref.as_ref() != Some(&decision.auth_provider_ref)
+        || !decision.evidence_refs.contains(&decision.auth_provider_ref)
+        || decision
+            .evidence_refs
+            .iter()
+            .any(|value| is_placeholder_ref(value))
+    {
+        return Err(VaultError::MissingEvidence);
+    }
+
+    Ok(())
+}
+
+fn require_verified_external_secret_manager_decisions(
+    credentials: &[CredentialRef],
+    hardening: &ProductionHardeningEvidence,
+    adapter_decisions: &[ProductionAdapterVerificationDecision],
+    decisions: &[ExternalSecretManagerDecision],
+) -> Result<(), VaultError> {
+    if credentials.len() != decisions.len() {
+        return Err(VaultError::MissingEvidence);
+    }
+    let decisions_by_credential = decisions
+        .iter()
+        .map(|decision| (decision.credential_id.as_str(), decision))
+        .collect::<BTreeMap<_, _>>();
+    if decisions_by_credential.len() != decisions.len() {
+        return Err(VaultError::MissingEvidence);
+    }
+
+    for credential in credentials {
+        let Some(decision) = decisions_by_credential.get(credential.credential_id.as_str()) else {
+            return Err(VaultError::MissingEvidence);
+        };
+        if decision.decision != ExternalSecretManagerDecisionKind::Verified
+            || decision.evidence_refs.is_empty()
+            || decision.expires_at <= Utc::now()
+            || decision.external_secret_ref != credential.external_secret_ref
+            || hardening.secret_manager_ref.as_ref() != Some(&decision.secret_manager_ref)
+            || !decision.evidence_refs.contains(&credential.credential_id)
+            || !decision
+                .evidence_refs
+                .contains(&credential.external_secret_ref)
+            || !decision_refs_verified_adapter_kind(
+                &decision.evidence_refs,
+                adapter_decisions,
+                ProductionAdapterKind::ExternalSecretManager,
+                &decision.secret_manager_ref,
+            )?
+            || decision
+                .evidence_refs
+                .iter()
+                .any(|value| is_placeholder_ref(value) || looks_like_raw_secret(value))
+        {
+            return Err(VaultError::MissingEvidence);
+        }
+    }
+
+    Ok(())
+}
+
+fn require_verified_cryptographic_verifier_decisions(
+    signature_decisions: &[SignatureVerificationDecision],
+    hardening: &ProductionHardeningEvidence,
+    adapter_decisions: &[ProductionAdapterVerificationDecision],
+    decisions: &[CryptographicVerifierDecision],
+) -> Result<(), VaultError> {
+    let high_risk_signature_refs = signature_decisions
+        .iter()
+        .filter(|decision| {
+            decision.decision == SignatureVerificationKind::Verified
+                && decision.can_issue_high_risk_ticket
+        })
+        .map(|decision| decision.decision_id.as_str())
+        .collect::<BTreeSet<_>>();
+    if high_risk_signature_refs.is_empty() || decisions.len() != high_risk_signature_refs.len() {
+        return Err(VaultError::MissingEvidence);
+    }
+
+    let mut seen = BTreeSet::new();
+    for decision in decisions {
+        if decision.decision != CryptographicVerifierDecisionKind::Verified
+            || decision.evidence_refs.is_empty()
+            || decision.expires_at <= Utc::now()
+            || hardening.cryptographic_verifier_ref.as_ref()
+                != Some(&decision.cryptographic_verifier_ref)
+            || !high_risk_signature_refs.contains(decision.signature_decision_ref.as_str())
+            || !seen.insert(decision.signature_decision_ref.as_str())
+            || !decision
+                .evidence_refs
+                .contains(&decision.signature_decision_ref)
+            || !decision
+                .evidence_refs
+                .contains(&decision.trust_root_record_ref)
+            || !decision_refs_verified_adapter_kind(
+                &decision.evidence_refs,
+                adapter_decisions,
+                ProductionAdapterKind::CryptographicVerifier,
+                &decision.cryptographic_verifier_ref,
+            )?
+            || decision
+                .evidence_refs
+                .iter()
+                .any(|value| is_placeholder_ref(value))
+        {
+            return Err(VaultError::MissingEvidence);
+        }
+    }
+
+    Ok(())
+}
+
+fn require_verified_secret_injection_decisions(
+    credentials: &[CredentialRef],
+    hardening: &ProductionHardeningEvidence,
+    adapter_decisions: &[ProductionAdapterVerificationDecision],
+    decisions: &[SecretInjectionDecision],
+) -> Result<(), VaultError> {
+    if credentials.len() != decisions.len() {
+        return Err(VaultError::MissingEvidence);
+    }
+    let decisions_by_credential = decisions
+        .iter()
+        .map(|decision| (decision.credential_id.as_str(), decision))
+        .collect::<BTreeMap<_, _>>();
+    if decisions_by_credential.len() != decisions.len() {
+        return Err(VaultError::MissingEvidence);
+    }
+
+    for credential in credentials {
+        let Some(decision) = decisions_by_credential.get(credential.credential_id.as_str()) else {
+            return Err(VaultError::MissingEvidence);
+        };
+        if decision.decision != SecretInjectionDecisionKind::Verified
+            || decision.evidence_refs.is_empty()
+            || decision.expires_at <= Utc::now()
+            || hardening.secret_injection_profile_ref.as_ref()
+                != Some(&decision.secret_injection_profile_ref)
+            || hardening.hardened_sandbox_profile_ref.as_ref()
+                != Some(&decision.hardened_sandbox_profile_ref)
+            || !decision.evidence_refs.contains(&credential.credential_id)
+            || !decision
+                .evidence_refs
+                .contains(&decision.secret_use_decision_id)
+            || !decision_refs_verified_adapter_kind(
+                &decision.evidence_refs,
+                adapter_decisions,
+                ProductionAdapterKind::SecretInjection,
+                &decision.secret_injection_profile_ref,
+            )?
+            || decision
+                .evidence_refs
+                .iter()
+                .any(|value| is_placeholder_ref(value))
+        {
+            return Err(VaultError::MissingEvidence);
+        }
+    }
+
+    Ok(())
+}
+
+fn require_verified_compliance_export_delivery_decisions(
+    hardening: &ProductionHardeningEvidence,
+    adapter_decisions: &[ProductionAdapterVerificationDecision],
+    decisions: &[ComplianceExportDeliveryDecision],
+) -> Result<(), VaultError> {
+    if decisions.is_empty() {
+        return Err(VaultError::MissingEvidence);
+    }
+
+    for decision in decisions {
+        if decision.decision != ComplianceExportDeliveryDecisionKind::Verified
+            || decision.evidence_refs.is_empty()
+            || decision.expires_at <= Utc::now()
+            || !decision.evidence_refs.contains(&decision.bundle_id)
+            || !decision.evidence_refs.contains(&decision.bundle_hash)
+            || decision
+                .adapter_decision_ref
+                .as_ref()
+                .is_none_or(|adapter_decision_ref| {
+                    !decision.evidence_refs.contains(adapter_decision_ref)
+                })
+            || hardening.compliance_export_profile_ref.as_ref()
+                != Some(&decision.storage_provider_ref)
+            || !decision_refs_verified_adapter_kind(
+                &decision.evidence_refs,
+                adapter_decisions,
+                ProductionAdapterKind::ComplianceAuditExport,
+                &decision.storage_provider_ref,
+            )?
+            || decision
+                .evidence_refs
+                .iter()
+                .any(|value| is_placeholder_ref(value))
+        {
+            return Err(VaultError::MissingEvidence);
+        }
+    }
+
+    Ok(())
+}
+
+fn require_verified_trust_root_storage_decisions(
+    signature_decisions: &[SignatureVerificationDecision],
+    decisions: &[TrustRootStorageDecision],
+) -> Result<(), VaultError> {
+    let required_roots = signature_decisions
+        .iter()
+        .filter(|decision| {
+            decision.decision == SignatureVerificationKind::Verified
+                && decision.can_issue_high_risk_ticket
+        })
+        .filter_map(|decision| decision.trust_root_ref.as_deref())
+        .collect::<BTreeSet<_>>();
+    if required_roots.is_empty() || decisions.len() != required_roots.len() {
+        return Err(VaultError::MissingEvidence);
+    }
+
+    let mut seen = BTreeSet::new();
+    for decision in decisions {
+        if decision.decision != TrustRootStorageDecisionKind::Verified
+            || decision.evidence_refs.is_empty()
+            || decision.expires_at <= Utc::now()
+            || !required_roots.contains(decision.root_id.as_str())
+            || !seen.insert(decision.root_id.as_str())
+            || !decision.evidence_refs.contains(&decision.record_id)
+            || !decision.evidence_refs.contains(&decision.trust_root_hash)
+            || !decision
+                .evidence_refs
+                .contains(&decision.storage_provider_ref)
+            || decision
+                .evidence_refs
+                .iter()
+                .any(|value| is_placeholder_ref(value))
+        {
+            return Err(VaultError::MissingEvidence);
+        }
+    }
+
+    Ok(())
+}
+
+fn decision_refs_verified_adapter_kind(
+    evidence_refs: &[String],
+    adapter_decisions: &[ProductionAdapterVerificationDecision],
+    expected_kind: ProductionAdapterKind,
+    expected_provider_ref: &str,
+) -> Result<bool, VaultError> {
+    let matching_decisions = adapter_decisions
+        .iter()
+        .filter(|decision| evidence_refs.contains(&decision.decision_id))
+        .collect::<Vec<_>>();
+    if matching_decisions.len() > 1 {
+        return Err(VaultError::MissingEvidence);
+    }
+    Ok(matching_decisions.first().is_some_and(|decision| {
+        decision.decision == ProductionAdapterVerificationKind::Verified
+            && decision.kind == expected_kind
+            && decision.provider_ref == expected_provider_ref
+    }))
+}
+
+fn extend_readiness_evidence_refs_from_decision_set(
+    evidence_refs: &mut Vec<String>,
+    decision_set: &ProductionHardeningDecisionSet<'_>,
+) {
+    if let Some(decision) = decision_set.auth_decision {
+        evidence_refs.push(decision.decision_id.clone());
+    }
+    evidence_refs.extend(
+        decision_set
+            .external_secret_manager_decisions
+            .iter()
+            .map(|decision| decision.decision_id.clone()),
+    );
+    evidence_refs.extend(
+        decision_set
+            .cryptographic_verifier_decisions
+            .iter()
+            .map(|decision| decision.decision_id.clone()),
+    );
+    evidence_refs.extend(
+        decision_set
+            .hardened_sandbox_decisions
+            .iter()
+            .map(|decision| decision.decision_id.clone()),
+    );
+    evidence_refs.extend(
+        decision_set
+            .secret_injection_decisions
+            .iter()
+            .map(|decision| decision.decision_id.clone()),
+    );
+    evidence_refs.extend(
+        decision_set
+            .compliance_export_delivery_decisions
+            .iter()
+            .map(|decision| decision.decision_id.clone()),
+    );
+    evidence_refs.extend(
+        decision_set
+            .trust_root_storage_decisions
+            .iter()
+            .map(|decision| decision.decision_id.clone()),
+    );
+    evidence_refs.sort();
+    evidence_refs.dedup();
+}
+
 fn require_verified_adapter_decisions(
     adapter_evidence: &[ProductionAdapterEvidence],
     adapter_decisions: &[ProductionAdapterVerificationDecision],
@@ -3782,6 +4255,175 @@ mod tests {
             retention_policy_ref: "retention://tenant.a/trust-root/seven-years".into(),
             stored_at: Utc::now(),
             expires_at: Utc::now() + chrono::Duration::hours(1),
+        }
+    }
+
+    struct ProductionHardeningDecisionFixtures {
+        credential: CredentialRef,
+        signature_decision: SignatureVerificationDecision,
+        hardening: ProductionHardeningEvidence,
+        adapters: Vec<ProductionAdapterEvidence>,
+        adapter_decisions: Vec<ProductionAdapterVerificationDecision>,
+        auth_decision: ProductionAuthDecision,
+        external_secret_manager_decisions: Vec<ExternalSecretManagerDecision>,
+        cryptographic_verifier_decisions: Vec<CryptographicVerifierDecision>,
+        hardened_sandbox_decisions: Vec<HardenedSandboxDecision>,
+        rotation_decisions: Vec<RotationEnforcementDecision>,
+        secret_injection_decisions: Vec<SecretInjectionDecision>,
+        compliance_export_delivery_decisions: Vec<ComplianceExportDeliveryDecision>,
+        trust_root_storage_decisions: Vec<TrustRootStorageDecision>,
+    }
+
+    impl ProductionHardeningDecisionFixtures {
+        fn decision_set(&self) -> ProductionHardeningDecisionSet<'_> {
+            ProductionHardeningDecisionSet {
+                auth_decision: Some(&self.auth_decision),
+                external_secret_manager_decisions: &self.external_secret_manager_decisions,
+                cryptographic_verifier_decisions: &self.cryptographic_verifier_decisions,
+                hardened_sandbox_decisions: &self.hardened_sandbox_decisions,
+                rotation_decisions: &self.rotation_decisions,
+                secret_injection_decisions: &self.secret_injection_decisions,
+                compliance_export_delivery_decisions: &self.compliance_export_delivery_decisions,
+                trust_root_storage_decisions: &self.trust_root_storage_decisions,
+            }
+        }
+    }
+
+    fn production_hardening_decision_fixtures() -> ProductionHardeningDecisionFixtures {
+        let credential = credential();
+        let hardening = hardening_evidence();
+        let adapters = all_adapter_evidence();
+        let adapter_decisions = all_adapter_decisions(&adapters);
+        let adapter_decision = |kind: ProductionAdapterKind| {
+            adapter_decisions
+                .iter()
+                .find(|decision| decision.kind == kind)
+                .unwrap()
+                .clone()
+        };
+        let auth_adapter_decision = adapter_decision(ProductionAdapterKind::AuthProvider);
+        let secret_manager_adapter_decision =
+            adapter_decision(ProductionAdapterKind::ExternalSecretManager);
+        let crypto_adapter_decision =
+            adapter_decision(ProductionAdapterKind::CryptographicVerifier);
+        let sandbox_adapter_decision = adapter_decision(ProductionAdapterKind::HardenedSandbox);
+        let injection_adapter_decision = adapter_decision(ProductionAdapterKind::SecretInjection);
+        let rotation_adapter_decision =
+            adapter_decision(ProductionAdapterKind::RotationEnforcement);
+        let compliance_adapter_decision =
+            adapter_decision(ProductionAdapterKind::ComplianceAuditExport);
+
+        let trust_root_record = VaultController::seal_trust_root(
+            trust_root(),
+            vec!["security.import.review".into()],
+            "vault.controller",
+        )
+        .unwrap();
+        let trust_root_storage_decision = VaultController::verify_trust_root_storage(
+            &trust_root_record,
+            &trust_root_storage_evidence(&trust_root_record),
+        );
+        let signature_decision =
+            VaultController::verify_executor_signature_with_trust_root_records(
+                &signature(),
+                std::slice::from_ref(&trust_root_record),
+                RiskLevel::High,
+            )
+            .unwrap();
+        let auth_decision = VaultController::verify_production_auth(
+            &hardening,
+            &auth_adapter_decision,
+            &production_auth_evidence(&auth_adapter_decision),
+        );
+        let secret_manager_decision = VaultController::verify_external_secret_manager(
+            &credential,
+            &hardening,
+            &secret_manager_adapter_decision,
+            &external_secret_manager_evidence(&credential, &secret_manager_adapter_decision),
+        );
+        let crypto_decision = VaultController::verify_cryptographic_verifier(
+            &hardening,
+            &signature_decision,
+            &trust_root_record,
+            &crypto_adapter_decision,
+            &cryptographic_verifier_evidence(
+                &signature_decision,
+                &trust_root_record,
+                &crypto_adapter_decision,
+            ),
+        );
+        let sandbox_decision = VaultController::verify_hardened_sandbox(
+            &hardening,
+            &sandbox_adapter_decision,
+            &hardened_sandbox_evidence(&sandbox_adapter_decision),
+        );
+        let rotation_decision = VaultController::verify_rotation_enforcement_with_adapter_decision(
+            &credential,
+            &hardening,
+            &rotation_adapter_decision,
+        );
+        let secret_use = VaultController::decide_secret_use(
+            &credential,
+            &secret_request(RiskLevel::High),
+            Some(&approval("secret.req.1")),
+        )
+        .unwrap();
+        let injection_decision = VaultController::verify_secret_injection(
+            &credential,
+            &secret_use,
+            &hardening,
+            &injection_adapter_decision,
+            &secret_injection_evidence(&credential, &secret_use, &injection_adapter_decision),
+        );
+        let policy_record = VaultController::seal_tenant_policy_pack(
+            tenant_policy(),
+            vec!["policy.approved.1".into()],
+            "vault.controller",
+        )
+        .unwrap();
+        let export = VaultController::audit_export_record(
+            "tenant.a",
+            "production.hardening.decision-set",
+            AuditExportRecordKind::Run,
+            "redaction.compliance.v1",
+            vec!["ledger.decision-set".into(), "proof.decision-set".into()],
+            "auditor.1",
+        )
+        .unwrap();
+        let bundle = VaultController::compliance_export_bundle(
+            "production.hardening.decision-set",
+            &policy_record,
+            std::slice::from_ref(&export),
+            &[],
+            None,
+            "auditor.1",
+        )
+        .unwrap();
+        let mut delivery_evidence = compliance_delivery_evidence(&bundle);
+        delivery_evidence.storage_provider_ref = "audit://tenant.a/soc2-bundle".into();
+        delivery_evidence.adapter_decision_ref =
+            Some(compliance_adapter_decision.decision_id.clone());
+        let compliance_delivery_decision =
+            VaultController::verify_compliance_export_delivery_with_adapter_decision(
+                &bundle,
+                &delivery_evidence,
+                &compliance_adapter_decision,
+            );
+
+        ProductionHardeningDecisionFixtures {
+            credential,
+            signature_decision,
+            hardening,
+            adapters,
+            adapter_decisions,
+            auth_decision,
+            external_secret_manager_decisions: vec![secret_manager_decision],
+            cryptographic_verifier_decisions: vec![crypto_decision],
+            hardened_sandbox_decisions: vec![sandbox_decision],
+            rotation_decisions: vec![rotation_decision],
+            secret_injection_decisions: vec![injection_decision],
+            compliance_export_delivery_decisions: vec![compliance_delivery_decision],
+            trust_root_storage_decisions: vec![trust_root_storage_decision],
         }
     }
 
@@ -5429,6 +6071,161 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(rejected_error, VaultError::MissingEvidence);
+    }
+
+    #[test]
+    fn production_readiness_can_require_full_p0_hardening_decision_set() {
+        let fixtures = production_hardening_decision_fixtures();
+
+        let ready = VaultController::evaluate_production_readiness_with_hardening_decision_set(
+            &tenant_policy(),
+            std::slice::from_ref(&fixtures.credential),
+            std::slice::from_ref(&fixtures.signature_decision),
+            &fixtures.hardening,
+            &fixtures.adapters,
+            &fixtures.adapter_decisions,
+            fixtures.decision_set(),
+        )
+        .unwrap();
+
+        assert_eq!(ready.decision, ProductionReadinessDecisionKind::Ready);
+        assert!(ready
+            .evidence_refs
+            .contains(&fixtures.auth_decision.decision_id));
+        assert!(ready
+            .evidence_refs
+            .contains(&fixtures.external_secret_manager_decisions[0].decision_id));
+        assert!(ready
+            .evidence_refs
+            .contains(&fixtures.cryptographic_verifier_decisions[0].decision_id));
+        assert!(ready
+            .evidence_refs
+            .contains(&fixtures.secret_injection_decisions[0].decision_id));
+        assert!(ready
+            .evidence_refs
+            .contains(&fixtures.compliance_export_delivery_decisions[0].decision_id));
+        assert!(ready
+            .evidence_refs
+            .contains(&fixtures.trust_root_storage_decisions[0].decision_id));
+    }
+
+    #[test]
+    fn production_readiness_hardening_decision_set_is_fail_closed() {
+        let mut fixtures = production_hardening_decision_fixtures();
+
+        let missing_auth = ProductionHardeningDecisionSet {
+            auth_decision: None,
+            ..fixtures.decision_set()
+        };
+        let missing_auth_error =
+            VaultController::evaluate_production_readiness_with_hardening_decision_set(
+                &tenant_policy(),
+                std::slice::from_ref(&fixtures.credential),
+                std::slice::from_ref(&fixtures.signature_decision),
+                &fixtures.hardening,
+                &fixtures.adapters,
+                &fixtures.adapter_decisions,
+                missing_auth,
+            )
+            .unwrap_err();
+        assert_eq!(missing_auth_error, VaultError::MissingEvidence);
+
+        fixtures.external_secret_manager_decisions.clear();
+        let missing_secret_manager_error =
+            VaultController::evaluate_production_readiness_with_hardening_decision_set(
+                &tenant_policy(),
+                std::slice::from_ref(&fixtures.credential),
+                std::slice::from_ref(&fixtures.signature_decision),
+                &fixtures.hardening,
+                &fixtures.adapters,
+                &fixtures.adapter_decisions,
+                fixtures.decision_set(),
+            )
+            .unwrap_err();
+        assert_eq!(missing_secret_manager_error, VaultError::MissingEvidence);
+
+        let mut fixtures = production_hardening_decision_fixtures();
+        fixtures.cryptographic_verifier_decisions[0].decision =
+            CryptographicVerifierDecisionKind::Rejected;
+        let rejected_crypto_error =
+            VaultController::evaluate_production_readiness_with_hardening_decision_set(
+                &tenant_policy(),
+                std::slice::from_ref(&fixtures.credential),
+                std::slice::from_ref(&fixtures.signature_decision),
+                &fixtures.hardening,
+                &fixtures.adapters,
+                &fixtures.adapter_decisions,
+                fixtures.decision_set(),
+            )
+            .unwrap_err();
+        assert_eq!(rejected_crypto_error, VaultError::MissingEvidence);
+
+        let mut fixtures = production_hardening_decision_fixtures();
+        fixtures.secret_injection_decisions[0].secret_injection_profile_ref =
+            "injector://tenant.a/other".into();
+        let mismatched_injection_error =
+            VaultController::evaluate_production_readiness_with_hardening_decision_set(
+                &tenant_policy(),
+                std::slice::from_ref(&fixtures.credential),
+                std::slice::from_ref(&fixtures.signature_decision),
+                &fixtures.hardening,
+                &fixtures.adapters,
+                &fixtures.adapter_decisions,
+                fixtures.decision_set(),
+            )
+            .unwrap_err();
+        assert_eq!(mismatched_injection_error, VaultError::MissingEvidence);
+
+        let mut fixtures = production_hardening_decision_fixtures();
+        fixtures.compliance_export_delivery_decisions[0].adapter_decision_ref = None;
+        let missing_compliance_adapter_error =
+            VaultController::evaluate_production_readiness_with_hardening_decision_set(
+                &tenant_policy(),
+                std::slice::from_ref(&fixtures.credential),
+                std::slice::from_ref(&fixtures.signature_decision),
+                &fixtures.hardening,
+                &fixtures.adapters,
+                &fixtures.adapter_decisions,
+                fixtures.decision_set(),
+            )
+            .unwrap_err();
+        assert_eq!(
+            missing_compliance_adapter_error,
+            VaultError::MissingEvidence
+        );
+
+        let mut fixtures = production_hardening_decision_fixtures();
+        fixtures.trust_root_storage_decisions[0].root_id = "root.other".into();
+        let mismatched_trust_root_storage_error =
+            VaultController::evaluate_production_readiness_with_hardening_decision_set(
+                &tenant_policy(),
+                std::slice::from_ref(&fixtures.credential),
+                std::slice::from_ref(&fixtures.signature_decision),
+                &fixtures.hardening,
+                &fixtures.adapters,
+                &fixtures.adapter_decisions,
+                fixtures.decision_set(),
+            )
+            .unwrap_err();
+        assert_eq!(
+            mismatched_trust_root_storage_error,
+            VaultError::MissingEvidence
+        );
+
+        let mut fixtures = production_hardening_decision_fixtures();
+        fixtures.auth_decision.tenant_id = "tenant.b".into();
+        let tenant_error =
+            VaultController::evaluate_production_readiness_with_hardening_decision_set(
+                &tenant_policy(),
+                std::slice::from_ref(&fixtures.credential),
+                std::slice::from_ref(&fixtures.signature_decision),
+                &fixtures.hardening,
+                &fixtures.adapters,
+                &fixtures.adapter_decisions,
+                fixtures.decision_set(),
+            )
+            .unwrap_err();
+        assert_eq!(tenant_error, VaultError::TenantMismatch);
     }
 
     #[test]

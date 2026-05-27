@@ -164,7 +164,7 @@ now pass locally.
   `CryptographicVerifierEvidence`, `CryptographicVerifierDecision`,
   `HardenedSandboxEvidence`, `HardenedSandboxDecision`,
   `RotationEnforcementDecision`, `ComplianceExportDeliveryDecision`, and
-  `ProductionReadinessDecision` gates over
+  `ProductionHardeningDecisionSet` / `ProductionReadinessDecision` gates over
   production auth, external secret manager, crypto verifier, hardened sandbox,
   secret injection, rotation, tenant policy, executor trust roots, and
   compliance export evidence. It
@@ -564,7 +564,11 @@ publishable docs:
   receipts to verified ComplianceAuditExport adapter decisions, and then produces
   `ProductionReadinessDecision` records only when each adapter evidence item and
   configured credential rotation ref is precisely bound to its matching verified
-  decision. It blocks production readiness whenever production auth, real
+  decision. The stricter `ProductionHardeningDecisionSet` path also requires
+  verified auth, external secret-manager, cryptographic verifier, hardened
+  sandbox, rotation, secret-injection, compliance-delivery, and trust-root
+  storage decisions before readiness can cite the full P0 hardening set. It
+  blocks production readiness whenever production auth, real
   secret-manager/KMS/HSM references, cryptographic verifier evidence, hardened
   sandbox profiles, secret injection, rotation enforcement, tenant quorum/audit
   policy, verified executor trust roots, or compliance export profiles are
@@ -641,7 +645,10 @@ trust-root, quorum, break-glass, audit-export, auth, secret-manager,
 crypto-verifier, sandbox, secret-injection, and rotation evidence. Production
 adapter evidence, production auth evidence, external secret-manager evidence,
 cryptographic verifier evidence, hardened sandbox evidence, credential rotation refs, secret injection receipts, and compliance export delivery receipts are verified into
-tenant-bound decisions before readiness or review can cite them. P1 may only enter the P0 execution
+tenant-bound decisions before readiness or review can cite them. The strict P0
+hardening decision-set readiness path requires those verified decisions as one
+typed set and fails closed on any missing, rejected, cross-tenant, or mismatched
+decision. P1 may only enter the P0 execution
 chain when that readiness decision is ready; it still cannot issue tickets,
 execute without P0, verify, or commit. Real OIDC/SSO authentication, real
 cryptographic verification, OS credential injection, HSM/KMS/secret-manager integration,

@@ -258,7 +258,8 @@ Before credentialed or executable production actions, the architecture needs:
   decisions that can bind configured rotation policies to verified
   RotationEnforcement adapter decisions, cryptographic verifier evidence
   decisions, hardened sandbox evidence decisions, secret injection evidence
-  decisions, trust-root storage decisions, and a fail-closed
+  decisions, trust-root storage decisions, a typed production hardening
+  decision set that can require all of those verified decisions together, and a fail-closed
   production readiness decision, but not live OIDC/SSO,
   KMS/HSM/secret-manager calls, real cryptographic verification, real
   OS/container secret injection, or a real external trust-root storage backend;

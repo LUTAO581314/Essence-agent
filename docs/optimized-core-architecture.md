@@ -284,7 +284,8 @@ Before credentialed or executable production actions, the architecture needs:
   local compliance export bundles carry redaction profile refs and hashes without
   raw secret material, audit export ids and hashes are revalidated before P1
   audit bundling, P1 execution audit bundle ids/hashes and audit export hash
-  evidence are revalidated before compliance bundling, and the readiness gate requires compliance export
+  evidence are revalidated before compliance bundling, compliance export bundle
+  ids/hashes and evidence refs are revalidated before delivery verification, and the readiness gate requires compliance export
   evidence before production enablement. Delivery receipts can be verified
   against the bundle hash, sealed tenant policy hash, optional production
   readiness evidence hash, and a verified ComplianceAuditExport adapter

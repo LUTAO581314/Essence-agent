@@ -1840,6 +1840,10 @@ impl VaultController {
         adapter_decision: Option<&ProductionAdapterVerificationDecision>,
     ) -> ComplianceExportDeliveryDecision {
         let mut reasons = Vec::new();
+        if validate_compliance_export_bundle_record(bundle).is_err() {
+            reasons
+                .push("compliance export bundle record failed hash or evidence validation".into());
+        }
         let mut evidence_refs = vec![
             bundle.bundle_id.clone(),
             bundle.bundle_hash.clone(),
@@ -3524,6 +3528,71 @@ fn validate_p1_execution_audit_bundle_record(
             bundle.profile_record_ref.as_str(),
             bundle.readiness_decision_ref.as_str(),
             bundle.audit_export_ref.as_str(),
+            expected_bundle_hash.as_str(),
+        ),
+    );
+    if bundle.bundle_hash != expected_bundle_hash || bundle.bundle_id != expected_bundle_id {
+        return Err(VaultError::MissingEvidence);
+    }
+
+    Ok(())
+}
+
+fn validate_compliance_export_bundle_record(
+    bundle: &ComplianceExportBundle,
+) -> Result<(), VaultError> {
+    if bundle.audit_export_refs.is_empty() && bundle.p1_execution_bundle_refs.is_empty() {
+        return Err(VaultError::MissingAuditEvents);
+    }
+    if bundle.event_refs.is_empty()
+        || bundle.evidence_refs.is_empty()
+        || bundle.contains_secret_material
+        || bundle.redaction_profile_ref.trim().is_empty()
+        || bundle.tenant_policy_record_ref.trim().is_empty()
+        || bundle.tenant_policy_hash.trim().is_empty()
+        || !bundle
+            .evidence_refs
+            .contains(&bundle.tenant_policy_record_ref)
+        || !bundle.evidence_refs.contains(&bundle.tenant_policy_hash)
+        || !refs_contain_all(&bundle.evidence_refs, &bundle.audit_export_refs)
+        || !refs_contain_all(&bundle.evidence_refs, &bundle.p1_execution_bundle_refs)
+        || !refs_contain_all(&bundle.evidence_refs, &bundle.event_refs)
+        || bundle
+            .production_readiness_ref
+            .as_ref()
+            .is_some_and(|readiness_ref| !bundle.evidence_refs.contains(readiness_ref))
+        || bundle
+            .production_readiness_evidence_hash
+            .as_ref()
+            .is_some_and(|readiness_hash| !bundle.evidence_refs.contains(readiness_hash))
+    {
+        return Err(VaultError::MissingEvidence);
+    }
+    if bundle.production_readiness_ref.is_some()
+        != bundle.production_readiness_evidence_hash.is_some()
+    {
+        return Err(VaultError::MissingEvidence);
+    }
+
+    let expected_bundle_hash = stable_id(
+        "compliance_export_bundle_hash",
+        &(
+            bundle.tenant_policy_record_ref.as_str(),
+            bundle.tenant_policy_hash.as_str(),
+            bundle.scope_ref.as_str(),
+            bundle.redaction_profile_ref.as_str(),
+            &bundle.audit_export_refs,
+            &bundle.p1_execution_bundle_refs,
+            &bundle.production_readiness_ref,
+            &bundle.production_readiness_evidence_hash,
+            &bundle.evidence_refs,
+        ),
+    );
+    let expected_bundle_id = stable_id(
+        "compliance_export_bundle",
+        &(
+            bundle.tenant_id.as_str(),
+            bundle.scope_ref.as_str(),
             expected_bundle_hash.as_str(),
         ),
     );
@@ -5960,6 +6029,34 @@ mod tests {
             ComplianceExportDeliveryDecisionKind::Rejected
         );
         assert!(!rejected_placeholder.reasons.is_empty());
+
+        let mut tampered_bundle_hash = bundle.clone();
+        tampered_bundle_hash.bundle_hash = "compliance_export_bundle_hash.tampered".into();
+        let evidence_for_tampered_hash = compliance_delivery_evidence(&tampered_bundle_hash);
+        let rejected_tampered_bundle = VaultController::verify_compliance_export_delivery(
+            &tampered_bundle_hash,
+            &evidence_for_tampered_hash,
+        );
+        assert_eq!(
+            rejected_tampered_bundle.decision,
+            ComplianceExportDeliveryDecisionKind::Rejected
+        );
+        assert!(!rejected_tampered_bundle.reasons.is_empty());
+
+        let mut evidence_stripped_bundle = bundle;
+        evidence_stripped_bundle
+            .evidence_refs
+            .retain(|evidence_ref| evidence_ref != &evidence_stripped_bundle.tenant_policy_hash);
+        let evidence_for_stripped_bundle = compliance_delivery_evidence(&evidence_stripped_bundle);
+        let rejected_stripped_bundle = VaultController::verify_compliance_export_delivery(
+            &evidence_stripped_bundle,
+            &evidence_for_stripped_bundle,
+        );
+        assert_eq!(
+            rejected_stripped_bundle.decision,
+            ComplianceExportDeliveryDecisionKind::Rejected
+        );
+        assert!(!rejected_stripped_bundle.reasons.is_empty());
     }
 
     #[test]

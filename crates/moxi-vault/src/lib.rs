@@ -708,6 +708,8 @@ pub struct P1ExecutionReadinessProfileRecord {
     pub tenant_policy_record_ref: String,
     pub tenant_policy_hash: String,
     pub production_readiness_ref: Option<String>,
+    #[serde(default)]
+    pub production_readiness_evidence_hash: Option<String>,
     pub profile_hash: String,
     pub profile: P1ExecutionReadinessProfile,
     pub evidence_refs: Vec<String>,
@@ -1354,20 +1356,18 @@ impl VaultController {
             return Err(VaultError::TenantMismatch);
         }
         let production_required = p1_profile_requires_production_readiness(&profile);
-        let production_readiness_ref = if production_required {
-            let production_readiness = production_readiness.ok_or(VaultError::MissingEvidence)?;
-            if production_readiness.tenant_id != policy.tenant_id {
-                return Err(VaultError::TenantMismatch);
-            }
-            if production_readiness.decision != ProductionReadinessDecisionKind::Ready
-                || !production_readiness.missing_gates.is_empty()
-            {
-                return Err(VaultError::MissingEvidence);
-            }
-            Some(production_readiness.decision_id.clone())
-        } else {
-            None
-        };
+        let (production_readiness_ref, production_readiness_evidence_hash_ref) =
+            if production_required {
+                let production_readiness =
+                    production_readiness.ok_or(VaultError::MissingEvidence)?;
+                validate_ready_production_readiness(production_readiness, &policy.tenant_id)?;
+                (
+                    Some(production_readiness.decision_id.clone()),
+                    Some(production_readiness_evidence_hash(production_readiness)),
+                )
+            } else {
+                (None, None)
+            };
         let profile_hash = stable_id("p1_execution_profile_hash", &profile);
         let mut evidence_refs = profile.evidence_refs.clone();
         evidence_refs.push(policy.pack_id.clone());
@@ -1376,10 +1376,15 @@ impl VaultController {
         evidence_refs.extend(policy.credential_scope_refs.clone());
         evidence_refs.extend(policy_record.evidence_refs.clone());
         if let Some(production_readiness) = production_readiness {
-            if production_readiness.tenant_id != policy.tenant_id {
-                return Err(VaultError::TenantMismatch);
-            }
+            validate_production_readiness_ref_for_profile_record(
+                production_readiness,
+                &policy.tenant_id,
+                production_required,
+                production_readiness_ref.as_deref(),
+                production_readiness_evidence_hash_ref.as_deref(),
+            )?;
             evidence_refs.push(production_readiness.decision_id.clone());
+            evidence_refs.push(production_readiness_evidence_hash(production_readiness));
         }
         evidence_refs.sort();
         evidence_refs.dedup();
@@ -1396,6 +1401,8 @@ impl VaultController {
                     policy_record.policy_hash.as_str(),
                     profile.profile_id.as_str(),
                     profile_hash.as_str(),
+                    &production_readiness_ref,
+                    &production_readiness_evidence_hash_ref,
                     &evidence_refs,
                 ),
             ),
@@ -1405,6 +1412,7 @@ impl VaultController {
             tenant_policy_record_ref: policy_record.record_id.clone(),
             tenant_policy_hash: policy_record.policy_hash.clone(),
             production_readiness_ref,
+            production_readiness_evidence_hash: production_readiness_evidence_hash_ref,
             profile_hash,
             profile,
             evidence_refs,
@@ -1451,11 +1459,28 @@ impl VaultController {
         if production_required && record.production_readiness_ref.is_none() {
             return Err(VaultError::MissingEvidence);
         }
-        if !production_required && record.production_readiness_ref.is_some() {
+        if production_required && record.production_readiness_evidence_hash.is_none() {
+            return Err(VaultError::MissingEvidence);
+        }
+        if !production_required
+            && (record.production_readiness_ref.is_some()
+                || record.production_readiness_evidence_hash.is_some())
+        {
             return Err(VaultError::MissingEvidence);
         }
 
         Ok(record.profile.clone())
+    }
+
+    pub fn load_p1_execution_readiness_profile_with_production_readiness(
+        record: &P1ExecutionReadinessProfileRecord,
+        policy_record: &TenantPolicyPackRecord,
+        production_readiness: Option<&ProductionReadinessDecision>,
+    ) -> Result<P1ExecutionReadinessProfile, VaultError> {
+        let profile =
+            Self::load_p1_execution_readiness_profile_with_policy_record(record, policy_record)?;
+        validate_production_readiness_for_loaded_profile_record(record, production_readiness)?;
+        Ok(profile)
     }
 
     pub fn audit_p1_execution_readiness(
@@ -3268,6 +3293,76 @@ fn p1_profile_requires_production_readiness(profile: &P1ExecutionReadinessProfil
     profile.mode == P1ExecutionMode::Production || profile.allow_credential_use
 }
 
+fn production_readiness_evidence_hash(decision: &ProductionReadinessDecision) -> String {
+    stable_id(
+        "production_readiness_evidence_hash",
+        &(
+            decision.decision_id.as_str(),
+            &decision.decision,
+            &decision.missing_gates,
+            &decision.evidence_refs,
+        ),
+    )
+}
+
+fn validate_ready_production_readiness(
+    decision: &ProductionReadinessDecision,
+    tenant_id: &str,
+) -> Result<(), VaultError> {
+    if decision.tenant_id != tenant_id {
+        return Err(VaultError::TenantMismatch);
+    }
+    if decision.decision != ProductionReadinessDecisionKind::Ready
+        || !decision.missing_gates.is_empty()
+        || decision.evidence_refs.is_empty()
+    {
+        return Err(VaultError::MissingEvidence);
+    }
+
+    Ok(())
+}
+
+fn validate_production_readiness_ref_for_profile_record(
+    decision: &ProductionReadinessDecision,
+    tenant_id: &str,
+    production_required: bool,
+    expected_ref: Option<&str>,
+    expected_evidence_hash: Option<&str>,
+) -> Result<(), VaultError> {
+    if !production_required {
+        return Err(VaultError::MissingEvidence);
+    }
+    validate_ready_production_readiness(decision, tenant_id)?;
+    if expected_ref != Some(decision.decision_id.as_str())
+        || expected_evidence_hash != Some(production_readiness_evidence_hash(decision).as_str())
+    {
+        return Err(VaultError::MissingEvidence);
+    }
+
+    Ok(())
+}
+
+fn validate_production_readiness_for_loaded_profile_record(
+    record: &P1ExecutionReadinessProfileRecord,
+    production_readiness: Option<&ProductionReadinessDecision>,
+) -> Result<(), VaultError> {
+    let production_required = p1_profile_requires_production_readiness(&record.profile);
+    if !production_required {
+        if production_readiness.is_some() {
+            return Err(VaultError::MissingEvidence);
+        }
+        return Ok(());
+    }
+    let production_readiness = production_readiness.ok_or(VaultError::MissingEvidence)?;
+    validate_production_readiness_ref_for_profile_record(
+        production_readiness,
+        &record.tenant_id,
+        true,
+        record.production_readiness_ref.as_deref(),
+        record.production_readiness_evidence_hash.as_deref(),
+    )
+}
+
 fn looks_like_raw_secret(value: &str) -> bool {
     let lower = value.to_ascii_lowercase();
     lower.contains("-----begin")
@@ -4856,14 +4951,100 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(record.production_readiness_ref, Some(ready.decision_id));
+        assert_eq!(
+            record.production_readiness_ref,
+            Some(ready.decision_id.clone())
+        );
+        assert_eq!(
+            record.production_readiness_evidence_hash,
+            Some(production_readiness_evidence_hash(&ready))
+        );
         assert!(record
             .evidence_refs
             .contains(record.production_readiness_ref.as_ref().unwrap()));
+        assert!(record
+            .evidence_refs
+            .contains(record.production_readiness_evidence_hash.as_ref().unwrap()));
         assert_eq!(
             VaultController::load_p1_execution_readiness_profile(&record, &policy).unwrap(),
             production_profile
         );
+    }
+
+    #[test]
+    fn p1_production_profile_record_can_validate_readiness_evidence_hash_on_load() {
+        let policy = tenant_policy();
+        let policy_record = VaultController::seal_tenant_policy_pack(
+            policy,
+            vec!["policy.approved.1".into()],
+            "vault.controller",
+        )
+        .unwrap();
+        let production_profile =
+            P1ExecutionReadinessProfile::production("tenant.a", vec!["file.read".into()]);
+        let signature_decision = VaultController::verify_executor_signature(
+            &signature(),
+            &[trust_root()],
+            RiskLevel::High,
+        );
+        let ready = VaultController::evaluate_production_readiness(
+            &tenant_policy(),
+            &[credential()],
+            &[signature_decision],
+            &hardening_evidence(),
+            &all_adapter_evidence(),
+        )
+        .unwrap();
+        let record = VaultController::seal_p1_execution_readiness_profile_with_policy_record(
+            &policy_record,
+            production_profile.clone(),
+            Some(&ready),
+            "vault.controller",
+        )
+        .unwrap();
+
+        let loaded =
+            VaultController::load_p1_execution_readiness_profile_with_production_readiness(
+                &record,
+                &policy_record,
+                Some(&ready),
+            )
+            .unwrap();
+        assert_eq!(loaded, production_profile);
+
+        let missing_readiness_error =
+            VaultController::load_p1_execution_readiness_profile_with_production_readiness(
+                &record,
+                &policy_record,
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(missing_readiness_error, VaultError::MissingEvidence);
+
+        let mut tampered_readiness = ready.clone();
+        tampered_readiness
+            .evidence_refs
+            .push("unreviewed.evidence".into());
+        let tampered_readiness_error =
+            VaultController::load_p1_execution_readiness_profile_with_production_readiness(
+                &record,
+                &policy_record,
+                Some(&tampered_readiness),
+            )
+            .unwrap_err();
+        assert_eq!(tampered_readiness_error, VaultError::MissingEvidence);
+
+        let mut tampered_record = record;
+        tampered_record.production_readiness_evidence_hash =
+            Some("production_readiness_evidence_hash.tampered".into());
+        let tampered_record_error =
+            VaultController::load_p1_execution_readiness_profile_with_production_readiness(
+                &tampered_record,
+                &policy_record,
+                Some(&ready),
+            )
+            .unwrap_err();
+        assert_eq!(tampered_record_error, VaultError::MissingEvidence);
     }
 
     #[test]
@@ -4886,12 +5067,26 @@ mod tests {
         .unwrap();
         let mut record = VaultController::seal_production_p1_execution_readiness_profile(
             &policy,
-            production_profile,
+            production_profile.clone(),
             &ready,
             "vault.controller",
         )
         .unwrap();
         record.production_readiness_ref = None;
+
+        let error =
+            VaultController::load_p1_execution_readiness_profile(&record, &policy).unwrap_err();
+
+        assert_eq!(error, VaultError::MissingEvidence);
+
+        let mut record = VaultController::seal_production_p1_execution_readiness_profile(
+            &policy,
+            production_profile,
+            &ready,
+            "vault.controller",
+        )
+        .unwrap();
+        record.production_readiness_evidence_hash = None;
 
         let error =
             VaultController::load_p1_execution_readiness_profile(&record, &policy).unwrap_err();

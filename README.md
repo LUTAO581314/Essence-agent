@@ -194,7 +194,10 @@ now pass locally.
   them with policy/profile hash validation, and export redacted P1 readiness audit records
   plus `P1ExecutionAuditBundle` values binding the runtime request, profile
   record, readiness decision, optional production readiness ref, redaction
-  profile, and evidence refs for review. It can also package redacted
+  profile, and evidence refs for review. Production or credential-capable
+  profile records also store a stable hash of the attached production readiness
+  evidence set, and can be reloaded against the original readiness decision to
+  reject missing or tampered readiness evidence. It can also package redacted
   `ComplianceExportBundle` values that aggregate audit exports and P1 execution
   bundles under one tenant policy record/hash for review.
   Production or credential-capable P1 profiles must be sealed through a ready
@@ -588,8 +591,10 @@ publishable docs:
   production readiness ref, redaction profile, and evidence refs, while still
   denying P1 direct ticket, execution, verification, or ledger authority.
 - Production or credential-capable P1 execution profiles can only be sealed when
-  a tenant-bound `ProductionReadinessDecision::Ready` is attached. Local
-  read-only profiles do not gain production authority from this record.
+  a tenant-bound `ProductionReadinessDecision::Ready` is attached; their records
+  also bind the readiness evidence hash so later loads can reject a swapped or
+  tampered readiness decision. Local read-only profiles do not gain production
+  authority from this record.
 - Capability contract, executor manifest, policy decision, execution ticket,
   sandbox result, and proof payloads are persisted for audit replay.
 - Ledger audit replay validates the hash chain and re-checks successful events

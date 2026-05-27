@@ -298,7 +298,10 @@ fails closed on any missing, rejected, cross-tenant, or mismatched decision.
 P1 execution audit bundles now bind the runtime request, sealed profile record,
 readiness decision, optional production readiness ref, redaction profile, and
 evidence refs for review without granting ticket, execution, verification, or
-ledger authority to P1.
+ledger authority to P1. Production or credential-capable profile records now
+also bind the attached production readiness evidence hash and can be loaded
+against the original readiness decision to reject missing or tampered readiness
+evidence.
 Compliance export bundles now aggregate redacted audit export records and P1
 execution audit bundles under a sealed tenant policy record/hash for review,
 and compliance export delivery evidence can be verified against the bundle hash
@@ -648,7 +651,8 @@ P0 boundary decisions:
   auth, external secret-manager, cryptographic verifier, sandbox, rotation,
   secret-injection, compliance-delivery, and trust-root storage decisions,
   seals tenant policy packs with stable hashes, seals P1 execution
-  profiles against tenant policy record refs and policy/profile hashes,
+  profiles against tenant policy record refs, policy/profile hashes, and
+  production readiness evidence hashes for credential-capable profiles,
   requires ready production readiness before sealing production or
   credential-capable P1 profiles, and blocks P1 runtime tasks before ticket
   issuance unless the P1 execution profile allows them into the P0 chain.

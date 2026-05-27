@@ -254,10 +254,11 @@ Before credentialed or executable production actions, the architecture needs:
   verification decisions, hash-bound trust-root records, break-glass decisions,
   redacted audit records, a P1 execution-readiness gate, production adapter
   evidence, adapter verification decisions, production auth evidence
-  decisions, rotation enforcement decisions, secret injection evidence
-  decisions, trust-root storage decisions, and a fail-closed production
-  readiness decision, but not live OIDC/SSO, KMS/HSM calls, real OS/container
-  secret injection, or a real external trust-root storage backend;
+  decisions, external secret-manager evidence decisions, rotation enforcement
+  decisions, secret injection evidence decisions, trust-root storage decisions,
+  and a fail-closed production readiness decision, but not live OIDC/SSO,
+  KMS/HSM/secret-manager calls, real OS/container secret injection, or a real
+  external trust-root storage backend;
 - OS-level process sandbox hardening; the readiness gate can require a hardened
   sandbox profile ref before production enablement, but does not implement the
   OS/container runtime itself;
@@ -319,9 +320,9 @@ Before credentialed or executable production actions, the architecture needs:
    records, tenant policy pack records, P1 execution-readiness profile records,
    P1 execution audit bundles, compliance export bundles, production adapter
    evidence, adapter verification decisions, production auth evidence
-   decisions, rotation enforcement decisions, secret injection evidence
-   decisions, compliance export delivery decisions, and fail-closed production
-   readiness gates.
+   decisions, external secret-manager evidence decisions, rotation enforcement
+   decisions, secret injection evidence decisions, compliance export delivery
+   decisions, and fail-closed production readiness gates.
 14. Build `moxi-hotpath` as the first low-latency control plane for ack,
    early-deny, route, exact/template cache hit, degrade plans, latency samples,
    p50/p95/p99 snapshots, and hot-path facts.

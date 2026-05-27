@@ -269,7 +269,10 @@ Production adapter evidence is now verified into tenant-bound
 `ProductionAdapterVerificationDecision` records, production auth evidence is
 verified into `ProductionAuthDecision` records bound to the configured auth
 provider, issuer/JWKS/token/session policy refs, and verified AuthProvider
-adapter decisions, credential rotation refs are
+adapter decisions, external secret-manager evidence is verified into
+`ExternalSecretManagerDecision` records bound to credential refs, external
+secret refs, KMS/HSM/access-policy/rotation refs, and verified
+ExternalSecretManager adapter decisions, credential rotation refs are
 verified into `RotationEnforcementDecision` records, secret injection receipts
 are verified into `SecretInjectionDecision` records bound to allowed
 `SecretUseDecision` values, executor-injected credentials, hardened sandbox
@@ -588,7 +591,8 @@ P0 boundary decisions:
   `BreakGlassDecision`, `AuditExportRecord`,
   `ProductionHardeningEvidence`, `ProductionAdapterEvidence`,
   `ProductionAdapterVerificationDecision`, `ProductionAuthEvidence`,
-  `ProductionAuthDecision`, `RotationEnforcementDecision`,
+  `ProductionAuthDecision`, `ExternalSecretManagerEvidence`,
+  `ExternalSecretManagerDecision`, `RotationEnforcementDecision`,
   `SecretInjectionEvidence`, `SecretInjectionDecision`,
   `ComplianceExportDeliveryEvidence`, `ComplianceExportDeliveryDecision`, and
   `ProductionReadinessDecision`,
@@ -604,7 +608,10 @@ P0 boundary decisions:
   bundles, rejects placeholder adapter evidence, verifies adapter evidence into
   tenant-bound decisions, verifies production auth evidence into tenant-bound
   decisions bound to configured auth provider refs, issuer/JWKS/token/session
-  policy refs, and verified AuthProvider adapter decisions, verifies credential rotation refs into tenant-bound
+  policy refs, and verified AuthProvider adapter decisions, verifies external
+  secret-manager evidence into tenant-bound decisions bound to credential refs,
+  external secret refs, KMS/HSM/access-policy/rotation refs, and verified
+  ExternalSecretManager adapter decisions, verifies credential rotation refs into tenant-bound
   decisions, verifies secret injection receipts into tenant-bound decisions
   bound to allowed secret-use decisions, executor-injected credentials,
   hardened sandbox profiles, verified injection adapter decisions, executor

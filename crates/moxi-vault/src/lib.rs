@@ -87,6 +87,13 @@ pub enum ProductionAuthDecisionKind {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
+pub enum ExternalSecretManagerDecisionKind {
+    Verified,
+    Rejected,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
 pub enum RotationEnforcementDecisionKind {
     Verified,
     Rejected,
@@ -542,6 +549,37 @@ pub struct ProductionAuthDecision {
     pub tenant_id: String,
     pub auth_provider_ref: String,
     pub decision: ProductionAuthDecisionKind,
+    pub reasons: Vec<String>,
+    pub evidence_refs: Vec<String>,
+    pub verified_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ExternalSecretManagerEvidence {
+    pub evidence_id: String,
+    pub tenant_id: String,
+    pub credential_id: String,
+    pub external_secret_ref: String,
+    pub secret_manager_ref: String,
+    pub adapter_decision_ref: String,
+    pub key_encryption_key_ref: String,
+    pub hsm_partition_ref: String,
+    pub access_policy_ref: String,
+    pub rotation_policy_ref: String,
+    pub attestation_ref: String,
+    pub checked_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ExternalSecretManagerDecision {
+    pub decision_id: String,
+    pub tenant_id: String,
+    pub credential_id: String,
+    pub external_secret_ref: String,
+    pub secret_manager_ref: String,
+    pub decision: ExternalSecretManagerDecisionKind,
     pub reasons: Vec<String>,
     pub evidence_refs: Vec<String>,
     pub verified_at: DateTime<Utc>,
@@ -1857,6 +1895,145 @@ impl VaultController {
         }
     }
 
+    pub fn verify_external_secret_manager(
+        credential: &CredentialRef,
+        hardening: &ProductionHardeningEvidence,
+        adapter_decision: &ProductionAdapterVerificationDecision,
+        evidence: &ExternalSecretManagerEvidence,
+    ) -> ExternalSecretManagerDecision {
+        let mut reasons = Vec::new();
+        let mut evidence_refs = vec![
+            credential.credential_id.clone(),
+            credential.external_secret_ref.clone(),
+            adapter_decision.decision_id.clone(),
+            evidence.evidence_id.clone(),
+            evidence.external_secret_ref.clone(),
+            evidence.secret_manager_ref.clone(),
+            evidence.adapter_decision_ref.clone(),
+            evidence.key_encryption_key_ref.clone(),
+            evidence.hsm_partition_ref.clone(),
+            evidence.access_policy_ref.clone(),
+            evidence.rotation_policy_ref.clone(),
+            evidence.attestation_ref.clone(),
+        ];
+        evidence_refs.extend(hardening.evidence_refs.clone());
+        evidence_refs.extend(adapter_decision.evidence_refs.clone());
+
+        if credential.tenant_id != hardening.tenant_id
+            || credential.tenant_id != evidence.tenant_id
+            || credential.tenant_id != adapter_decision.tenant_id
+        {
+            reasons.push(
+                "credential, hardening, secret-manager adapter decision, and evidence must share a tenant"
+                    .into(),
+            );
+        }
+        if evidence.credential_id != credential.credential_id
+            || evidence.external_secret_ref != credential.external_secret_ref
+        {
+            reasons.push("secret-manager evidence is not bound to the credential reference".into());
+        }
+        let hardening_secret_manager_ref = hardening.secret_manager_ref.as_deref();
+        if hardening_secret_manager_ref.is_none_or(is_placeholder_ref) {
+            reasons.push("production secret manager is not configured".into());
+        }
+        if hardening_secret_manager_ref != Some(evidence.secret_manager_ref.as_str()) {
+            reasons.push("secret-manager evidence does not match the hardening provider".into());
+        }
+        if credential.material_policy != SecretMaterialPolicy::ExecutorInjected {
+            reasons.push("credential material policy must require executor injection".into());
+        }
+        if credential
+            .rotation_ref
+            .as_deref()
+            .is_none_or(is_placeholder_ref)
+        {
+            reasons
+                .push("credential rotation ref must be configured for production secrets".into());
+        }
+        let evidence_rotation_ref = evidence.rotation_policy_ref.as_str();
+        let credential_rotation_matches = credential
+            .rotation_ref
+            .as_deref()
+            .is_some_and(|rotation_ref| rotation_ref == evidence_rotation_ref);
+        let hardening_rotation_matches = hardening
+            .rotation_policy_ref
+            .as_deref()
+            .is_some_and(|rotation_ref| rotation_ref == evidence_rotation_ref);
+        if !credential_rotation_matches && !hardening_rotation_matches {
+            reasons
+                .push("secret-manager evidence is not bound to configured rotation policy".into());
+        }
+        if adapter_decision.decision != ProductionAdapterVerificationKind::Verified {
+            reasons.push("external secret-manager adapter decision must be verified".into());
+        }
+        if adapter_decision.kind != ProductionAdapterKind::ExternalSecretManager {
+            reasons.push("adapter decision must be for the external secret manager".into());
+        }
+        if adapter_decision.provider_ref != evidence.secret_manager_ref {
+            reasons.push("secret-manager adapter provider does not match evidence".into());
+        }
+        if evidence.adapter_decision_ref != adapter_decision.decision_id {
+            reasons.push("secret-manager evidence is not bound to the adapter decision".into());
+        }
+        if evidence.checked_at >= evidence.expires_at || evidence.expires_at <= Utc::now() {
+            reasons.push("external secret-manager evidence is expired or invalid".into());
+        }
+        if [
+            evidence.evidence_id.as_str(),
+            evidence.external_secret_ref.as_str(),
+            evidence.secret_manager_ref.as_str(),
+            evidence.adapter_decision_ref.as_str(),
+            evidence.key_encryption_key_ref.as_str(),
+            evidence.hsm_partition_ref.as_str(),
+            evidence.access_policy_ref.as_str(),
+            evidence.rotation_policy_ref.as_str(),
+            evidence.attestation_ref.as_str(),
+        ]
+        .iter()
+        .any(|value| is_placeholder_ref(value) || looks_like_raw_secret(value))
+        {
+            reasons.push(
+                "external secret-manager evidence contains placeholder or raw-secret refs".into(),
+            );
+        }
+
+        evidence_refs.sort();
+        evidence_refs.dedup();
+        reasons.sort();
+        reasons.dedup();
+
+        let decision = if reasons.is_empty() {
+            reasons.push("external secret-manager evidence is verified".into());
+            ExternalSecretManagerDecisionKind::Verified
+        } else {
+            ExternalSecretManagerDecisionKind::Rejected
+        };
+
+        ExternalSecretManagerDecision {
+            decision_id: stable_id(
+                "external_secret_manager",
+                &(
+                    credential.tenant_id.as_str(),
+                    credential.credential_id.as_str(),
+                    credential.external_secret_ref.as_str(),
+                    evidence.secret_manager_ref.as_str(),
+                    &decision,
+                    &evidence_refs,
+                ),
+            ),
+            tenant_id: credential.tenant_id.clone(),
+            credential_id: credential.credential_id.clone(),
+            external_secret_ref: credential.external_secret_ref.clone(),
+            secret_manager_ref: evidence.secret_manager_ref.clone(),
+            decision,
+            reasons,
+            evidence_refs,
+            verified_at: Utc::now(),
+            expires_at: evidence.expires_at,
+        }
+    }
+
     pub fn verify_rotation_enforcement(
         credential: &CredentialRef,
         hardening: &ProductionHardeningEvidence,
@@ -2934,6 +3111,27 @@ mod tests {
             audience_ref: "audience://tenant.a/moxi-core".into(),
             session_policy_ref: "session-policy://tenant.a/prod".into(),
             attestation_ref: "attestation://tenant.a/production-auth/2026-05".into(),
+            checked_at: Utc::now(),
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+        }
+    }
+
+    fn external_secret_manager_evidence(
+        credential: &CredentialRef,
+        adapter_decision: &ProductionAdapterVerificationDecision,
+    ) -> ExternalSecretManagerEvidence {
+        ExternalSecretManagerEvidence {
+            evidence_id: "external.secret.manager.evidence.1".into(),
+            tenant_id: credential.tenant_id.clone(),
+            credential_id: credential.credential_id.clone(),
+            external_secret_ref: credential.external_secret_ref.clone(),
+            secret_manager_ref: "kms://tenant.a/prod".into(),
+            adapter_decision_ref: adapter_decision.decision_id.clone(),
+            key_encryption_key_ref: "kek://tenant.a/prod-primary".into(),
+            hsm_partition_ref: "hsm://tenant.a/prod-partition".into(),
+            access_policy_ref: "access-policy://tenant.a/prod-secrets".into(),
+            rotation_policy_ref: "rotation://tenant.a/30d-enforced".into(),
+            attestation_ref: "attestation://tenant.a/external-secret-manager/2026-05".into(),
             checked_at: Utc::now(),
             expires_at: Utc::now() + chrono::Duration::hours(1),
         }
@@ -4047,6 +4245,84 @@ mod tests {
         assert_eq!(
             rejected_adapter.decision,
             ProductionAuthDecisionKind::Rejected
+        );
+        assert!(!rejected_adapter.reasons.is_empty());
+    }
+
+    #[test]
+    fn external_secret_manager_decision_is_credential_and_adapter_bound_fail_closed() {
+        let credential = credential();
+        let hardening = hardening_evidence();
+        let adapter_decision =
+            VaultController::verify_production_adapter_evidence(&adapter_evidence(
+                ProductionAdapterKind::ExternalSecretManager,
+                "kms://tenant.a/prod",
+            ));
+        let evidence = external_secret_manager_evidence(&credential, &adapter_decision);
+        let decision = VaultController::verify_external_secret_manager(
+            &credential,
+            &hardening,
+            &adapter_decision,
+            &evidence,
+        );
+
+        assert_eq!(
+            decision.decision,
+            ExternalSecretManagerDecisionKind::Verified
+        );
+        assert_eq!(decision.tenant_id, credential.tenant_id);
+        assert_eq!(decision.credential_id, credential.credential_id);
+        assert_eq!(decision.external_secret_ref, credential.external_secret_ref);
+        assert_eq!(decision.secret_manager_ref, "kms://tenant.a/prod");
+        assert!(decision
+            .evidence_refs
+            .contains(&adapter_decision.decision_id));
+        assert!(decision.evidence_refs.contains(&evidence.evidence_id));
+        assert!(decision.evidence_refs.contains(&evidence.hsm_partition_ref));
+
+        let mut placeholder_hsm = evidence.clone();
+        placeholder_hsm.hsm_partition_ref = "mock-hsm".into();
+        let rejected_hsm = VaultController::verify_external_secret_manager(
+            &credential,
+            &hardening,
+            &adapter_decision,
+            &placeholder_hsm,
+        );
+        assert_eq!(
+            rejected_hsm.decision,
+            ExternalSecretManagerDecisionKind::Rejected
+        );
+        assert!(!rejected_hsm.reasons.is_empty());
+
+        let mut credential_mismatch = evidence.clone();
+        credential_mismatch.external_secret_ref = "vault://tenant.a/github/other-token".into();
+        let rejected_credential = VaultController::verify_external_secret_manager(
+            &credential,
+            &hardening,
+            &adapter_decision,
+            &credential_mismatch,
+        );
+        assert_eq!(
+            rejected_credential.decision,
+            ExternalSecretManagerDecisionKind::Rejected
+        );
+        assert!(!rejected_credential.reasons.is_empty());
+
+        let wrong_adapter = VaultController::verify_production_adapter_evidence(&adapter_evidence(
+            ProductionAdapterKind::AuthProvider,
+            "oidc://prod/tenant.a",
+        ));
+        let mut wrong_adapter_evidence = evidence;
+        wrong_adapter_evidence.adapter_decision_ref = wrong_adapter.decision_id.clone();
+        let rejected_adapter = VaultController::verify_external_secret_manager(
+            &credential,
+            &hardening,
+            &wrong_adapter,
+            &wrong_adapter_evidence,
+        );
+        assert_eq!(
+            rejected_adapter.decision,
+            ExternalSecretManagerDecisionKind::Rejected
         );
         assert!(!rejected_adapter.reasons.is_empty());
     }

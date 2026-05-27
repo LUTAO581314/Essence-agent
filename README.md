@@ -160,6 +160,7 @@ now pass locally.
   fail-closed `P1ExecutionReadinessDecision` gate plus
   `ProductionAdapterEvidence`, `ProductionAdapterVerificationDecision`,
   `ProductionAuthEvidence`, `ProductionAuthDecision`,
+  `ExternalSecretManagerEvidence`, `ExternalSecretManagerDecision`,
   `RotationEnforcementDecision`, `ComplianceExportDeliveryDecision`, and
   `ProductionReadinessDecision` gates over
   production auth, external secret manager, crypto verifier, hardened sandbox,
@@ -171,6 +172,9 @@ now pass locally.
   to bind to a verified rotation-enforcement decision. It verifies production
   auth evidence into tenant-bound decisions that bind the configured auth
   provider, issuer/JWKS/token/session policy refs, and a verified AuthProvider
+  adapter decision; it verifies external secret-manager evidence into
+  tenant-bound decisions that bind credential refs, external secret refs,
+  KMS/HSM/access-policy/rotation refs, and a verified ExternalSecretManager
   adapter decision; it also verifies secret injection receipts as tenant-bound
   decisions that bind an allowed `SecretUseDecision`, an executor-injected
   credential, hardened sandbox and injection profiles, and a verified
@@ -599,16 +603,19 @@ decision bound to an allowed `SecretUseDecision`, an executor-injected
 credential, hardened sandbox and injection profiles, a verified injection
 adapter decision, executor ref, and receipt, verifies production auth evidence
 into a decision bound to the configured auth provider, issuer/JWKS/token/session
-policy refs, and a verified AuthProvider adapter decision, and now evaluates a fail-closed P1
+policy refs, and a verified AuthProvider adapter decision, verifies external
+secret-manager evidence into a decision bound to the credential ref, external
+secret ref, KMS/HSM/access-policy/rotation refs, and a verified
+ExternalSecretManager adapter decision, and now evaluates a fail-closed P1
 execution-readiness decision plus production readiness decisions over
 trust-root, quorum, break-glass, audit-export, auth, secret-manager,
 crypto-verifier, sandbox, secret-injection, and rotation evidence. Production
-adapter evidence, production auth evidence, credential rotation refs, secret
-injection receipts, and compliance export delivery receipts are verified into
+adapter evidence, production auth evidence, external secret-manager evidence,
+credential rotation refs, secret injection receipts, and compliance export delivery receipts are verified into
 tenant-bound decisions before readiness or review can cite them. P1 may only enter the P0 execution
 chain when that readiness decision is ready; it still cannot issue tickets,
 execute without P0, verify, or commit. Real OIDC/SSO authentication, real
-cryptographic verification, OS credential injection, HSM/KMS integration,
+cryptographic verification, OS credential injection, HSM/KMS/secret-manager integration,
 production secret rotation adapters, and real external trust-root/compliance
 storage backends still require concrete external adapters before production
 exposure.

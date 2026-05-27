@@ -296,7 +296,7 @@ cryptographic verifier, hardened sandbox, rotation, secret-injection,
 compliance-delivery, and trust-root storage decisions as one typed set, and
 fails closed on any missing, rejected, cross-tenant, or mismatched decision.
 P1 execution audit bundles now bind the runtime request, sealed profile record,
-readiness decision, optional production readiness ref, redaction profile, and
+readiness decision, audit export id/hash, optional production readiness ref, redaction profile, and
 evidence refs for review without granting ticket, execution, verification, or
 ledger authority to P1. Production or credential-capable profile records now
 also bind the attached production readiness evidence hash and can be loaded
@@ -305,6 +305,7 @@ evidence; P1 execution audit bundles and compliance export bundles preserve the
 same hash so review evidence cannot silently swap the P0 readiness evidence set.
 Compliance export bundles now aggregate redacted audit export records and P1
 execution audit bundles under a sealed tenant policy record/hash for review,
+revalidate each P1 execution audit bundle id/hash and audit export hash evidence,
 and compliance export delivery evidence can be verified against the bundle hash,
 sealed tenant policy hash, optional production readiness evidence hash, and a
 verified ComplianceAuditExport adapter decision as a tenant-bound
@@ -659,7 +660,8 @@ P0 boundary decisions:
   validates readiness decisions before P1 readiness audit export or audit bundle
   creation so direct-ticket, execute-without-P0, inconsistent ready/blocked, or
   evidence-stripped decisions fail closed, revalidates audit export ids and
-  hashes before P1 audit bundle or compliance export bundle creation, carries
+  hashes before P1 audit bundle creation, revalidates P1 execution audit bundle
+  ids/hashes and audit export hash evidence before compliance export bundle creation, carries
   those readiness evidence hashes through P1 audit bundles and compliance export bundles,
   requires ready production readiness before sealing production or
   credential-capable P1 profiles, and blocks P1 runtime tasks before ticket

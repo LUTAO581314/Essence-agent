@@ -193,7 +193,7 @@ now pass locally.
   tenant-policy-record-bound `P1ExecutionReadinessProfileRecord` values, reload
   them with policy/profile hash and evidence-ref coverage validation, and export redacted P1 readiness audit records
   plus `P1ExecutionAuditBundle` values binding the runtime request, profile
-  record, readiness decision, optional production readiness ref, redaction
+  record, readiness decision, audit export id/hash, optional production readiness ref, redaction
   profile, and evidence refs for review. Readiness audit export and bundle creation
   fail closed if a decision claims direct ticketing, execution without P0, inconsistent
   ready/blocked flags, or missing profile/request evidence refs. Production or credential-capable
@@ -204,7 +204,8 @@ now pass locally.
   P0 readiness evidence. It can also package redacted
   `ComplianceExportBundle` values that aggregate audit exports and P1 execution
   bundles under one tenant policy record/hash for review, and it revalidates
-  audit export ids and hashes before P1 audit bundle or compliance bundle creation.
+  audit export ids/hashes and P1 execution audit bundle ids/hashes before P1
+  audit bundle or compliance bundle creation.
   Production or credential-capable P1 profiles must be sealed through a ready
   `ProductionReadinessDecision`; blocked or missing production readiness fails
   closed. It records decisions and evidence refs only; it never stores raw
@@ -641,7 +642,8 @@ redacted local compliance export bundles, verifies compliance export delivery
 evidence against the bundle hash, sealed tenant policy hash, optional production
 readiness evidence hash, and optionally a verified ComplianceAuditExport
 adapter decision, revalidates audit export ids and hashes before audit/compliance
-bundling, verifies secret injection evidence into a
+bundling, revalidates P1 execution audit bundle ids/hashes and audit export hash
+evidence before compliance bundling, verifies secret injection evidence into a
 decision bound to an allowed `SecretUseDecision`, an executor-injected
 credential, hardened sandbox and injection profiles, a verified injection
 adapter decision, executor ref, and receipt, verifies production auth evidence

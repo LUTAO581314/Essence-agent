@@ -805,6 +805,8 @@ pub struct P1ExecutionAuditBundle {
     pub production_readiness_evidence_hash: Option<String>,
     pub readiness_decision_ref: String,
     pub audit_export_ref: String,
+    #[serde(default)]
+    pub audit_export_hash: String,
     pub redaction_profile_ref: String,
     pub evidence_refs: Vec<String>,
     pub can_enter_p0_execution_chain: bool,
@@ -1636,6 +1638,7 @@ impl VaultController {
                 .clone(),
             readiness_decision_ref: decision.decision_id.clone(),
             audit_export_ref: audit_export.export_id.clone(),
+            audit_export_hash: audit_export.export_hash.clone(),
             redaction_profile_ref: audit_export.redaction_profile_ref.clone(),
             evidence_refs,
             can_enter_p0_execution_chain: decision.can_enter_p0_execution_chain,
@@ -1675,6 +1678,9 @@ impl VaultController {
         }
         for export in audit_exports {
             validate_audit_export_record(export)?;
+        }
+        for bundle in p1_execution_bundles {
+            validate_p1_execution_audit_bundle_record(bundle)?;
         }
         if audit_exports
             .iter()
@@ -3467,6 +3473,61 @@ fn validate_audit_export_record(record: &AuditExportRecord) -> Result<(), VaultE
         &(record.scope_ref.as_str(), &record.event_refs),
     );
     if record.export_hash != expected_export_hash || record.export_id != expected_export_id {
+        return Err(VaultError::MissingEvidence);
+    }
+
+    Ok(())
+}
+
+fn validate_p1_execution_audit_bundle_record(
+    bundle: &P1ExecutionAuditBundle,
+) -> Result<(), VaultError> {
+    if bundle.evidence_refs.is_empty()
+        || bundle.contains_secret_material
+        || bundle.can_issue_ticket_directly
+        || bundle.can_execute_without_p0
+        || bundle.audit_export_hash.is_empty()
+        || !bundle.evidence_refs.contains(&bundle.audit_export_hash)
+        || !bundle.evidence_refs.contains(&bundle.audit_export_ref)
+        || !bundle
+            .evidence_refs
+            .contains(&bundle.readiness_decision_ref)
+        || !bundle.evidence_refs.contains(&bundle.profile_record_ref)
+        || !bundle.evidence_refs.contains(&bundle.tenant_policy_hash)
+        || bundle
+            .production_readiness_ref
+            .as_ref()
+            .is_some_and(|readiness_ref| !bundle.evidence_refs.contains(readiness_ref))
+        || bundle
+            .production_readiness_evidence_hash
+            .as_ref()
+            .is_some_and(|readiness_hash| !bundle.evidence_refs.contains(readiness_hash))
+    {
+        return Err(VaultError::MissingEvidence);
+    }
+    let expected_bundle_hash = stable_id(
+        "p1_execution_audit_bundle_hash",
+        &(
+            bundle.request_id.as_str(),
+            bundle.profile_record_ref.as_str(),
+            bundle.readiness_decision_ref.as_str(),
+            bundle.audit_export_hash.as_str(),
+            &bundle.production_readiness_ref,
+            &bundle.production_readiness_evidence_hash,
+            &bundle.evidence_refs,
+        ),
+    );
+    let expected_bundle_id = stable_id(
+        "p1_execution_audit_bundle",
+        &(
+            bundle.request_id.as_str(),
+            bundle.profile_record_ref.as_str(),
+            bundle.readiness_decision_ref.as_str(),
+            bundle.audit_export_ref.as_str(),
+            expected_bundle_hash.as_str(),
+        ),
+    );
+    if bundle.bundle_hash != expected_bundle_hash || bundle.bundle_id != expected_bundle_id {
         return Err(VaultError::MissingEvidence);
     }
 
@@ -5403,6 +5464,7 @@ mod tests {
         assert_eq!(bundle.tenant_policy_hash, record.tenant_policy_hash);
         assert_eq!(bundle.readiness_decision_ref, decision.decision_id);
         assert_eq!(bundle.audit_export_ref, audit.export_id);
+        assert_eq!(bundle.audit_export_hash, audit.export_hash);
         assert_eq!(bundle.redaction_profile_ref, "redaction.compliance.v1");
         assert!(bundle.production_readiness_ref.is_none());
         assert!(bundle.can_enter_p0_execution_chain);
@@ -5441,6 +5503,81 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(bypass_p0_error, VaultError::MissingEvidence);
+    }
+
+    #[test]
+    fn compliance_export_bundle_rejects_tampered_p1_execution_bundle_hash() {
+        let policy = tenant_policy();
+        let policy_record = VaultController::seal_tenant_policy_pack(
+            policy.clone(),
+            vec!["policy.approved.1".into()],
+            "vault.controller",
+        )
+        .unwrap();
+        let profile = P1ExecutionReadinessProfile::local_read_only("tenant.a");
+        let profile_record =
+            VaultController::seal_p1_execution_readiness_profile_with_policy_record(
+                &policy_record,
+                profile.clone(),
+                None,
+                "vault.controller",
+            )
+            .unwrap();
+        let request = P1ExecutionReadinessRequest {
+            request_id: "p1.req.tamper.bundle".into(),
+            run_id: "run.tamper.bundle".into(),
+            tenant_id: "tenant.a".into(),
+            actor_id: "moxi-runtime".into(),
+            capability_id: "file.read".into(),
+            permission_mode: PermissionMode::ReadOnly,
+            risk_level: RiskLevel::Low,
+            requires_credential: false,
+            evidence_refs: vec!["policy.decision.tamper.bundle".into()],
+            requested_at: Utc::now(),
+        };
+        let decision =
+            VaultController::evaluate_p1_execution_readiness(&profile, &request, None).unwrap();
+        let audit = VaultController::audit_p1_execution_readiness(
+            &decision,
+            &profile_record,
+            "redaction.compliance.v1",
+            "auditor.1",
+        )
+        .unwrap();
+        let bundle = VaultController::p1_execution_audit_bundle(
+            &request,
+            &decision,
+            &profile_record,
+            &audit,
+            None,
+        )
+        .unwrap();
+
+        let mut tampered_hash = bundle.clone();
+        tampered_hash.bundle_hash = "p1_execution_audit_bundle_hash.tampered".into();
+        let hash_error = VaultController::compliance_export_bundle(
+            "run.tamper.bundle",
+            &policy_record,
+            std::slice::from_ref(&audit),
+            &[tampered_hash],
+            None,
+            "auditor.1",
+        )
+        .unwrap_err();
+        assert_eq!(hash_error, VaultError::MissingEvidence);
+
+        let mut tampered_export_hash = bundle;
+        tampered_export_hash.audit_export_hash = "audit_export_hash.tampered".into();
+        let export_hash_error = VaultController::compliance_export_bundle(
+            "run.tamper.bundle",
+            &policy_record,
+            std::slice::from_ref(&audit),
+            &[tampered_export_hash],
+            None,
+            "auditor.1",
+        )
+        .unwrap_err();
+        assert_eq!(export_hash_error, VaultError::MissingEvidence);
     }
 
     #[test]

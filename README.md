@@ -553,7 +553,8 @@ publishable docs:
   signatures against those tenant trust-root records before a future ticket gate
   can require signed executors. It also verifies external trust-root storage
   receipts into tenant-bound `TrustRootStorageDecision` records that bind the
-  storage evidence to the sealed trust-root record hash.
+  storage evidence to the sealed trust-root record hash, then revalidates
+  storage decision ids before readiness consumes those receipts.
 - Production enablement now has a fail-closed readiness model:
   `moxi-vault` produces `ProductionAdapterEvidence`, verifies it into
   tenant-bound `ProductionAdapterVerificationDecision` records, verifies

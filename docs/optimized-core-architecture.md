@@ -53,7 +53,8 @@ P0 responsibilities:
 - keep credential use reference-only, bind secret-use decisions to evidence,
   seal tenant trust roots into hash-bound records, verify executor signature
   metadata against tenant trust-root records, verify external trust-root storage
-  receipts against sealed record hashes, and export redacted audit records
+  receipts against sealed record hashes, revalidate storage decision ids before
+  readiness consumption, and export redacted audit records
   without persisting raw secret material.
 - evaluate production readiness fail-closed before credentialed or executable
   production enablement, covering production auth, external secret management,

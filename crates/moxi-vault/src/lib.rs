@@ -332,6 +332,8 @@ pub struct TrustRootStorageDecision {
     pub record_id: String,
     pub root_id: String,
     pub trust_root_hash: String,
+    #[serde(default)]
+    pub storage_evidence_ref: String,
     pub storage_provider_ref: String,
     pub decision: TrustRootStorageDecisionKind,
     pub reasons: Vec<String>,
@@ -1112,6 +1114,7 @@ impl VaultController {
             record_id: record.record_id.clone(),
             root_id: record.root_id.clone(),
             trust_root_hash: record.trust_root_hash.clone(),
+            storage_evidence_ref: evidence.evidence_id.clone(),
             storage_provider_ref: evidence.storage_provider_ref.clone(),
             decision,
             reasons,
@@ -4172,7 +4175,8 @@ fn require_verified_trust_root_storage_decisions(
 
     let mut seen = BTreeSet::new();
     for decision in decisions {
-        if decision.decision != TrustRootStorageDecisionKind::Verified
+        if validate_trust_root_storage_decision_record(decision).is_err()
+            || decision.decision != TrustRootStorageDecisionKind::Verified
             || decision.evidence_refs.is_empty()
             || decision.expires_at <= Utc::now()
             || !required_roots.contains(decision.root_id.as_str())
@@ -4189,6 +4193,52 @@ fn require_verified_trust_root_storage_decisions(
         {
             return Err(VaultError::MissingEvidence);
         }
+    }
+
+    Ok(())
+}
+
+fn validate_trust_root_storage_decision_record(
+    decision: &TrustRootStorageDecision,
+) -> Result<(), VaultError> {
+    if decision.evidence_refs.is_empty()
+        || decision.tenant_id.trim().is_empty()
+        || decision.record_id.trim().is_empty()
+        || decision.root_id.trim().is_empty()
+        || decision.trust_root_hash.trim().is_empty()
+        || decision.storage_evidence_ref.trim().is_empty()
+        || decision.storage_provider_ref.trim().is_empty()
+        || decision.verified_at >= decision.expires_at
+        || !decision.evidence_refs.contains(&decision.record_id)
+        || !decision.evidence_refs.contains(&decision.trust_root_hash)
+        || !decision
+            .evidence_refs
+            .contains(&decision.storage_evidence_ref)
+        || !decision
+            .evidence_refs
+            .contains(&decision.storage_provider_ref)
+        || decision
+            .evidence_refs
+            .iter()
+            .any(|value| is_placeholder_ref(value))
+    {
+        return Err(VaultError::MissingEvidence);
+    }
+
+    let expected_decision_id = stable_id(
+        "trust_root_storage",
+        &(
+            decision.tenant_id.as_str(),
+            decision.record_id.as_str(),
+            decision.trust_root_hash.as_str(),
+            decision.storage_evidence_ref.as_str(),
+            decision.storage_provider_ref.as_str(),
+            &decision.decision,
+            &decision.evidence_refs,
+        ),
+    );
+    if decision.decision_id != expected_decision_id {
+        return Err(VaultError::MissingEvidence);
     }
 
     Ok(())
@@ -5034,6 +5084,7 @@ mod tests {
         assert_eq!(decision.record_id, record.record_id);
         assert_eq!(decision.root_id, record.root_id);
         assert_eq!(decision.trust_root_hash, record.trust_root_hash);
+        assert_eq!(decision.storage_evidence_ref, evidence.evidence_id);
         assert!(decision.evidence_refs.contains(&record.trust_root_hash));
         assert!(decision.evidence_refs.contains(&evidence.receipt_ref));
 
@@ -6996,6 +7047,25 @@ mod tests {
         assert!(ready
             .evidence_refs
             .contains(&fixtures.trust_root_storage_decisions[0].decision_id));
+    }
+
+    #[test]
+    fn production_readiness_rejects_tampered_trust_root_storage_decision_id() {
+        let mut fixtures = production_hardening_decision_fixtures();
+        fixtures.trust_root_storage_decisions[0].decision_id = "trust_root_storage.tampered".into();
+
+        let error = VaultController::evaluate_production_readiness_with_hardening_decision_set(
+            &tenant_policy(),
+            std::slice::from_ref(&fixtures.credential),
+            std::slice::from_ref(&fixtures.signature_decision),
+            &fixtures.hardening,
+            &fixtures.adapters,
+            &fixtures.adapter_decisions,
+            fixtures.decision_set(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error, VaultError::MissingEvidence);
     }
 
     #[test]

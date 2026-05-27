@@ -290,7 +290,9 @@ profiles, verified injection adapter decisions, executor refs, and receipts,
 trust-root external storage receipts are verified into
 `TrustRootStorageDecision` records, and production readiness requires every
 adapter evidence item and configured credential rotation ref to bind to its
-matching verified decision. The stricter `ProductionHardeningDecisionSet`
+matching verified decision. Trust-root storage decisions now carry the storage
+evidence ref and production readiness revalidates their ids before consumption.
+The stricter `ProductionHardeningDecisionSet`
 readiness path now requires verified auth, external secret-manager,
 cryptographic verifier, hardened sandbox, rotation, secret-injection,
 compliance-delivery, and trust-root storage decisions as one typed set, and
@@ -657,6 +659,8 @@ P0 boundary decisions:
   and exposes a stricter typed hardening decision-set readiness path that binds
   auth, external secret-manager, cryptographic verifier, sandbox, rotation,
   secret-injection, compliance-delivery, and trust-root storage decisions,
+  revalidates trust-root storage decision ids before production readiness
+  consumption,
   seals tenant policy packs with stable hashes, seals P1 execution
   profiles against tenant policy record refs, policy/profile hashes, required
   evidence refs, and production readiness evidence hashes for credential-capable profiles,

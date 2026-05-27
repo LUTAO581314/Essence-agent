@@ -656,8 +656,10 @@ P0 boundary decisions:
   seals tenant policy packs with stable hashes, seals P1 execution
   profiles against tenant policy record refs, policy/profile hashes, required
   evidence refs, and production readiness evidence hashes for credential-capable profiles,
-  carries those readiness evidence hashes through P1 audit bundles and
-  compliance export bundles,
+  validates readiness decisions before P1 readiness audit export or audit bundle
+  creation so direct-ticket, execute-without-P0, inconsistent ready/blocked, or
+  evidence-stripped decisions fail closed, carries those readiness evidence
+  hashes through P1 audit bundles and compliance export bundles,
   requires ready production readiness before sealing production or
   credential-capable P1 profiles, and blocks P1 runtime tasks before ticket
   issuance unless the P1 execution profile allows them into the P0 chain.

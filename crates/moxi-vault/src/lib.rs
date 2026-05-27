@@ -1520,6 +1520,7 @@ impl VaultController {
         if decision.tenant_id != profile_record.tenant_id {
             return Err(VaultError::TenantMismatch);
         }
+        validate_p1_execution_readiness_decision_for_record(decision, profile_record, None)?;
         Self::audit_export_record(
             decision.tenant_id.clone(),
             decision.request_id.clone(),
@@ -1556,6 +1557,11 @@ impl VaultController {
         {
             return Err(VaultError::MissingEvidence);
         }
+        validate_p1_execution_readiness_decision_for_record(
+            decision,
+            profile_record,
+            Some(request),
+        )?;
         if decision.request_id != request.request_id
             || audit_export.kind != AuditExportRecordKind::P1ExecutionReadiness
             || !audit_export.event_refs.contains(&profile_record.record_id)
@@ -3438,6 +3444,43 @@ fn refs_contain_all(refs: &[String], required_refs: &[String]) -> bool {
         .all(|required_ref| refs.contains(required_ref))
 }
 
+fn validate_p1_execution_readiness_decision_for_record(
+    decision: &P1ExecutionReadinessDecision,
+    profile_record: &P1ExecutionReadinessProfileRecord,
+    request: Option<&P1ExecutionReadinessRequest>,
+) -> Result<(), VaultError> {
+    if decision.tenant_id != profile_record.tenant_id
+        || request.is_some_and(|request| request.tenant_id != decision.tenant_id)
+    {
+        return Err(VaultError::TenantMismatch);
+    }
+    if decision.evidence_refs.is_empty()
+        || !refs_contain_all(
+            &decision.evidence_refs,
+            &profile_record.profile.evidence_refs,
+        )
+        || decision.can_issue_ticket_directly
+        || decision.can_execute_without_p0
+        || decision.can_enter_p0_execution_chain
+            != (decision.decision == P1ExecutionReadinessDecisionKind::Ready)
+        || (decision.decision == P1ExecutionReadinessDecisionKind::Ready
+            && !decision.blocked_gates.is_empty())
+        || (decision.decision == P1ExecutionReadinessDecisionKind::Blocked
+            && decision.blocked_gates.is_empty())
+    {
+        return Err(VaultError::MissingEvidence);
+    }
+    if let Some(request) = request {
+        if decision.request_id != request.request_id
+            || !refs_contain_all(&decision.evidence_refs, &request.evidence_refs)
+        {
+            return Err(VaultError::MissingEvidence);
+        }
+    }
+
+    Ok(())
+}
+
 fn looks_like_raw_secret(value: &str) -> bool {
     let lower = value.to_ascii_lowercase();
     lower.contains("-----begin")
@@ -5256,6 +5299,30 @@ mod tests {
         assert!(!audit.contains_secret_material);
         assert!(audit.event_refs.contains(&record.record_id));
         assert!(audit.event_refs.contains(&decision.decision_id));
+
+        let mut direct_ticket_decision = decision.clone();
+        direct_ticket_decision.can_issue_ticket_directly = true;
+        let direct_ticket_error = VaultController::audit_p1_execution_readiness(
+            &direct_ticket_decision,
+            &record,
+            "redaction.compliance.v1",
+            "auditor.1",
+        )
+        .unwrap_err();
+        assert_eq!(direct_ticket_error, VaultError::MissingEvidence);
+
+        let mut missing_profile_evidence_decision = decision;
+        missing_profile_evidence_decision
+            .evidence_refs
+            .retain(|evidence_ref| evidence_ref != "p1.local-readonly.profile");
+        let missing_profile_evidence_error = VaultController::audit_p1_execution_readiness(
+            &missing_profile_evidence_decision,
+            &record,
+            "redaction.compliance.v1",
+            "auditor.1",
+        )
+        .unwrap_err();
+        assert_eq!(missing_profile_evidence_error, VaultError::MissingEvidence);
     }
 
     #[test]
@@ -5319,6 +5386,32 @@ mod tests {
         assert!(bundle.evidence_refs.contains(&"runtime.task.1".into()));
         assert!(bundle.evidence_refs.contains(&record.tenant_policy_hash));
         assert!(bundle.evidence_refs.contains(&audit.export_hash));
+
+        let mut missing_request_evidence_decision = decision.clone();
+        missing_request_evidence_decision
+            .evidence_refs
+            .retain(|evidence_ref| evidence_ref != "runtime.task.1");
+        let missing_request_evidence_error = VaultController::p1_execution_audit_bundle(
+            &request,
+            &missing_request_evidence_decision,
+            &record,
+            &audit,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(missing_request_evidence_error, VaultError::MissingEvidence);
+
+        let mut bypass_p0_decision = decision;
+        bypass_p0_decision.can_execute_without_p0 = true;
+        let bypass_p0_error = VaultController::p1_execution_audit_bundle(
+            &request,
+            &bypass_p0_decision,
+            &record,
+            &audit,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(bypass_p0_error, VaultError::MissingEvidence);
     }
 
     #[test]

@@ -77,7 +77,10 @@ P0 responsibilities:
   production/credential-capable profiles to the attached production readiness evidence hash, and export redacted P1
   readiness audit records plus typed P1 execution audit bundles. Bundles bind the runtime request,
   sealed profile record, readiness decision, optional production readiness ref,
-  readiness evidence hash, redaction profile, and evidence refs. This makes the P0/P1 execution interlock
+  readiness evidence hash, redaction profile, and evidence refs. Readiness audit
+  export and bundle creation reject decisions that claim direct ticketing,
+  execution without P0, inconsistent ready/blocked flags, or missing
+  profile/request evidence refs. This makes the P0/P1 execution interlock
   reviewable without turning P0 into a runtime profile database or granting P1
   direct ticket/execution authority.
 - package redacted compliance export bundles from audit export records and P1

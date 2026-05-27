@@ -194,7 +194,9 @@ now pass locally.
   them with policy/profile hash and evidence-ref coverage validation, and export redacted P1 readiness audit records
   plus `P1ExecutionAuditBundle` values binding the runtime request, profile
   record, readiness decision, optional production readiness ref, redaction
-  profile, and evidence refs for review. Production or credential-capable
+  profile, and evidence refs for review. Readiness audit export and bundle creation
+  fail closed if a decision claims direct ticketing, execution without P0, inconsistent
+  ready/blocked flags, or missing profile/request evidence refs. Production or credential-capable
   profile records also store a stable hash of the attached production readiness
   evidence set, and can be reloaded against the original readiness decision to
   reject missing or tampered readiness evidence; P1 audit bundles and compliance
@@ -592,7 +594,9 @@ publishable docs:
   `P1ExecutionAuditBundle` records for P0/P1 execution interlock review.
   Bundles bind the runtime request, profile record, readiness decision, optional
   production readiness ref, redaction profile, and evidence refs, while still
-  denying P1 direct ticket, execution, verification, or ledger authority. When a
+  denying P1 direct ticket, execution, verification, or ledger authority.
+  Readiness decisions must still carry profile/request evidence refs and cannot
+  claim direct ticketing or execution without P0 before they can enter audit bundles. When a
   production readiness ref is present, the bundle also preserves the readiness
   evidence hash from the sealed profile record.
 - Production or credential-capable P1 execution profiles can only be sealed when

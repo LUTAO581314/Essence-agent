@@ -94,6 +94,13 @@ pub enum ExternalSecretManagerDecisionKind {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
+pub enum CryptographicVerifierDecisionKind {
+    Verified,
+    Rejected,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
 pub enum RotationEnforcementDecisionKind {
     Verified,
     Rejected,
@@ -580,6 +587,37 @@ pub struct ExternalSecretManagerDecision {
     pub external_secret_ref: String,
     pub secret_manager_ref: String,
     pub decision: ExternalSecretManagerDecisionKind,
+    pub reasons: Vec<String>,
+    pub evidence_refs: Vec<String>,
+    pub verified_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CryptographicVerifierEvidence {
+    pub evidence_id: String,
+    pub tenant_id: String,
+    pub signature_decision_ref: String,
+    pub trust_root_record_ref: String,
+    pub trust_root_hash: String,
+    pub cryptographic_verifier_ref: String,
+    pub adapter_decision_ref: String,
+    pub verifier_policy_ref: String,
+    pub transparency_log_ref: String,
+    pub algorithm_suite_ref: String,
+    pub attestation_ref: String,
+    pub checked_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CryptographicVerifierDecision {
+    pub decision_id: String,
+    pub tenant_id: String,
+    pub signature_decision_ref: String,
+    pub trust_root_record_ref: String,
+    pub cryptographic_verifier_ref: String,
+    pub decision: CryptographicVerifierDecisionKind,
     pub reasons: Vec<String>,
     pub evidence_refs: Vec<String>,
     pub verified_at: DateTime<Utc>,
@@ -2034,6 +2072,143 @@ impl VaultController {
         }
     }
 
+    pub fn verify_cryptographic_verifier(
+        hardening: &ProductionHardeningEvidence,
+        signature_decision: &SignatureVerificationDecision,
+        trust_root_record: &TrustRootRecord,
+        adapter_decision: &ProductionAdapterVerificationDecision,
+        evidence: &CryptographicVerifierEvidence,
+    ) -> CryptographicVerifierDecision {
+        let mut reasons = Vec::new();
+        let mut evidence_refs = vec![
+            signature_decision.decision_id.clone(),
+            trust_root_record.record_id.clone(),
+            trust_root_record.trust_root_hash.clone(),
+            adapter_decision.decision_id.clone(),
+            evidence.evidence_id.clone(),
+            evidence.signature_decision_ref.clone(),
+            evidence.trust_root_record_ref.clone(),
+            evidence.trust_root_hash.clone(),
+            evidence.cryptographic_verifier_ref.clone(),
+            evidence.adapter_decision_ref.clone(),
+            evidence.verifier_policy_ref.clone(),
+            evidence.transparency_log_ref.clone(),
+            evidence.algorithm_suite_ref.clone(),
+            evidence.attestation_ref.clone(),
+        ];
+        evidence_refs.extend(hardening.evidence_refs.clone());
+        evidence_refs.extend(signature_decision.evidence_refs.clone());
+        evidence_refs.extend(trust_root_record.evidence_refs.clone());
+        evidence_refs.extend(adapter_decision.evidence_refs.clone());
+
+        if hardening.tenant_id != evidence.tenant_id
+            || hardening.tenant_id != signature_decision.tenant_id
+            || hardening.tenant_id != trust_root_record.tenant_id
+            || hardening.tenant_id != adapter_decision.tenant_id
+        {
+            reasons.push(
+                "hardening, signature decision, trust-root record, adapter decision, and crypto evidence must share a tenant"
+                    .into(),
+            );
+        }
+        if Self::load_trust_root(trust_root_record).is_err() {
+            reasons.push("trust-root record failed local hash validation".into());
+        }
+        if evidence.signature_decision_ref != signature_decision.decision_id {
+            reasons.push("crypto verifier evidence is not bound to the signature decision".into());
+        }
+        if evidence.trust_root_record_ref != trust_root_record.record_id
+            || evidence.trust_root_hash != trust_root_record.trust_root_hash
+        {
+            reasons.push("crypto verifier evidence is not bound to the trust-root record".into());
+        }
+        if signature_decision.decision != SignatureVerificationKind::Verified
+            || !signature_decision.can_issue_high_risk_ticket
+        {
+            reasons
+                .push("signature decision must be verified for high-risk ticket issuance".into());
+        }
+        if signature_decision.trust_root_ref.as_deref() != Some(trust_root_record.root_id.as_str())
+        {
+            reasons.push("signature decision does not reference the trust-root record root".into());
+        }
+
+        let hardening_verifier_ref = hardening.cryptographic_verifier_ref.as_deref();
+        if hardening_verifier_ref.is_none_or(is_placeholder_ref) {
+            reasons.push("production cryptographic verifier is not configured".into());
+        }
+        if hardening_verifier_ref != Some(evidence.cryptographic_verifier_ref.as_str()) {
+            reasons.push("crypto verifier evidence does not match the hardening verifier".into());
+        }
+        if adapter_decision.decision != ProductionAdapterVerificationKind::Verified {
+            reasons.push("cryptographic verifier adapter decision must be verified".into());
+        }
+        if adapter_decision.kind != ProductionAdapterKind::CryptographicVerifier {
+            reasons.push("adapter decision must be for the cryptographic verifier".into());
+        }
+        if adapter_decision.provider_ref != evidence.cryptographic_verifier_ref {
+            reasons.push("cryptographic verifier adapter provider does not match evidence".into());
+        }
+        if evidence.adapter_decision_ref != adapter_decision.decision_id {
+            reasons.push("crypto verifier evidence is not bound to the adapter decision".into());
+        }
+        if evidence.checked_at >= evidence.expires_at || evidence.expires_at <= Utc::now() {
+            reasons.push("cryptographic verifier evidence is expired or invalid".into());
+        }
+        if [
+            evidence.evidence_id.as_str(),
+            evidence.signature_decision_ref.as_str(),
+            evidence.trust_root_record_ref.as_str(),
+            evidence.trust_root_hash.as_str(),
+            evidence.cryptographic_verifier_ref.as_str(),
+            evidence.adapter_decision_ref.as_str(),
+            evidence.verifier_policy_ref.as_str(),
+            evidence.transparency_log_ref.as_str(),
+            evidence.algorithm_suite_ref.as_str(),
+            evidence.attestation_ref.as_str(),
+        ]
+        .iter()
+        .any(|value| is_placeholder_ref(value))
+        {
+            reasons.push("cryptographic verifier evidence contains placeholder refs".into());
+        }
+
+        evidence_refs.sort();
+        evidence_refs.dedup();
+        reasons.sort();
+        reasons.dedup();
+
+        let decision = if reasons.is_empty() {
+            reasons.push("cryptographic verifier evidence is verified".into());
+            CryptographicVerifierDecisionKind::Verified
+        } else {
+            CryptographicVerifierDecisionKind::Rejected
+        };
+
+        CryptographicVerifierDecision {
+            decision_id: stable_id(
+                "cryptographic_verifier",
+                &(
+                    hardening.tenant_id.as_str(),
+                    signature_decision.decision_id.as_str(),
+                    trust_root_record.record_id.as_str(),
+                    evidence.cryptographic_verifier_ref.as_str(),
+                    &decision,
+                    &evidence_refs,
+                ),
+            ),
+            tenant_id: hardening.tenant_id.clone(),
+            signature_decision_ref: signature_decision.decision_id.clone(),
+            trust_root_record_ref: trust_root_record.record_id.clone(),
+            cryptographic_verifier_ref: evidence.cryptographic_verifier_ref.clone(),
+            decision,
+            reasons,
+            evidence_refs,
+            verified_at: Utc::now(),
+            expires_at: evidence.expires_at,
+        }
+    }
+
     pub fn verify_rotation_enforcement(
         credential: &CredentialRef,
         hardening: &ProductionHardeningEvidence,
@@ -3132,6 +3307,28 @@ mod tests {
             access_policy_ref: "access-policy://tenant.a/prod-secrets".into(),
             rotation_policy_ref: "rotation://tenant.a/30d-enforced".into(),
             attestation_ref: "attestation://tenant.a/external-secret-manager/2026-05".into(),
+            checked_at: Utc::now(),
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+        }
+    }
+
+    fn cryptographic_verifier_evidence(
+        signature_decision: &SignatureVerificationDecision,
+        trust_root_record: &TrustRootRecord,
+        adapter_decision: &ProductionAdapterVerificationDecision,
+    ) -> CryptographicVerifierEvidence {
+        CryptographicVerifierEvidence {
+            evidence_id: "crypto.verifier.evidence.1".into(),
+            tenant_id: signature_decision.tenant_id.clone(),
+            signature_decision_ref: signature_decision.decision_id.clone(),
+            trust_root_record_ref: trust_root_record.record_id.clone(),
+            trust_root_hash: trust_root_record.trust_root_hash.clone(),
+            cryptographic_verifier_ref: "sigstore://tenant.a/verifier".into(),
+            adapter_decision_ref: adapter_decision.decision_id.clone(),
+            verifier_policy_ref: "verifier-policy://tenant.a/prod".into(),
+            transparency_log_ref: "rekor://tenant.a/prod-log".into(),
+            algorithm_suite_ref: "algorithm-suite://tenant.a/ed25519-sha256".into(),
+            attestation_ref: "attestation://tenant.a/crypto-verifier/2026-05".into(),
             checked_at: Utc::now(),
             expires_at: Utc::now() + chrono::Duration::hours(1),
         }
@@ -4323,6 +4520,126 @@ mod tests {
         assert_eq!(
             rejected_adapter.decision,
             ExternalSecretManagerDecisionKind::Rejected
+        );
+        assert!(!rejected_adapter.reasons.is_empty());
+    }
+
+    #[test]
+    fn cryptographic_verifier_decision_is_signature_and_trust_root_bound_fail_closed() {
+        let hardening = hardening_evidence();
+        let trust_root_record = VaultController::seal_trust_root(
+            trust_root(),
+            vec!["security.import.review".into()],
+            "vault.controller",
+        )
+        .unwrap();
+        let signature_decision =
+            VaultController::verify_executor_signature_with_trust_root_records(
+                &signature(),
+                std::slice::from_ref(&trust_root_record),
+                RiskLevel::High,
+            )
+            .unwrap();
+        let adapter_decision =
+            VaultController::verify_production_adapter_evidence(&adapter_evidence(
+                ProductionAdapterKind::CryptographicVerifier,
+                "sigstore://tenant.a/verifier",
+            ));
+        let evidence = cryptographic_verifier_evidence(
+            &signature_decision,
+            &trust_root_record,
+            &adapter_decision,
+        );
+        let decision = VaultController::verify_cryptographic_verifier(
+            &hardening,
+            &signature_decision,
+            &trust_root_record,
+            &adapter_decision,
+            &evidence,
+        );
+
+        assert_eq!(
+            decision.decision,
+            CryptographicVerifierDecisionKind::Verified
+        );
+        assert_eq!(decision.tenant_id, hardening.tenant_id);
+        assert_eq!(
+            decision.signature_decision_ref,
+            signature_decision.decision_id
+        );
+        assert_eq!(decision.trust_root_record_ref, trust_root_record.record_id);
+        assert_eq!(
+            decision.cryptographic_verifier_ref,
+            "sigstore://tenant.a/verifier"
+        );
+        assert!(decision
+            .evidence_refs
+            .contains(&adapter_decision.decision_id));
+        assert!(decision
+            .evidence_refs
+            .contains(&trust_root_record.trust_root_hash));
+
+        let mut placeholder_log = evidence.clone();
+        placeholder_log.transparency_log_ref = "mock-log".into();
+        let rejected_log = VaultController::verify_cryptographic_verifier(
+            &hardening,
+            &signature_decision,
+            &trust_root_record,
+            &adapter_decision,
+            &placeholder_log,
+        );
+        assert_eq!(
+            rejected_log.decision,
+            CryptographicVerifierDecisionKind::Rejected
+        );
+        assert!(!rejected_log.reasons.is_empty());
+
+        let mut rejected_signature = signature_decision.clone();
+        rejected_signature.decision = SignatureVerificationKind::Rejected;
+        let rejected_signature_decision = VaultController::verify_cryptographic_verifier(
+            &hardening,
+            &rejected_signature,
+            &trust_root_record,
+            &adapter_decision,
+            &evidence,
+        );
+        assert_eq!(
+            rejected_signature_decision.decision,
+            CryptographicVerifierDecisionKind::Rejected
+        );
+        assert!(!rejected_signature_decision.reasons.is_empty());
+
+        let mut hash_mismatch = evidence.clone();
+        hash_mismatch.trust_root_hash = "trust_root_hash.tampered".into();
+        let rejected_hash = VaultController::verify_cryptographic_verifier(
+            &hardening,
+            &signature_decision,
+            &trust_root_record,
+            &adapter_decision,
+            &hash_mismatch,
+        );
+        assert_eq!(
+            rejected_hash.decision,
+            CryptographicVerifierDecisionKind::Rejected
+        );
+        assert!(!rejected_hash.reasons.is_empty());
+
+        let wrong_adapter = VaultController::verify_production_adapter_evidence(&adapter_evidence(
+            ProductionAdapterKind::AuthProvider,
+            "oidc://prod/tenant.a",
+        ));
+        let mut wrong_adapter_evidence = evidence;
+        wrong_adapter_evidence.adapter_decision_ref = wrong_adapter.decision_id.clone();
+        let rejected_adapter = VaultController::verify_cryptographic_verifier(
+            &hardening,
+            &signature_decision,
+            &trust_root_record,
+            &wrong_adapter,
+            &wrong_adapter_evidence,
+        );
+        assert_eq!(
+            rejected_adapter.decision,
+            CryptographicVerifierDecisionKind::Rejected
         );
         assert!(!rejected_adapter.reasons.is_empty());
     }

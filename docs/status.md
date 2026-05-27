@@ -272,7 +272,11 @@ provider, issuer/JWKS/token/session policy refs, and verified AuthProvider
 adapter decisions, external secret-manager evidence is verified into
 `ExternalSecretManagerDecision` records bound to credential refs, external
 secret refs, KMS/HSM/access-policy/rotation refs, and verified
-ExternalSecretManager adapter decisions, credential rotation refs are
+ExternalSecretManager adapter decisions, cryptographic verifier evidence is
+verified into `CryptographicVerifierDecision` records bound to signature
+decisions, sealed trust-root records and hashes, configured verifier refs,
+verifier policy refs, transparency-log refs, algorithm-suite refs, attestation
+refs, and verified CryptographicVerifier adapter decisions, credential rotation refs are
 verified into `RotationEnforcementDecision` records, secret injection receipts
 are verified into `SecretInjectionDecision` records bound to allowed
 `SecretUseDecision` values, executor-injected credentials, hardened sandbox
@@ -593,6 +597,7 @@ P0 boundary decisions:
   `ProductionAdapterVerificationDecision`, `ProductionAuthEvidence`,
   `ProductionAuthDecision`, `ExternalSecretManagerEvidence`,
   `ExternalSecretManagerDecision`, `RotationEnforcementDecision`,
+  `CryptographicVerifierEvidence`, `CryptographicVerifierDecision`,
   `SecretInjectionEvidence`, `SecretInjectionDecision`,
   `ComplianceExportDeliveryEvidence`, `ComplianceExportDeliveryDecision`, and
   `ProductionReadinessDecision`,
@@ -611,7 +616,11 @@ P0 boundary decisions:
   policy refs, and verified AuthProvider adapter decisions, verifies external
   secret-manager evidence into tenant-bound decisions bound to credential refs,
   external secret refs, KMS/HSM/access-policy/rotation refs, and verified
-  ExternalSecretManager adapter decisions, verifies credential rotation refs into tenant-bound
+  ExternalSecretManager adapter decisions, verifies cryptographic verifier
+  evidence into tenant-bound decisions bound to signature decisions,
+  hash-bound trust-root records, configured verifier refs, verifier policy,
+  transparency-log, algorithm-suite, attestation refs, and verified
+  CryptographicVerifier adapter decisions, verifies credential rotation refs into tenant-bound
   decisions, verifies secret injection receipts into tenant-bound decisions
   bound to allowed secret-use decisions, executor-injected credentials,
   hardened sandbox profiles, verified injection adapter decisions, executor

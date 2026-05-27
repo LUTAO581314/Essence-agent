@@ -161,6 +161,7 @@ now pass locally.
   `ProductionAdapterEvidence`, `ProductionAdapterVerificationDecision`,
   `ProductionAuthEvidence`, `ProductionAuthDecision`,
   `ExternalSecretManagerEvidence`, `ExternalSecretManagerDecision`,
+  `CryptographicVerifierEvidence`, `CryptographicVerifierDecision`,
   `RotationEnforcementDecision`, `ComplianceExportDeliveryDecision`, and
   `ProductionReadinessDecision` gates over
   production auth, external secret manager, crypto verifier, hardened sandbox,
@@ -175,7 +176,11 @@ now pass locally.
   adapter decision; it verifies external secret-manager evidence into
   tenant-bound decisions that bind credential refs, external secret refs,
   KMS/HSM/access-policy/rotation refs, and a verified ExternalSecretManager
-  adapter decision; it also verifies secret injection receipts as tenant-bound
+  adapter decision; it verifies cryptographic verifier evidence into
+  tenant-bound decisions that bind signature decisions, sealed trust-root
+  records and hashes, configured verifier refs, verifier policy,
+  transparency-log, algorithm-suite, attestation refs, and a verified
+  CryptographicVerifier adapter decision; it also verifies secret injection receipts as tenant-bound
   decisions that bind an allowed `SecretUseDecision`, an executor-injected
   credential, hardened sandbox and injection profiles, and a verified
   SecretInjection adapter decision. It can seal tenant policy packs with stable
@@ -538,6 +543,10 @@ publishable docs:
 - Production enablement now has a fail-closed readiness model:
   `moxi-vault` produces `ProductionAdapterEvidence`, verifies it into
   tenant-bound `ProductionAdapterVerificationDecision` records, verifies
+  cryptographic verifier evidence into `CryptographicVerifierDecision` records
+  bound to signature decisions, trust-root records and hashes, configured
+  verifier refs, verifier policy, transparency-log, algorithm-suite,
+  attestation refs, and verified CryptographicVerifier adapter decisions,
   credential rotation refs into `RotationEnforcementDecision` records, verifies
   compliance export bundle delivery evidence into
   `ComplianceExportDeliveryDecision` records, and then produces
@@ -606,12 +615,16 @@ into a decision bound to the configured auth provider, issuer/JWKS/token/session
 policy refs, and a verified AuthProvider adapter decision, verifies external
 secret-manager evidence into a decision bound to the credential ref, external
 secret ref, KMS/HSM/access-policy/rotation refs, and a verified
-ExternalSecretManager adapter decision, and now evaluates a fail-closed P1
+ExternalSecretManager adapter decision, verifies cryptographic verifier
+evidence into a decision bound to signature decisions, sealed trust-root
+records and hashes, configured verifier refs, verifier policy, transparency-log,
+algorithm-suite, attestation refs, and a verified CryptographicVerifier adapter
+decision, and now evaluates a fail-closed P1
 execution-readiness decision plus production readiness decisions over
 trust-root, quorum, break-glass, audit-export, auth, secret-manager,
 crypto-verifier, sandbox, secret-injection, and rotation evidence. Production
 adapter evidence, production auth evidence, external secret-manager evidence,
-credential rotation refs, secret injection receipts, and compliance export delivery receipts are verified into
+cryptographic verifier evidence, credential rotation refs, secret injection receipts, and compliance export delivery receipts are verified into
 tenant-bound decisions before readiness or review can cite them. P1 may only enter the P0 execution
 chain when that readiness decision is ready; it still cannot issue tickets,
 execute without P0, verify, or commit. Real OIDC/SSO authentication, real

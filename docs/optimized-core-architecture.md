@@ -255,9 +255,10 @@ Before credentialed or executable production actions, the architecture needs:
   redacted audit records, a P1 execution-readiness gate, production adapter
   evidence, adapter verification decisions, production auth evidence
   decisions, external secret-manager evidence decisions, rotation enforcement
-  decisions, cryptographic verifier evidence decisions, hardened sandbox
-  evidence decisions, secret injection evidence decisions, trust-root storage
-  decisions, and a fail-closed
+  decisions that can bind configured rotation policies to verified
+  RotationEnforcement adapter decisions, cryptographic verifier evidence
+  decisions, hardened sandbox evidence decisions, secret injection evidence
+  decisions, trust-root storage decisions, and a fail-closed
   production readiness decision, but not live OIDC/SSO,
   KMS/HSM/secret-manager calls, real cryptographic verification, real
   OS/container secret injection, or a real external trust-root storage backend;

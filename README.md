@@ -171,7 +171,8 @@ now pass locally.
   verifies adapter evidence into tenant-bound decisions and requires production
   readiness to bind every adapter evidence item to the matching verified
   decision; when rotation refs are configured it also requires every credential
-  to bind to a verified rotation-enforcement decision. It verifies production
+  to bind to a verified rotation-enforcement decision, optionally bound to a
+  verified RotationEnforcement adapter decision. It verifies production
   auth evidence into tenant-bound decisions that bind the configured auth
   provider, issuer/JWKS/token/session policy refs, and a verified AuthProvider
   adapter decision; it verifies external secret-manager evidence into
@@ -555,7 +556,9 @@ publishable docs:
   bound to the configured sandbox profile, isolation, filesystem, network,
   syscall, resource policy, attestation refs, and verified HardenedSandbox
   adapter decisions,
-  credential rotation refs into `RotationEnforcementDecision` records, verifies
+  credential rotation refs into `RotationEnforcementDecision` records that can
+  bind the configured rotation policy to a verified RotationEnforcement adapter
+  decision, verifies
   compliance export bundle delivery evidence into
   `ComplianceExportDeliveryDecision` records, and then produces
   `ProductionReadinessDecision` records only when each adapter evidence item and

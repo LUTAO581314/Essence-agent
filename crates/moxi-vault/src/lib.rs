@@ -210,6 +210,7 @@ pub struct RotationEnforcementDecision {
     pub credential_id: String,
     pub rotation_ref: Option<String>,
     pub rotation_policy_ref: Option<String>,
+    pub adapter_decision_ref: Option<String>,
     pub decision: RotationEnforcementDecisionKind,
     pub reasons: Vec<String>,
     pub evidence_refs: Vec<String>,
@@ -2358,6 +2359,22 @@ impl VaultController {
         credential: &CredentialRef,
         hardening: &ProductionHardeningEvidence,
     ) -> RotationEnforcementDecision {
+        Self::verify_rotation_enforcement_inner(credential, hardening, None)
+    }
+
+    pub fn verify_rotation_enforcement_with_adapter_decision(
+        credential: &CredentialRef,
+        hardening: &ProductionHardeningEvidence,
+        adapter_decision: &ProductionAdapterVerificationDecision,
+    ) -> RotationEnforcementDecision {
+        Self::verify_rotation_enforcement_inner(credential, hardening, Some(adapter_decision))
+    }
+
+    fn verify_rotation_enforcement_inner(
+        credential: &CredentialRef,
+        hardening: &ProductionHardeningEvidence,
+        adapter_decision: Option<&ProductionAdapterVerificationDecision>,
+    ) -> RotationEnforcementDecision {
         let mut reasons = Vec::new();
         let mut evidence_refs = vec![credential.credential_id.clone()];
 
@@ -2387,6 +2404,29 @@ impl VaultController {
         if hardening.evidence_refs.is_empty() {
             reasons.push("production hardening evidence refs are missing".into());
         }
+        if let Some(adapter_decision) = adapter_decision {
+            if adapter_decision.tenant_id != credential.tenant_id {
+                reasons.push(
+                    "credential and rotation adapter decision belong to different tenants".into(),
+                );
+            }
+            if adapter_decision.decision != ProductionAdapterVerificationKind::Verified {
+                reasons.push("rotation enforcement adapter decision must be verified".into());
+            }
+            if adapter_decision.kind != ProductionAdapterKind::RotationEnforcement {
+                reasons.push("adapter decision must be for rotation enforcement".into());
+            }
+            if hardening.rotation_policy_ref.as_deref()
+                != Some(adapter_decision.provider_ref.as_str())
+            {
+                reasons.push(
+                    "rotation enforcement adapter provider does not match the hardening policy"
+                        .into(),
+                );
+            }
+            evidence_refs.push(adapter_decision.decision_id.clone());
+            evidence_refs.extend(adapter_decision.evidence_refs.clone());
+        }
         evidence_refs.extend(hardening.evidence_refs.clone());
         if let Some(rotation_ref) = &credential.rotation_ref {
             evidence_refs.push(rotation_ref.clone());
@@ -2414,6 +2454,7 @@ impl VaultController {
                     credential.credential_id.as_str(),
                     &credential.rotation_ref,
                     &hardening.rotation_policy_ref,
+                    &adapter_decision.map(|decision| decision.decision_id.as_str()),
                     &decision,
                     &evidence_refs,
                 ),
@@ -2422,6 +2463,7 @@ impl VaultController {
             credential_id: credential.credential_id.clone(),
             rotation_ref: credential.rotation_ref.clone(),
             rotation_policy_ref: hardening.rotation_policy_ref.clone(),
+            adapter_decision_ref: adapter_decision.map(|decision| decision.decision_id.clone()),
             decision,
             reasons,
             evidence_refs,
@@ -2839,7 +2881,7 @@ impl VaultController {
             });
         if rotation_refs_configured {
             for decision in rotation_decisions {
-                validate_rotation_decision(decision)?;
+                validate_rotation_decision(decision, adapter_decisions)?;
             }
             require_verified_rotation_decisions(credentials, hardening, rotation_decisions)?;
         }
@@ -3182,7 +3224,10 @@ fn validate_adapter_decision(
     Ok(())
 }
 
-fn validate_rotation_decision(decision: &RotationEnforcementDecision) -> Result<(), VaultError> {
+fn validate_rotation_decision(
+    decision: &RotationEnforcementDecision,
+    adapter_decisions: &[ProductionAdapterVerificationDecision],
+) -> Result<(), VaultError> {
     if decision.decision != RotationEnforcementDecisionKind::Verified
         || decision.evidence_refs.is_empty()
         || decision.expires_at <= Utc::now()
@@ -3196,6 +3241,24 @@ fn validate_rotation_decision(decision: &RotationEnforcementDecision) -> Result<
             .is_none_or(is_placeholder_ref)
     {
         return Err(VaultError::MissingEvidence);
+    }
+    if let Some(adapter_decision_ref) = &decision.adapter_decision_ref {
+        let Some(adapter_decision) = adapter_decisions
+            .iter()
+            .find(|candidate| candidate.decision_id == *adapter_decision_ref)
+        else {
+            return Err(VaultError::MissingEvidence);
+        };
+        let Some(rotation_policy_ref) = decision.rotation_policy_ref.as_ref() else {
+            return Err(VaultError::MissingEvidence);
+        };
+        if adapter_decision.kind != ProductionAdapterKind::RotationEnforcement
+            || adapter_decision.decision != ProductionAdapterVerificationKind::Verified
+            || &adapter_decision.provider_ref != rotation_policy_ref
+            || !decision.evidence_refs.contains(adapter_decision_ref)
+        {
+            return Err(VaultError::MissingEvidence);
+        }
     }
     if decision
         .evidence_refs
@@ -5099,8 +5162,16 @@ mod tests {
         );
         let adapters = all_adapter_evidence();
         let adapter_decisions = all_adapter_decisions(&adapters);
-        let rotation_decision =
-            VaultController::verify_rotation_enforcement(&credential, &hardening);
+        let rotation_adapter_decision = adapter_decisions
+            .iter()
+            .find(|decision| decision.kind == ProductionAdapterKind::RotationEnforcement)
+            .unwrap()
+            .clone();
+        let rotation_decision = VaultController::verify_rotation_enforcement_with_adapter_decision(
+            &credential,
+            &hardening,
+            &rotation_adapter_decision,
+        );
         let sandbox_adapter_decision = adapter_decisions
             .iter()
             .find(|decision| decision.kind == ProductionAdapterKind::HardenedSandbox)
@@ -5212,6 +5283,78 @@ mod tests {
 
         assert_eq!(rejected.decision, RotationEnforcementDecisionKind::Rejected);
         assert!(!rejected.reasons.is_empty());
+    }
+
+    #[test]
+    fn rotation_enforcement_decision_can_bind_verified_adapter_decision() {
+        let credential = credential();
+        let hardening = hardening_evidence();
+        let adapter_decision =
+            VaultController::verify_production_adapter_evidence(&adapter_evidence(
+                ProductionAdapterKind::RotationEnforcement,
+                "rotation://tenant.a/30d-enforced",
+            ));
+        let decision = VaultController::verify_rotation_enforcement_with_adapter_decision(
+            &credential,
+            &hardening,
+            &adapter_decision,
+        );
+
+        assert_eq!(decision.decision, RotationEnforcementDecisionKind::Verified);
+        assert_eq!(
+            decision.adapter_decision_ref,
+            Some(adapter_decision.decision_id.clone())
+        );
+        assert!(decision
+            .evidence_refs
+            .contains(&adapter_decision.decision_id));
+        assert!(decision
+            .evidence_refs
+            .contains(&"rotation://tenant.a/30d-enforced".into()));
+
+        let wrong_adapter = VaultController::verify_production_adapter_evidence(&adapter_evidence(
+            ProductionAdapterKind::SecretInjection,
+            "injector://tenant.a/prod",
+        ));
+        let rejected_kind = VaultController::verify_rotation_enforcement_with_adapter_decision(
+            &credential,
+            &hardening,
+            &wrong_adapter,
+        );
+        assert_eq!(
+            rejected_kind.decision,
+            RotationEnforcementDecisionKind::Rejected
+        );
+        assert!(!rejected_kind.reasons.is_empty());
+
+        let mismatched_adapter =
+            VaultController::verify_production_adapter_evidence(&adapter_evidence(
+                ProductionAdapterKind::RotationEnforcement,
+                "rotation://tenant.a/other",
+            ));
+        let rejected_provider = VaultController::verify_rotation_enforcement_with_adapter_decision(
+            &credential,
+            &hardening,
+            &mismatched_adapter,
+        );
+        assert_eq!(
+            rejected_provider.decision,
+            RotationEnforcementDecisionKind::Rejected
+        );
+        assert!(!rejected_provider.reasons.is_empty());
+
+        let mut rejected_adapter_decision = adapter_decision;
+        rejected_adapter_decision.decision = ProductionAdapterVerificationKind::Rejected;
+        let rejected_adapter = VaultController::verify_rotation_enforcement_with_adapter_decision(
+            &credential,
+            &hardening,
+            &rejected_adapter_decision,
+        );
+        assert_eq!(
+            rejected_adapter.decision,
+            RotationEnforcementDecisionKind::Rejected
+        );
+        assert!(!rejected_adapter.reasons.is_empty());
     }
 
     #[test]
@@ -5335,8 +5478,16 @@ mod tests {
         );
         let adapters = all_adapter_evidence();
         let adapter_decisions = all_adapter_decisions(&adapters);
-        let rotation_decision =
-            VaultController::verify_rotation_enforcement(&credential, &hardening);
+        let rotation_adapter_decision = adapter_decisions
+            .iter()
+            .find(|decision| decision.kind == ProductionAdapterKind::RotationEnforcement)
+            .unwrap()
+            .clone();
+        let rotation_decision = VaultController::verify_rotation_enforcement_with_adapter_decision(
+            &credential,
+            &hardening,
+            &rotation_adapter_decision,
+        );
 
         let ready = VaultController::evaluate_production_readiness_with_decisions(
             &policy,
@@ -5351,6 +5502,9 @@ mod tests {
 
         assert_eq!(ready.decision, ProductionReadinessDecisionKind::Ready);
         assert!(ready.evidence_refs.contains(&rotation_decision.decision_id));
+        assert!(ready
+            .evidence_refs
+            .contains(&rotation_adapter_decision.decision_id));
 
         let missing_decision_error = VaultController::evaluate_production_readiness_with_decisions(
             &policy,
@@ -5404,6 +5558,25 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(rejected_error, VaultError::MissingEvidence);
+
+        let mut mismatched_adapter_ref =
+            VaultController::verify_rotation_enforcement_with_adapter_decision(
+                &credential,
+                &hardening,
+                &rotation_adapter_decision,
+            );
+        mismatched_adapter_ref.adapter_decision_ref = Some("adapter.decision.missing".into());
+        let missing_adapter_error = VaultController::evaluate_production_readiness_with_decisions(
+            &policy,
+            std::slice::from_ref(&credential),
+            std::slice::from_ref(&signature_decision),
+            &hardening,
+            &adapters,
+            &adapter_decisions,
+            &[mismatched_adapter_ref],
+        )
+        .unwrap_err();
+        assert_eq!(missing_adapter_error, VaultError::MissingEvidence);
     }
 
     #[test]

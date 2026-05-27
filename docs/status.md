@@ -281,7 +281,9 @@ evidence is verified into `HardenedSandboxDecision` records bound to the
 configured sandbox profile, isolation policy, filesystem policy, network
 policy, syscall policy, resource policy, attestation refs, and verified
 HardenedSandbox adapter decisions, credential rotation refs are
-verified into `RotationEnforcementDecision` records, secret injection receipts
+verified into `RotationEnforcementDecision` records that can bind the
+configured rotation policy to verified RotationEnforcement adapter decisions,
+secret injection receipts
 are verified into `SecretInjectionDecision` records bound to allowed
 `SecretUseDecision` values, executor-injected credentials, hardened sandbox
 profiles, verified injection adapter decisions, executor refs, and receipts,

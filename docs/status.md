@@ -298,8 +298,9 @@ ledger authority to P1.
 Compliance export bundles now aggregate redacted audit export records and P1
 execution audit bundles under a sealed tenant policy record/hash for review,
 and compliance export delivery evidence can be verified against the bundle hash
-as a tenant-bound `ComplianceExportDeliveryDecision`, without persisting raw
-secrets or calling an external compliance backend.
+and a verified ComplianceAuditExport adapter decision as a tenant-bound
+`ComplianceExportDeliveryDecision`, without persisting raw secrets or calling
+an external compliance backend.
 It keeps raw secrets out of model, log, and durable payload paths. It does not
 yet integrate concrete KMS/HSM/secret-manager adapters, perform real
 cryptographic verification, inject credentials into OS sandboxes, or generate
@@ -634,8 +635,9 @@ P0 boundary decisions:
   decisions, verifies secret injection receipts into tenant-bound decisions
   bound to allowed secret-use decisions, executor-injected credentials,
   hardened sandbox profiles, verified injection adapter decisions, executor
-  refs, and receipts, verifies compliance export delivery evidence against bundle hashes
-  into tenant-bound decisions, blocks production readiness until all P0
+  refs, and receipts, verifies compliance export delivery evidence against
+  bundle hashes and verified ComplianceAuditExport adapter decisions into
+  tenant-bound decisions, blocks production readiness until all P0
   hardening gates have
   tenant-bound adapter/rotation evidence and matching verified decisions,
   seals tenant policy packs with stable hashes, seals P1 execution

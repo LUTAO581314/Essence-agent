@@ -276,8 +276,9 @@ Before credentialed or executable production actions, the architecture needs:
   local compliance export bundles carry redaction profile refs and hashes without
   raw secret material, and the readiness gate requires compliance export
   evidence before production enablement. Delivery receipts can be verified
-  against the bundle hash, but the real external storage/delivery backend is
-  still outside the local control plane;
+  against the bundle hash and a verified ComplianceAuditExport adapter decision,
+  but the real external storage/delivery backend is still outside the local
+  control plane;
 - bounded hot-path control for ack/deny/route/cache-hit first packets, with
   measured p50/p95/p99 facts and no tool execution authority;
 - model gateway cost controls and fallback;

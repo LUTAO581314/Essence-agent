@@ -560,7 +560,8 @@ publishable docs:
   bind the configured rotation policy to a verified RotationEnforcement adapter
   decision, verifies
   compliance export bundle delivery evidence into
-  `ComplianceExportDeliveryDecision` records, and then produces
+  `ComplianceExportDeliveryDecision` records that can bind bundle-hash delivery
+  receipts to verified ComplianceAuditExport adapter decisions, and then produces
   `ProductionReadinessDecision` records only when each adapter evidence item and
   configured credential rotation ref is precisely bound to its matching verified
   decision. It blocks production readiness whenever production auth, real
@@ -618,7 +619,8 @@ commit.
 `moxi-vault` is a control-plane MVP, not a production HSM or secret manager. It
 keeps raw secret material out of the model/log/ledger path, can assemble
 redacted local compliance export bundles, verifies compliance export delivery
-evidence against the bundle hash, verifies secret injection evidence into a
+evidence against the bundle hash and optionally a verified ComplianceAuditExport
+adapter decision, verifies secret injection evidence into a
 decision bound to an allowed `SecretUseDecision`, an executor-injected
 credential, hardened sandbox and injection profiles, a verified injection
 adapter decision, executor ref, and receipt, verifies production auth evidence

@@ -476,6 +476,7 @@ pub struct ComplianceExportDeliveryEvidence {
     pub bundle_hash: String,
     pub delivery_ref: String,
     pub storage_provider_ref: String,
+    pub adapter_decision_ref: Option<String>,
     pub attestation_ref: String,
     pub receipt_ref: String,
     pub retention_policy_ref: String,
@@ -491,6 +492,7 @@ pub struct ComplianceExportDeliveryDecision {
     pub bundle_hash: String,
     pub delivery_ref: String,
     pub storage_provider_ref: String,
+    pub adapter_decision_ref: Option<String>,
     pub decision: ComplianceExportDeliveryDecisionKind,
     pub reasons: Vec<String>,
     pub evidence_refs: Vec<String>,
@@ -1731,6 +1733,22 @@ impl VaultController {
         bundle: &ComplianceExportBundle,
         evidence: &ComplianceExportDeliveryEvidence,
     ) -> ComplianceExportDeliveryDecision {
+        Self::verify_compliance_export_delivery_inner(bundle, evidence, None)
+    }
+
+    pub fn verify_compliance_export_delivery_with_adapter_decision(
+        bundle: &ComplianceExportBundle,
+        evidence: &ComplianceExportDeliveryEvidence,
+        adapter_decision: &ProductionAdapterVerificationDecision,
+    ) -> ComplianceExportDeliveryDecision {
+        Self::verify_compliance_export_delivery_inner(bundle, evidence, Some(adapter_decision))
+    }
+
+    fn verify_compliance_export_delivery_inner(
+        bundle: &ComplianceExportBundle,
+        evidence: &ComplianceExportDeliveryEvidence,
+        adapter_decision: Option<&ProductionAdapterVerificationDecision>,
+    ) -> ComplianceExportDeliveryDecision {
         let mut reasons = Vec::new();
         let mut evidence_refs = vec![
             bundle.bundle_id.clone(),
@@ -1742,6 +1760,9 @@ impl VaultController {
             evidence.receipt_ref.clone(),
             evidence.retention_policy_ref.clone(),
         ];
+        if let Some(adapter_decision_ref) = &evidence.adapter_decision_ref {
+            evidence_refs.push(adapter_decision_ref.clone());
+        }
 
         if bundle.tenant_id != evidence.tenant_id {
             reasons
@@ -1752,6 +1773,30 @@ impl VaultController {
         }
         if bundle.contains_secret_material {
             reasons.push("compliance export bundle contains secret material".into());
+        }
+        if let Some(adapter_decision) = adapter_decision {
+            if adapter_decision.tenant_id != bundle.tenant_id {
+                reasons.push(
+                    "compliance bundle and export adapter decision belong to different tenants"
+                        .into(),
+                );
+            }
+            if adapter_decision.decision != ProductionAdapterVerificationKind::Verified {
+                reasons.push("compliance export adapter decision must be verified".into());
+            }
+            if adapter_decision.kind != ProductionAdapterKind::ComplianceAuditExport {
+                reasons.push("adapter decision must be for compliance audit export".into());
+            }
+            if adapter_decision.provider_ref != evidence.storage_provider_ref {
+                reasons.push("compliance export adapter provider does not match evidence".into());
+            }
+            if evidence.adapter_decision_ref.as_deref()
+                != Some(adapter_decision.decision_id.as_str())
+            {
+                reasons.push("delivery evidence is not bound to the adapter decision".into());
+            }
+            evidence_refs.push(adapter_decision.decision_id.clone());
+            evidence_refs.extend(adapter_decision.evidence_refs.clone());
         }
         if evidence.delivered_at >= evidence.expires_at || evidence.expires_at <= Utc::now() {
             reasons.push("compliance export delivery evidence is expired or invalid".into());
@@ -1766,6 +1811,10 @@ impl VaultController {
         ]
         .iter()
         .any(|value| is_placeholder_ref(value))
+            || evidence
+                .adapter_decision_ref
+                .as_deref()
+                .is_some_and(is_placeholder_ref)
         {
             reasons.push("compliance export delivery evidence contains placeholder refs".into());
         }
@@ -1791,6 +1840,7 @@ impl VaultController {
                     bundle.bundle_hash.as_str(),
                     evidence.evidence_id.as_str(),
                     evidence.delivery_ref.as_str(),
+                    &evidence.adapter_decision_ref,
                     &decision,
                     &evidence_refs,
                 ),
@@ -1800,6 +1850,7 @@ impl VaultController {
             bundle_hash: bundle.bundle_hash.clone(),
             delivery_ref: evidence.delivery_ref.clone(),
             storage_provider_ref: evidence.storage_provider_ref.clone(),
+            adapter_decision_ref: evidence.adapter_decision_ref.clone(),
             decision,
             reasons,
             evidence_refs,
@@ -3708,6 +3759,7 @@ mod tests {
             bundle_hash: bundle.bundle_hash.clone(),
             delivery_ref: "compliance-delivery://tenant.a/export/run.compliance".into(),
             storage_provider_ref: "compliance-store://tenant.a/prod-archive".into(),
+            adapter_decision_ref: None,
             attestation_ref: "attestation://tenant.a/compliance-delivery/2026-05".into(),
             receipt_ref: "receipt://tenant.a/compliance-delivery/run.compliance".into(),
             retention_policy_ref: "retention://tenant.a/seven-years".into(),
@@ -4645,6 +4697,124 @@ mod tests {
             ComplianceExportDeliveryDecisionKind::Rejected
         );
         assert!(!rejected_placeholder.reasons.is_empty());
+    }
+
+    #[test]
+    fn compliance_export_delivery_decision_can_bind_verified_adapter_decision() {
+        let policy_record = VaultController::seal_tenant_policy_pack(
+            tenant_policy(),
+            vec!["policy.approved.1".into()],
+            "vault.controller",
+        )
+        .unwrap();
+        let export = VaultController::audit_export_record(
+            "tenant.a",
+            "run.compliance.adapter",
+            AuditExportRecordKind::Run,
+            "redaction.compliance.v1",
+            vec!["ledger.adapter".into(), "proof.adapter".into()],
+            "auditor.1",
+        )
+        .unwrap();
+        let bundle = VaultController::compliance_export_bundle(
+            "run.compliance.adapter",
+            &policy_record,
+            std::slice::from_ref(&export),
+            &[],
+            None,
+            "auditor.1",
+        )
+        .unwrap();
+        let adapter_decision =
+            VaultController::verify_production_adapter_evidence(&adapter_evidence(
+                ProductionAdapterKind::ComplianceAuditExport,
+                "compliance-store://tenant.a/prod-archive",
+            ));
+        let mut evidence = compliance_delivery_evidence(&bundle);
+        evidence.adapter_decision_ref = Some(adapter_decision.decision_id.clone());
+        let decision = VaultController::verify_compliance_export_delivery_with_adapter_decision(
+            &bundle,
+            &evidence,
+            &adapter_decision,
+        );
+
+        assert_eq!(
+            decision.decision,
+            ComplianceExportDeliveryDecisionKind::Verified
+        );
+        assert_eq!(
+            decision.adapter_decision_ref,
+            Some(adapter_decision.decision_id.clone())
+        );
+        assert!(decision
+            .evidence_refs
+            .contains(&adapter_decision.decision_id));
+        assert!(decision.evidence_refs.contains(&bundle.bundle_hash));
+
+        let wrong_adapter = VaultController::verify_production_adapter_evidence(&adapter_evidence(
+            ProductionAdapterKind::RotationEnforcement,
+            "rotation://tenant.a/30d-enforced",
+        ));
+        let mut wrong_adapter_evidence = evidence.clone();
+        wrong_adapter_evidence.adapter_decision_ref = Some(wrong_adapter.decision_id.clone());
+        let rejected_kind =
+            VaultController::verify_compliance_export_delivery_with_adapter_decision(
+                &bundle,
+                &wrong_adapter_evidence,
+                &wrong_adapter,
+            );
+        assert_eq!(
+            rejected_kind.decision,
+            ComplianceExportDeliveryDecisionKind::Rejected
+        );
+        assert!(!rejected_kind.reasons.is_empty());
+
+        let mismatched_adapter =
+            VaultController::verify_production_adapter_evidence(&adapter_evidence(
+                ProductionAdapterKind::ComplianceAuditExport,
+                "compliance-store://tenant.a/other",
+            ));
+        let mut mismatched_evidence = evidence.clone();
+        mismatched_evidence.adapter_decision_ref = Some(mismatched_adapter.decision_id.clone());
+        let rejected_provider =
+            VaultController::verify_compliance_export_delivery_with_adapter_decision(
+                &bundle,
+                &mismatched_evidence,
+                &mismatched_adapter,
+            );
+        assert_eq!(
+            rejected_provider.decision,
+            ComplianceExportDeliveryDecisionKind::Rejected
+        );
+        assert!(!rejected_provider.reasons.is_empty());
+
+        let mut missing_ref = evidence.clone();
+        missing_ref.adapter_decision_ref = None;
+        let rejected_missing_ref =
+            VaultController::verify_compliance_export_delivery_with_adapter_decision(
+                &bundle,
+                &missing_ref,
+                &adapter_decision,
+            );
+        assert_eq!(
+            rejected_missing_ref.decision,
+            ComplianceExportDeliveryDecisionKind::Rejected
+        );
+        assert!(!rejected_missing_ref.reasons.is_empty());
+
+        let mut rejected_adapter_decision = adapter_decision;
+        rejected_adapter_decision.decision = ProductionAdapterVerificationKind::Rejected;
+        let rejected_adapter =
+            VaultController::verify_compliance_export_delivery_with_adapter_decision(
+                &bundle,
+                &evidence,
+                &rejected_adapter_decision,
+            );
+        assert_eq!(
+            rejected_adapter.decision,
+            ComplianceExportDeliveryDecisionKind::Rejected
+        );
+        assert!(!rejected_adapter.reasons.is_empty());
     }
 
     #[test]

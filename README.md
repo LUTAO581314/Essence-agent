@@ -203,7 +203,8 @@ now pass locally.
   export bundles preserve that hash so the review chain stays bound to the same
   P0 readiness evidence. It can also package redacted
   `ComplianceExportBundle` values that aggregate audit exports and P1 execution
-  bundles under one tenant policy record/hash for review.
+  bundles under one tenant policy record/hash for review, and it revalidates
+  audit export ids and hashes before P1 audit bundle or compliance bundle creation.
   Production or credential-capable P1 profiles must be sealed through a ready
   `ProductionReadinessDecision`; blocked or missing production readiness fails
   closed. It records decisions and evidence refs only; it never stores raw
@@ -593,7 +594,7 @@ publishable docs:
   tenant checks, and evidence-ref coverage checks, and included in redacted audit exports and typed
   `P1ExecutionAuditBundle` records for P0/P1 execution interlock review.
   Bundles bind the runtime request, profile record, readiness decision, optional
-  production readiness ref, redaction profile, and evidence refs, while still
+  production readiness ref, redaction profile, audit export hash/id, and evidence refs, while still
   denying P1 direct ticket, execution, verification, or ledger authority.
   Readiness decisions must still carry profile/request evidence refs and cannot
   claim direct ticketing or execution without P0 before they can enter audit bundles. When a
@@ -639,7 +640,8 @@ keeps raw secret material out of the model/log/ledger path, can assemble
 redacted local compliance export bundles, verifies compliance export delivery
 evidence against the bundle hash, sealed tenant policy hash, optional production
 readiness evidence hash, and optionally a verified ComplianceAuditExport
-adapter decision, verifies secret injection evidence into a
+adapter decision, revalidates audit export ids and hashes before audit/compliance
+bundling, verifies secret injection evidence into a
 decision bound to an allowed `SecretUseDecision`, an executor-injected
 credential, hardened sandbox and injection profiles, a verified injection
 adapter decision, executor ref, and receipt, verifies production auth evidence

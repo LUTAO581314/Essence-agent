@@ -1557,6 +1557,7 @@ impl VaultController {
         {
             return Err(VaultError::MissingEvidence);
         }
+        validate_audit_export_record(audit_export)?;
         validate_p1_execution_readiness_decision_for_record(
             decision,
             profile_record,
@@ -1671,6 +1672,9 @@ impl VaultController {
             || production_readiness.is_some_and(|decision| decision.tenant_id != policy.tenant_id)
         {
             return Err(VaultError::TenantMismatch);
+        }
+        for export in audit_exports {
+            validate_audit_export_record(export)?;
         }
         if audit_exports
             .iter()
@@ -3442,6 +3446,31 @@ fn refs_contain_all(refs: &[String], required_refs: &[String]) -> bool {
     required_refs
         .iter()
         .all(|required_ref| refs.contains(required_ref))
+}
+
+fn validate_audit_export_record(record: &AuditExportRecord) -> Result<(), VaultError> {
+    if record.event_refs.is_empty() || record.contains_secret_material {
+        return Err(VaultError::MissingEvidence);
+    }
+    let expected_export_hash = stable_id(
+        "audit_export_hash",
+        &(
+            record.tenant_id.as_str(),
+            record.scope_ref.as_str(),
+            &record.kind,
+            record.redaction_profile_ref.as_str(),
+            &record.event_refs,
+        ),
+    );
+    let expected_export_id = stable_id(
+        "audit_export",
+        &(record.scope_ref.as_str(), &record.event_refs),
+    );
+    if record.export_hash != expected_export_hash || record.export_id != expected_export_id {
+        return Err(VaultError::MissingEvidence);
+    }
+
+    Ok(())
 }
 
 fn validate_p1_execution_readiness_decision_for_record(
@@ -5554,6 +5583,20 @@ mod tests {
         .unwrap_err();
         assert_eq!(unbound_error, VaultError::MissingEvidence);
 
+        let mut tampered_hash_audit = audit.clone();
+        tampered_hash_audit
+            .event_refs
+            .push("unhashed.audit.event".into());
+        let tampered_hash_error = VaultController::p1_execution_audit_bundle(
+            &request,
+            &decision,
+            &record,
+            &tampered_hash_audit,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(tampered_hash_error, VaultError::MissingEvidence);
+
         let cross_tenant_request = P1ExecutionReadinessRequest {
             tenant_id: "tenant.b".into(),
             ..request
@@ -6009,7 +6052,7 @@ mod tests {
 
         let cross_tenant = AuditExportRecord {
             tenant_id: "tenant.b".into(),
-            ..export
+            ..export.clone()
         };
         let tenant_error = VaultController::compliance_export_bundle(
             "run.compliance.reject",
@@ -6021,6 +6064,19 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(tenant_error, VaultError::TenantMismatch);
+
+        let mut tampered_hash = export;
+        tampered_hash.redaction_profile_ref = "redaction.changed.without.hash".into();
+        let hash_error = VaultController::compliance_export_bundle(
+            "run.compliance.reject",
+            &policy_record,
+            &[tampered_hash],
+            &[],
+            None,
+            "auditor.1",
+        )
+        .unwrap_err();
+        assert_eq!(hash_error, VaultError::MissingEvidence);
     }
 
     #[test]

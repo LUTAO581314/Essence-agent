@@ -80,7 +80,8 @@ P0 responsibilities:
   readiness evidence hash, redaction profile, and evidence refs. Readiness audit
   export and bundle creation reject decisions that claim direct ticketing,
   execution without P0, inconsistent ready/blocked flags, or missing
-  profile/request evidence refs. This makes the P0/P1 execution interlock
+  profile/request evidence refs, and revalidate audit export ids and hashes
+  before bundling. This makes the P0/P1 execution interlock
   reviewable without turning P0 into a runtime profile database or granting P1
   direct ticket/execution authority.
 - package redacted compliance export bundles from audit export records and P1
@@ -280,7 +281,8 @@ Before credentialed or executable production actions, the architecture needs:
   CryptographicVerifier adapter decisions, and evidence refs;
 - compliance-grade redaction and audit export; current audit export records and
   local compliance export bundles carry redaction profile refs and hashes without
-  raw secret material, and the readiness gate requires compliance export
+  raw secret material, audit export ids and hashes are revalidated before
+  P1/compliance bundling, and the readiness gate requires compliance export
   evidence before production enablement. Delivery receipts can be verified
   against the bundle hash, sealed tenant policy hash, optional production
   readiness evidence hash, and a verified ComplianceAuditExport adapter

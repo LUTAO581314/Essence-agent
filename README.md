@@ -644,7 +644,9 @@ readiness evidence hash, and optionally a verified ComplianceAuditExport
 adapter decision, revalidates audit export ids and hashes before audit/compliance
 bundling, revalidates P1 execution audit bundle ids/hashes and audit export hash
 evidence before compliance bundling, revalidates compliance export bundle
-ids/hashes and evidence refs again before delivery verification, verifies secret injection evidence into a
+ids/hashes and evidence refs again before delivery verification, and revalidates
+compliance export delivery decision ids before production readiness can consume
+them. It also verifies secret injection evidence into a
 decision bound to an allowed `SecretUseDecision`, an executor-injected
 credential, hardened sandbox and injection profiles, a verified injection
 adapter decision, executor ref, and receipt, verifies production auth evidence

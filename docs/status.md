@@ -312,7 +312,8 @@ verified ComplianceAuditExport adapter decision as a tenant-bound
 `ComplianceExportDeliveryDecision`, without persisting raw secrets or calling
 an external compliance backend. Delivery verification now also revalidates the
 compliance export bundle id/hash and evidence refs before accepting delivery
-receipts.
+receipts, and production readiness revalidates delivery decision ids before
+consuming those decisions.
 It keeps raw secrets out of model, log, and durable payload paths. It does not
 yet integrate concrete KMS/HSM/secret-manager adapters, perform real
 cryptographic verification, inject credentials into OS sandboxes, or generate
@@ -664,7 +665,8 @@ P0 boundary decisions:
   evidence-stripped decisions fail closed, revalidates audit export ids and
   hashes before P1 audit bundle creation, revalidates P1 execution audit bundle
   ids/hashes and audit export hash evidence before compliance export bundle creation,
-  revalidates compliance export bundle ids/hashes and evidence refs before delivery verification, carries
+  revalidates compliance export bundle ids/hashes and evidence refs before delivery verification,
+  revalidates delivery decision ids before production readiness consumption, carries
   those readiness evidence hashes through P1 audit bundles and compliance export bundles,
   requires ready production readiness before sealing production or
   credential-capable P1 profiles, and blocks P1 runtime tasks before ticket

@@ -495,6 +495,8 @@ pub struct ComplianceExportDeliveryDecision {
     pub tenant_policy_hash: String,
     #[serde(default)]
     pub production_readiness_evidence_hash: Option<String>,
+    #[serde(default)]
+    pub delivery_evidence_ref: String,
     pub delivery_ref: String,
     pub storage_provider_ref: String,
     pub adapter_decision_ref: Option<String>,
@@ -1974,6 +1976,7 @@ impl VaultController {
             bundle_hash: bundle.bundle_hash.clone(),
             tenant_policy_hash: bundle.tenant_policy_hash.clone(),
             production_readiness_evidence_hash: bundle.production_readiness_evidence_hash.clone(),
+            delivery_evidence_ref: evidence.evidence_id.clone(),
             delivery_ref: evidence.delivery_ref.clone(),
             storage_provider_ref: evidence.storage_provider_ref.clone(),
             adapter_decision_ref: evidence.adapter_decision_ref.clone(),
@@ -4048,7 +4051,8 @@ fn require_verified_compliance_export_delivery_decisions(
     }
 
     for decision in decisions {
-        if decision.decision != ComplianceExportDeliveryDecisionKind::Verified
+        if validate_compliance_export_delivery_decision_record(decision).is_err()
+            || decision.decision != ComplianceExportDeliveryDecisionKind::Verified
             || decision.evidence_refs.is_empty()
             || decision.expires_at <= Utc::now()
             || !decision.evidence_refs.contains(&decision.bundle_id)
@@ -4081,6 +4085,70 @@ fn require_verified_compliance_export_delivery_decisions(
         {
             return Err(VaultError::MissingEvidence);
         }
+    }
+
+    Ok(())
+}
+
+fn validate_compliance_export_delivery_decision_record(
+    decision: &ComplianceExportDeliveryDecision,
+) -> Result<(), VaultError> {
+    if decision.evidence_refs.is_empty()
+        || decision.tenant_id.trim().is_empty()
+        || decision.bundle_id.trim().is_empty()
+        || decision.bundle_hash.trim().is_empty()
+        || decision.tenant_policy_hash.trim().is_empty()
+        || decision.delivery_evidence_ref.trim().is_empty()
+        || decision.delivery_ref.trim().is_empty()
+        || decision.storage_provider_ref.trim().is_empty()
+        || decision.verified_at >= decision.expires_at
+        || !decision.evidence_refs.contains(&decision.bundle_id)
+        || !decision.evidence_refs.contains(&decision.bundle_hash)
+        || !decision
+            .evidence_refs
+            .contains(&decision.tenant_policy_hash)
+        || !decision
+            .evidence_refs
+            .contains(&decision.delivery_evidence_ref)
+        || !decision.evidence_refs.contains(&decision.delivery_ref)
+        || !decision
+            .evidence_refs
+            .contains(&decision.storage_provider_ref)
+        || decision
+            .production_readiness_evidence_hash
+            .as_ref()
+            .is_some_and(|readiness_hash| !decision.evidence_refs.contains(readiness_hash))
+        || decision
+            .adapter_decision_ref
+            .as_ref()
+            .is_none_or(|adapter_decision_ref| {
+                !decision.evidence_refs.contains(adapter_decision_ref)
+            })
+        || decision
+            .evidence_refs
+            .iter()
+            .any(|value| is_placeholder_ref(value))
+    {
+        return Err(VaultError::MissingEvidence);
+    }
+
+    let expected_decision_id = stable_id(
+        "compliance_export_delivery",
+        &(
+            decision.tenant_id.as_str(),
+            decision.bundle_id.as_str(),
+            decision.bundle_hash.as_str(),
+            decision.tenant_policy_hash.as_str(),
+            &decision.production_readiness_evidence_hash,
+            decision.delivery_evidence_ref.as_str(),
+            decision.delivery_ref.as_str(),
+            &decision.adapter_decision_ref,
+            &decision.decision,
+            &decision.evidence_refs,
+        ),
+    );
+    if decision.decision_id != expected_decision_id {
+        return Err(VaultError::MissingEvidence);
     }
 
     Ok(())
@@ -6006,6 +6074,7 @@ mod tests {
         assert_eq!(decision.bundle_hash, bundle.bundle_hash);
         assert_eq!(decision.tenant_policy_hash, bundle.tenant_policy_hash);
         assert_eq!(decision.production_readiness_evidence_hash, None);
+        assert_eq!(decision.delivery_evidence_ref, evidence.evidence_id);
         assert!(decision.evidence_refs.contains(&bundle.bundle_hash));
         assert!(decision.evidence_refs.contains(&bundle.tenant_policy_hash));
         assert!(decision.evidence_refs.contains(&evidence.receipt_ref));
@@ -6057,6 +6126,26 @@ mod tests {
             ComplianceExportDeliveryDecisionKind::Rejected
         );
         assert!(!rejected_stripped_bundle.reasons.is_empty());
+    }
+
+    #[test]
+    fn production_readiness_rejects_tampered_compliance_delivery_decision_id() {
+        let mut fixtures = production_hardening_decision_fixtures();
+        fixtures.compliance_export_delivery_decisions[0].decision_id =
+            "compliance_export_delivery.tampered".into();
+
+        let error = VaultController::evaluate_production_readiness_with_hardening_decision_set(
+            &tenant_policy(),
+            std::slice::from_ref(&fixtures.credential),
+            std::slice::from_ref(&fixtures.signature_decision),
+            &fixtures.hardening,
+            &fixtures.adapters,
+            &fixtures.adapter_decisions,
+            fixtures.decision_set(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error, VaultError::MissingEvidence);
     }
 
     #[test]

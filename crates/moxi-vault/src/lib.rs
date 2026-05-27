@@ -492,6 +492,9 @@ pub struct ComplianceExportDeliveryDecision {
     pub tenant_id: String,
     pub bundle_id: String,
     pub bundle_hash: String,
+    pub tenant_policy_hash: String,
+    #[serde(default)]
+    pub production_readiness_evidence_hash: Option<String>,
     pub delivery_ref: String,
     pub storage_provider_ref: String,
     pub adapter_decision_ref: Option<String>,
@@ -1803,6 +1806,8 @@ impl VaultController {
         let mut evidence_refs = vec![
             bundle.bundle_id.clone(),
             bundle.bundle_hash.clone(),
+            bundle.tenant_policy_record_ref.clone(),
+            bundle.tenant_policy_hash.clone(),
             evidence.evidence_id.clone(),
             evidence.delivery_ref.clone(),
             evidence.storage_provider_ref.clone(),
@@ -1812,6 +1817,13 @@ impl VaultController {
         ];
         if let Some(adapter_decision_ref) = &evidence.adapter_decision_ref {
             evidence_refs.push(adapter_decision_ref.clone());
+        }
+        if let Some(production_readiness_ref) = &bundle.production_readiness_ref {
+            evidence_refs.push(production_readiness_ref.clone());
+        }
+        if let Some(production_readiness_evidence_hash) = &bundle.production_readiness_evidence_hash
+        {
+            evidence_refs.push(production_readiness_evidence_hash.clone());
         }
 
         if bundle.tenant_id != evidence.tenant_id {
@@ -1823,6 +1835,25 @@ impl VaultController {
         }
         if bundle.contains_secret_material {
             reasons.push("compliance export bundle contains secret material".into());
+        }
+        match (
+            &bundle.production_readiness_ref,
+            &bundle.production_readiness_evidence_hash,
+        ) {
+            (Some(readiness_ref), Some(readiness_hash)) => {
+                if !bundle.evidence_refs.contains(readiness_ref)
+                    || !bundle.evidence_refs.contains(readiness_hash)
+                {
+                    reasons.push(
+                        "compliance bundle readiness refs are not bound to bundle evidence".into(),
+                    );
+                }
+            }
+            (None, None) => {}
+            _ => reasons.push(
+                "compliance bundle readiness ref and evidence hash must both be present or absent"
+                    .into(),
+            ),
         }
         if let Some(adapter_decision) = adapter_decision {
             if adapter_decision.tenant_id != bundle.tenant_id {
@@ -1888,6 +1919,8 @@ impl VaultController {
                     bundle.tenant_id.as_str(),
                     bundle.bundle_id.as_str(),
                     bundle.bundle_hash.as_str(),
+                    bundle.tenant_policy_hash.as_str(),
+                    &bundle.production_readiness_evidence_hash,
                     evidence.evidence_id.as_str(),
                     evidence.delivery_ref.as_str(),
                     &evidence.adapter_decision_ref,
@@ -1898,6 +1931,8 @@ impl VaultController {
             tenant_id: bundle.tenant_id.clone(),
             bundle_id: bundle.bundle_id.clone(),
             bundle_hash: bundle.bundle_hash.clone(),
+            tenant_policy_hash: bundle.tenant_policy_hash.clone(),
+            production_readiness_evidence_hash: bundle.production_readiness_evidence_hash.clone(),
             delivery_ref: evidence.delivery_ref.clone(),
             storage_provider_ref: evidence.storage_provider_ref.clone(),
             adapter_decision_ref: evidence.adapter_decision_ref.clone(),
@@ -3789,6 +3824,13 @@ fn require_verified_compliance_export_delivery_decisions(
             || decision.expires_at <= Utc::now()
             || !decision.evidence_refs.contains(&decision.bundle_id)
             || !decision.evidence_refs.contains(&decision.bundle_hash)
+            || !decision
+                .evidence_refs
+                .contains(&decision.tenant_policy_hash)
+            || decision
+                .production_readiness_evidence_hash
+                .as_ref()
+                .is_some_and(|readiness_hash| !decision.evidence_refs.contains(readiness_hash))
             || decision
                 .adapter_decision_ref
                 .as_ref()
@@ -5552,7 +5594,10 @@ mod tests {
         assert_eq!(decision.tenant_id, bundle.tenant_id);
         assert_eq!(decision.bundle_id, bundle.bundle_id);
         assert_eq!(decision.bundle_hash, bundle.bundle_hash);
+        assert_eq!(decision.tenant_policy_hash, bundle.tenant_policy_hash);
+        assert_eq!(decision.production_readiness_evidence_hash, None);
         assert!(decision.evidence_refs.contains(&bundle.bundle_hash));
+        assert!(decision.evidence_refs.contains(&bundle.tenant_policy_hash));
         assert!(decision.evidence_refs.contains(&evidence.receipt_ref));
 
         let mut hash_mismatch = evidence.clone();
@@ -5623,6 +5668,7 @@ mod tests {
             decision.adapter_decision_ref,
             Some(adapter_decision.decision_id.clone())
         );
+        assert_eq!(decision.tenant_policy_hash, bundle.tenant_policy_hash);
         assert!(decision
             .evidence_refs
             .contains(&adapter_decision.decision_id));
@@ -5692,6 +5738,74 @@ mod tests {
             ComplianceExportDeliveryDecisionKind::Rejected
         );
         assert!(!rejected_adapter.reasons.is_empty());
+    }
+
+    #[test]
+    fn compliance_export_delivery_decision_carries_readiness_evidence_hash() {
+        let policy = tenant_policy();
+        let policy_record = VaultController::seal_tenant_policy_pack(
+            policy.clone(),
+            vec!["policy.approved.1".into()],
+            "vault.controller",
+        )
+        .unwrap();
+        let signature_decision = VaultController::verify_executor_signature(
+            &signature(),
+            &[trust_root()],
+            RiskLevel::High,
+        );
+        let production_readiness = VaultController::evaluate_production_readiness(
+            &policy,
+            &[credential()],
+            &[signature_decision],
+            &hardening_evidence(),
+            &all_adapter_evidence(),
+        )
+        .unwrap();
+        let export = VaultController::audit_export_record(
+            "tenant.a",
+            "production.delivery.readiness",
+            AuditExportRecordKind::Run,
+            "redaction.compliance.v1",
+            vec![production_readiness.decision_id.clone()],
+            "auditor.1",
+        )
+        .unwrap();
+        let bundle = VaultController::compliance_export_bundle(
+            "production.delivery.readiness",
+            &policy_record,
+            &[export],
+            &[],
+            Some(&production_readiness),
+            "auditor.1",
+        )
+        .unwrap();
+        let evidence = compliance_delivery_evidence(&bundle);
+        let decision = VaultController::verify_compliance_export_delivery(&bundle, &evidence);
+
+        assert_eq!(
+            decision.production_readiness_evidence_hash,
+            Some(production_readiness_evidence_hash(&production_readiness))
+        );
+        assert!(decision.evidence_refs.contains(
+            decision
+                .production_readiness_evidence_hash
+                .as_ref()
+                .unwrap()
+        ));
+        assert!(decision.evidence_refs.contains(&bundle.tenant_policy_hash));
+
+        let mut tampered_bundle = bundle;
+        tampered_bundle.production_readiness_evidence_hash =
+            Some("production_readiness_evidence_hash.tampered".into());
+        let tampered_decision =
+            VaultController::verify_compliance_export_delivery(&tampered_bundle, &evidence);
+
+        assert_eq!(
+            tampered_decision.decision,
+            ComplianceExportDeliveryDecisionKind::Rejected
+        );
+        assert!(!tampered_decision.reasons.is_empty());
     }
 
     #[test]

@@ -83,7 +83,8 @@ P0 responsibilities:
 - package redacted compliance export bundles from audit export records and P1
   execution audit bundles under a sealed tenant policy record/hash. The bundle is
   review evidence only; delivery evidence can be verified into tenant-bound
-  compliance export delivery decisions, while real external compliance
+  compliance export delivery decisions that carry the tenant policy hash and
+  optional production readiness evidence hash, while real external compliance
   storage/delivery remains an adapter responsibility.
 - require production or credential-capable P1 execution profiles to attach a
   ready production-readiness decision before they can be sealed. Local read-only
@@ -278,9 +279,10 @@ Before credentialed or executable production actions, the architecture needs:
   local compliance export bundles carry redaction profile refs and hashes without
   raw secret material, and the readiness gate requires compliance export
   evidence before production enablement. Delivery receipts can be verified
-  against the bundle hash and a verified ComplianceAuditExport adapter decision,
-  but the real external storage/delivery backend is still outside the local
-  control plane;
+  against the bundle hash, sealed tenant policy hash, optional production
+  readiness evidence hash, and a verified ComplianceAuditExport adapter
+  decision, but the real external storage/delivery backend is still outside the
+  local control plane;
 - bounded hot-path control for ack/deny/route/cache-hit first packets, with
   measured p50/p95/p99 facts and no tool execution authority;
 - model gateway cost controls and fallback;

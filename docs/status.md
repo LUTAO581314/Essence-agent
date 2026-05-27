@@ -305,8 +305,9 @@ evidence; P1 execution audit bundles and compliance export bundles preserve the
 same hash so review evidence cannot silently swap the P0 readiness evidence set.
 Compliance export bundles now aggregate redacted audit export records and P1
 execution audit bundles under a sealed tenant policy record/hash for review,
-and compliance export delivery evidence can be verified against the bundle hash
-and a verified ComplianceAuditExport adapter decision as a tenant-bound
+and compliance export delivery evidence can be verified against the bundle hash,
+sealed tenant policy hash, optional production readiness evidence hash, and a
+verified ComplianceAuditExport adapter decision as a tenant-bound
 `ComplianceExportDeliveryDecision`, without persisting raw secrets or calling
 an external compliance backend.
 It keeps raw secrets out of model, log, and durable payload paths. It does not
@@ -644,7 +645,8 @@ P0 boundary decisions:
   bound to allowed secret-use decisions, executor-injected credentials,
   hardened sandbox profiles, verified injection adapter decisions, executor
   refs, and receipts, verifies compliance export delivery evidence against
-  bundle hashes and verified ComplianceAuditExport adapter decisions into
+  bundle hashes, sealed tenant policy hashes, optional production readiness
+  evidence hashes, and verified ComplianceAuditExport adapter decisions into
   tenant-bound decisions, blocks production readiness until all P0
   hardening gates have
   tenant-bound adapter/rotation evidence and matching verified decisions,

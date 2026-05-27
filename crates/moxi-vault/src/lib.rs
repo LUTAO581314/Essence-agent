@@ -457,6 +457,8 @@ pub struct ComplianceExportBundle {
     pub tenant_policy_record_ref: String,
     pub tenant_policy_hash: String,
     pub production_readiness_ref: Option<String>,
+    #[serde(default)]
+    pub production_readiness_evidence_hash: Option<String>,
     pub redaction_profile_ref: String,
     pub audit_export_refs: Vec<String>,
     pub p1_execution_bundle_refs: Vec<String>,
@@ -796,6 +798,8 @@ pub struct P1ExecutionAuditBundle {
     pub tenant_policy_record_ref: String,
     pub tenant_policy_hash: String,
     pub production_readiness_ref: Option<String>,
+    #[serde(default)]
+    pub production_readiness_evidence_hash: Option<String>,
     pub readiness_decision_ref: String,
     pub audit_export_ref: String,
     pub redaction_profile_ref: String,
@@ -1537,15 +1541,10 @@ impl VaultController {
             return Err(VaultError::MissingEvidence);
         }
 
-        match (
-            &profile_record.production_readiness_ref,
+        validate_production_readiness_for_loaded_profile_record(
+            profile_record,
             production_readiness,
-        ) {
-            (Some(expected), Some(readiness)) if expected == &readiness.decision_id => {}
-            (Some(_), _) => return Err(VaultError::MissingEvidence),
-            (None, Some(_)) => return Err(VaultError::MissingEvidence),
-            (None, None) => {}
-        }
+        )?;
 
         let mut evidence_refs = request.evidence_refs.clone();
         evidence_refs.extend(decision.evidence_refs.clone());
@@ -1560,6 +1559,7 @@ impl VaultController {
         evidence_refs.push(audit_export.export_hash.clone());
         if let Some(readiness) = production_readiness {
             evidence_refs.push(readiness.decision_id.clone());
+            evidence_refs.push(production_readiness_evidence_hash(readiness));
             evidence_refs.extend(readiness.evidence_refs.clone());
         }
         evidence_refs.sort();
@@ -1576,6 +1576,7 @@ impl VaultController {
                 decision.decision_id.as_str(),
                 audit_export.export_hash.as_str(),
                 &profile_record.production_readiness_ref,
+                &profile_record.production_readiness_evidence_hash,
                 &evidence_refs,
             ),
         );
@@ -1599,6 +1600,9 @@ impl VaultController {
             tenant_policy_record_ref: profile_record.tenant_policy_record_ref.clone(),
             tenant_policy_hash: profile_record.tenant_policy_hash.clone(),
             production_readiness_ref: profile_record.production_readiness_ref.clone(),
+            production_readiness_evidence_hash: profile_record
+                .production_readiness_evidence_hash
+                .clone(),
             readiness_decision_ref: decision.decision_id.clone(),
             audit_export_ref: audit_export.export_id.clone(),
             redaction_profile_ref: audit_export.redaction_profile_ref.clone(),
@@ -1648,8 +1652,16 @@ impl VaultController {
             return Err(VaultError::MissingEvidence);
         }
         if let Some(production_readiness) = production_readiness {
-            if production_readiness.decision != ProductionReadinessDecisionKind::Ready
-                || !production_readiness.missing_gates.is_empty()
+            validate_ready_production_readiness(production_readiness, &policy.tenant_id)?;
+        }
+        let expected_production_readiness_ref =
+            production_readiness.map(|decision| decision.decision_id.clone());
+        let expected_production_readiness_evidence_hash =
+            production_readiness.map(production_readiness_evidence_hash);
+        for bundle in p1_execution_bundles {
+            if bundle.production_readiness_ref != expected_production_readiness_ref
+                || bundle.production_readiness_evidence_hash
+                    != expected_production_readiness_evidence_hash
             {
                 return Err(VaultError::MissingEvidence);
             }
@@ -1714,6 +1726,7 @@ impl VaultController {
         evidence_refs.extend(event_refs.clone());
         if let Some(production_readiness) = production_readiness {
             evidence_refs.push(production_readiness.decision_id.clone());
+            evidence_refs.push(production_readiness_evidence_hash(production_readiness));
             evidence_refs.extend(production_readiness.evidence_refs.clone());
         }
         evidence_refs.sort();
@@ -1724,8 +1737,6 @@ impl VaultController {
 
         let scope_ref = scope_ref.into();
         let generated_by = generated_by.into();
-        let production_readiness_ref =
-            production_readiness.map(|decision| decision.decision_id.clone());
         let bundle_hash = stable_id(
             "compliance_export_bundle_hash",
             &(
@@ -1735,7 +1746,8 @@ impl VaultController {
                 redaction_profile_ref.as_str(),
                 &audit_export_refs,
                 &p1_execution_bundle_refs,
-                &production_readiness_ref,
+                &expected_production_readiness_ref,
+                &expected_production_readiness_evidence_hash,
                 &evidence_refs,
             ),
         );
@@ -1753,7 +1765,8 @@ impl VaultController {
             scope_ref,
             tenant_policy_record_ref: policy_record.record_id.clone(),
             tenant_policy_hash: policy_record.policy_hash.clone(),
-            production_readiness_ref,
+            production_readiness_ref: expected_production_readiness_ref,
+            production_readiness_evidence_hash: expected_production_readiness_evidence_hash,
             redaction_profile_ref,
             audit_export_refs,
             p1_execution_bundle_refs,
@@ -5262,12 +5275,32 @@ mod tests {
             bundle.production_readiness_ref,
             Some(production_readiness.decision_id.clone())
         );
+        assert_eq!(
+            bundle.production_readiness_evidence_hash,
+            Some(production_readiness_evidence_hash(&production_readiness))
+        );
         assert!(bundle
             .evidence_refs
             .contains(&production_readiness.decision_id));
+        assert!(bundle
+            .evidence_refs
+            .contains(bundle.production_readiness_evidence_hash.as_ref().unwrap()));
         assert!(bundle.can_enter_p0_execution_chain);
         assert!(!bundle.can_issue_ticket_directly);
         assert!(!bundle.can_execute_without_p0);
+
+        let mut tampered_record = record;
+        tampered_record.production_readiness_evidence_hash =
+            Some("production_readiness_evidence_hash.tampered".into());
+        let tampered_error = VaultController::p1_execution_audit_bundle(
+            &request,
+            &decision,
+            &tampered_record,
+            &audit,
+            Some(&production_readiness),
+        )
+        .unwrap_err();
+        assert_eq!(tampered_error, VaultError::MissingEvidence);
     }
 
     #[test]
@@ -5470,9 +5503,16 @@ mod tests {
             bundle.production_readiness_ref,
             Some(production_readiness.decision_id.clone())
         );
+        assert_eq!(
+            bundle.production_readiness_evidence_hash,
+            Some(production_readiness_evidence_hash(&production_readiness))
+        );
         assert!(bundle
             .evidence_refs
             .contains(&production_readiness.decision_id));
+        assert!(bundle
+            .evidence_refs
+            .contains(bundle.production_readiness_evidence_hash.as_ref().unwrap()));
     }
 
     #[test]

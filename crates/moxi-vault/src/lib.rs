@@ -101,6 +101,13 @@ pub enum CryptographicVerifierDecisionKind {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
+pub enum HardenedSandboxDecisionKind {
+    Verified,
+    Rejected,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
 pub enum RotationEnforcementDecisionKind {
     Verified,
     Rejected,
@@ -618,6 +625,34 @@ pub struct CryptographicVerifierDecision {
     pub trust_root_record_ref: String,
     pub cryptographic_verifier_ref: String,
     pub decision: CryptographicVerifierDecisionKind,
+    pub reasons: Vec<String>,
+    pub evidence_refs: Vec<String>,
+    pub verified_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HardenedSandboxEvidence {
+    pub evidence_id: String,
+    pub tenant_id: String,
+    pub hardened_sandbox_profile_ref: String,
+    pub adapter_decision_ref: String,
+    pub isolation_policy_ref: String,
+    pub filesystem_policy_ref: String,
+    pub network_policy_ref: String,
+    pub syscall_policy_ref: String,
+    pub resource_policy_ref: String,
+    pub attestation_ref: String,
+    pub checked_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HardenedSandboxDecision {
+    pub decision_id: String,
+    pub tenant_id: String,
+    pub hardened_sandbox_profile_ref: String,
+    pub decision: HardenedSandboxDecisionKind,
     pub reasons: Vec<String>,
     pub evidence_refs: Vec<String>,
     pub verified_at: DateTime<Utc>,
@@ -2209,6 +2244,116 @@ impl VaultController {
         }
     }
 
+    pub fn verify_hardened_sandbox(
+        hardening: &ProductionHardeningEvidence,
+        adapter_decision: &ProductionAdapterVerificationDecision,
+        evidence: &HardenedSandboxEvidence,
+    ) -> HardenedSandboxDecision {
+        let mut reasons = Vec::new();
+        let mut evidence_refs = vec![
+            adapter_decision.decision_id.clone(),
+            evidence.evidence_id.clone(),
+            evidence.hardened_sandbox_profile_ref.clone(),
+            evidence.adapter_decision_ref.clone(),
+            evidence.isolation_policy_ref.clone(),
+            evidence.filesystem_policy_ref.clone(),
+            evidence.network_policy_ref.clone(),
+            evidence.syscall_policy_ref.clone(),
+            evidence.resource_policy_ref.clone(),
+            evidence.attestation_ref.clone(),
+        ];
+        evidence_refs.extend(hardening.evidence_refs.clone());
+        evidence_refs.extend(adapter_decision.evidence_refs.clone());
+
+        if hardening.tenant_id != evidence.tenant_id
+            || hardening.tenant_id != adapter_decision.tenant_id
+        {
+            reasons.push(
+                "production hardening, sandbox adapter decision, and sandbox evidence must share a tenant"
+                    .into(),
+            );
+        }
+
+        let hardening_sandbox_ref = hardening.hardened_sandbox_profile_ref.as_deref();
+        if hardening_sandbox_ref.is_none_or(is_placeholder_ref) {
+            reasons.push("production OS/container sandbox profile is not configured".into());
+        }
+        if hardening_sandbox_ref != Some(evidence.hardened_sandbox_profile_ref.as_str()) {
+            reasons.push("sandbox evidence does not match the hardening sandbox profile".into());
+        }
+        if adapter_decision.decision != ProductionAdapterVerificationKind::Verified {
+            reasons.push("hardened sandbox adapter decision must be verified".into());
+        }
+        if adapter_decision.kind != ProductionAdapterKind::HardenedSandbox {
+            reasons.push("adapter decision must be for the hardened sandbox".into());
+        }
+        if adapter_decision.provider_ref != evidence.hardened_sandbox_profile_ref {
+            reasons.push("hardened sandbox adapter provider does not match evidence".into());
+        }
+        if !(adapter_decision
+            .evidence_refs
+            .iter()
+            .any(|reference| reference == &evidence.hardened_sandbox_profile_ref)
+            || adapter_decision.provider_ref == evidence.hardened_sandbox_profile_ref)
+        {
+            reasons.push("hardened sandbox adapter decision is not profile-bound".into());
+        }
+        if evidence.adapter_decision_ref != adapter_decision.decision_id {
+            reasons.push("sandbox evidence is not bound to the adapter decision".into());
+        }
+        if evidence.checked_at >= evidence.expires_at || evidence.expires_at <= Utc::now() {
+            reasons.push("hardened sandbox evidence is expired or invalid".into());
+        }
+        if [
+            evidence.evidence_id.as_str(),
+            evidence.hardened_sandbox_profile_ref.as_str(),
+            evidence.adapter_decision_ref.as_str(),
+            evidence.isolation_policy_ref.as_str(),
+            evidence.filesystem_policy_ref.as_str(),
+            evidence.network_policy_ref.as_str(),
+            evidence.syscall_policy_ref.as_str(),
+            evidence.resource_policy_ref.as_str(),
+            evidence.attestation_ref.as_str(),
+        ]
+        .iter()
+        .any(|value| is_placeholder_ref(value))
+        {
+            reasons.push("hardened sandbox evidence contains placeholder refs".into());
+        }
+
+        evidence_refs.sort();
+        evidence_refs.dedup();
+        reasons.sort();
+        reasons.dedup();
+
+        let decision = if reasons.is_empty() {
+            reasons.push("hardened sandbox evidence is verified".into());
+            HardenedSandboxDecisionKind::Verified
+        } else {
+            HardenedSandboxDecisionKind::Rejected
+        };
+
+        HardenedSandboxDecision {
+            decision_id: stable_id(
+                "hardened_sandbox",
+                &(
+                    hardening.tenant_id.as_str(),
+                    evidence.hardened_sandbox_profile_ref.as_str(),
+                    evidence.evidence_id.as_str(),
+                    &decision,
+                    &evidence_refs,
+                ),
+            ),
+            tenant_id: hardening.tenant_id.clone(),
+            hardened_sandbox_profile_ref: evidence.hardened_sandbox_profile_ref.clone(),
+            decision,
+            reasons,
+            evidence_refs,
+            verified_at: Utc::now(),
+            expires_at: evidence.expires_at,
+        }
+    }
+
     pub fn verify_rotation_enforcement(
         credential: &CredentialRef,
         hardening: &ProductionHardeningEvidence,
@@ -2486,6 +2631,52 @@ impl VaultController {
         adapter_decisions: &[ProductionAdapterVerificationDecision],
         rotation_decisions: &[RotationEnforcementDecision],
     ) -> Result<ProductionReadinessDecision, VaultError> {
+        Self::evaluate_production_readiness_inner(
+            policy,
+            credentials,
+            signature_decisions,
+            hardening,
+            adapter_evidence,
+            adapter_decisions,
+            rotation_decisions,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_production_readiness_with_hardened_sandbox_decisions(
+        policy: &TenantPolicyPack,
+        credentials: &[CredentialRef],
+        signature_decisions: &[SignatureVerificationDecision],
+        hardening: &ProductionHardeningEvidence,
+        adapter_evidence: &[ProductionAdapterEvidence],
+        adapter_decisions: &[ProductionAdapterVerificationDecision],
+        rotation_decisions: &[RotationEnforcementDecision],
+        sandbox_decisions: &[HardenedSandboxDecision],
+    ) -> Result<ProductionReadinessDecision, VaultError> {
+        Self::evaluate_production_readiness_inner(
+            policy,
+            credentials,
+            signature_decisions,
+            hardening,
+            adapter_evidence,
+            adapter_decisions,
+            rotation_decisions,
+            Some(sandbox_decisions),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_production_readiness_inner(
+        policy: &TenantPolicyPack,
+        credentials: &[CredentialRef],
+        signature_decisions: &[SignatureVerificationDecision],
+        hardening: &ProductionHardeningEvidence,
+        adapter_evidence: &[ProductionAdapterEvidence],
+        adapter_decisions: &[ProductionAdapterVerificationDecision],
+        rotation_decisions: &[RotationEnforcementDecision],
+        sandbox_decisions: Option<&[HardenedSandboxDecision]>,
+    ) -> Result<ProductionReadinessDecision, VaultError> {
         if hardening.evidence_refs.is_empty() {
             return Err(VaultError::MissingEvidence);
         }
@@ -2505,6 +2696,11 @@ impl VaultController {
             || rotation_decisions
                 .iter()
                 .any(|decision| decision.tenant_id != policy.tenant_id)
+            || sandbox_decisions.is_some_and(|decisions| {
+                decisions
+                    .iter()
+                    .any(|decision| decision.tenant_id != policy.tenant_id)
+            })
         {
             return Err(VaultError::TenantMismatch);
         }
@@ -2647,6 +2843,22 @@ impl VaultController {
             }
             require_verified_rotation_decisions(credentials, hardening, rotation_decisions)?;
         }
+        let hardened_sandbox_configured = hardening
+            .hardened_sandbox_profile_ref
+            .as_deref()
+            .is_some_and(|value| !is_placeholder_ref(value));
+        if hardened_sandbox_configured {
+            if let Some(sandbox_decisions) = sandbox_decisions {
+                for decision in sandbox_decisions {
+                    validate_hardened_sandbox_decision(decision)?;
+                }
+                require_verified_hardened_sandbox_decision(hardening, sandbox_decisions)?;
+            }
+        } else if let Some(sandbox_decisions) = sandbox_decisions {
+            for decision in sandbox_decisions {
+                validate_hardened_sandbox_decision(decision)?;
+            }
+        }
 
         if signature_decisions.is_empty()
             || signature_decisions
@@ -2703,6 +2915,13 @@ impl VaultController {
                 .iter()
                 .map(|decision| decision.decision_id.clone()),
         );
+        if let Some(sandbox_decisions) = sandbox_decisions {
+            evidence_refs.extend(
+                sandbox_decisions
+                    .iter()
+                    .map(|decision| decision.decision_id.clone()),
+            );
+        }
         evidence_refs.sort();
         evidence_refs.dedup();
 
@@ -2988,6 +3207,26 @@ fn validate_rotation_decision(decision: &RotationEnforcementDecision) -> Result<
     Ok(())
 }
 
+fn validate_hardened_sandbox_decision(
+    decision: &HardenedSandboxDecision,
+) -> Result<(), VaultError> {
+    if decision.decision != HardenedSandboxDecisionKind::Verified
+        || decision.evidence_refs.is_empty()
+        || decision.expires_at <= Utc::now()
+        || is_placeholder_ref(&decision.hardened_sandbox_profile_ref)
+    {
+        return Err(VaultError::MissingEvidence);
+    }
+    if decision
+        .evidence_refs
+        .iter()
+        .any(|value| is_placeholder_ref(value))
+    {
+        return Err(VaultError::MissingEvidence);
+    }
+    Ok(())
+}
+
 fn require_verified_adapter_decisions(
     adapter_evidence: &[ProductionAdapterEvidence],
     adapter_decisions: &[ProductionAdapterVerificationDecision],
@@ -3016,6 +3255,27 @@ fn require_verified_adapter_decisions(
         {
             return Err(VaultError::MissingEvidence);
         }
+    }
+
+    Ok(())
+}
+
+fn require_verified_hardened_sandbox_decision(
+    hardening: &ProductionHardeningEvidence,
+    sandbox_decisions: &[HardenedSandboxDecision],
+) -> Result<(), VaultError> {
+    if sandbox_decisions.len() != 1 {
+        return Err(VaultError::MissingEvidence);
+    }
+
+    let Some(profile_ref) = hardening.hardened_sandbox_profile_ref.as_deref() else {
+        return Err(VaultError::MissingEvidence);
+    };
+    let decision = &sandbox_decisions[0];
+    if decision.hardened_sandbox_profile_ref != profile_ref
+        || !decision.evidence_refs.contains(&profile_ref.to_string())
+    {
+        return Err(VaultError::MissingEvidence);
     }
 
     Ok(())
@@ -3329,6 +3589,25 @@ mod tests {
             transparency_log_ref: "rekor://tenant.a/prod-log".into(),
             algorithm_suite_ref: "algorithm-suite://tenant.a/ed25519-sha256".into(),
             attestation_ref: "attestation://tenant.a/crypto-verifier/2026-05".into(),
+            checked_at: Utc::now(),
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+        }
+    }
+
+    fn hardened_sandbox_evidence(
+        adapter_decision: &ProductionAdapterVerificationDecision,
+    ) -> HardenedSandboxEvidence {
+        HardenedSandboxEvidence {
+            evidence_id: "hardened.sandbox.evidence.1".into(),
+            tenant_id: "tenant.a".into(),
+            hardened_sandbox_profile_ref: "container://tenant.a/hardened-v1".into(),
+            adapter_decision_ref: adapter_decision.decision_id.clone(),
+            isolation_policy_ref: "isolation-policy://tenant.a/prod-container".into(),
+            filesystem_policy_ref: "fs-policy://tenant.a/read-write-scratch".into(),
+            network_policy_ref: "network-policy://tenant.a/egress-deny-default".into(),
+            syscall_policy_ref: "syscall-policy://tenant.a/seccomp-prod".into(),
+            resource_policy_ref: "resource-policy://tenant.a/cpu-mem-prod".into(),
+            attestation_ref: "attestation://tenant.a/hardened-sandbox/2026-05".into(),
             checked_at: Utc::now(),
             expires_at: Utc::now() + chrono::Duration::hours(1),
         }
@@ -4645,6 +4924,75 @@ mod tests {
     }
 
     #[test]
+    fn hardened_sandbox_decision_is_profile_and_adapter_bound_fail_closed() {
+        let hardening = hardening_evidence();
+        let adapter_decision =
+            VaultController::verify_production_adapter_evidence(&adapter_evidence(
+                ProductionAdapterKind::HardenedSandbox,
+                "container://tenant.a/hardened-v1",
+            ));
+        let evidence = hardened_sandbox_evidence(&adapter_decision);
+        let decision =
+            VaultController::verify_hardened_sandbox(&hardening, &adapter_decision, &evidence);
+
+        assert_eq!(decision.decision, HardenedSandboxDecisionKind::Verified);
+        assert_eq!(decision.tenant_id, hardening.tenant_id);
+        assert_eq!(
+            decision.hardened_sandbox_profile_ref,
+            "container://tenant.a/hardened-v1"
+        );
+        assert!(decision
+            .evidence_refs
+            .contains(&adapter_decision.decision_id));
+        assert!(decision
+            .evidence_refs
+            .contains(&"syscall-policy://tenant.a/seccomp-prod".into()));
+
+        let mut placeholder_policy = evidence.clone();
+        placeholder_policy.syscall_policy_ref = "mock-syscall-policy".into();
+        let rejected_policy = VaultController::verify_hardened_sandbox(
+            &hardening,
+            &adapter_decision,
+            &placeholder_policy,
+        );
+        assert_eq!(
+            rejected_policy.decision,
+            HardenedSandboxDecisionKind::Rejected
+        );
+        assert!(!rejected_policy.reasons.is_empty());
+
+        let mut profile_mismatch = evidence.clone();
+        profile_mismatch.hardened_sandbox_profile_ref = "container://tenant.a/hardened-v2".into();
+        let rejected_profile = VaultController::verify_hardened_sandbox(
+            &hardening,
+            &adapter_decision,
+            &profile_mismatch,
+        );
+        assert_eq!(
+            rejected_profile.decision,
+            HardenedSandboxDecisionKind::Rejected
+        );
+        assert!(!rejected_profile.reasons.is_empty());
+
+        let wrong_adapter = VaultController::verify_production_adapter_evidence(&adapter_evidence(
+            ProductionAdapterKind::SecretInjection,
+            "injector://tenant.a/prod",
+        ));
+        let mut wrong_adapter_evidence = evidence;
+        wrong_adapter_evidence.adapter_decision_ref = wrong_adapter.decision_id.clone();
+        let rejected_adapter = VaultController::verify_hardened_sandbox(
+            &hardening,
+            &wrong_adapter,
+            &wrong_adapter_evidence,
+        );
+        assert_eq!(
+            rejected_adapter.decision,
+            HardenedSandboxDecisionKind::Rejected
+        );
+        assert!(!rejected_adapter.reasons.is_empty());
+    }
+
+    #[test]
     fn production_readiness_requires_verified_adapter_decisions() {
         let policy = tenant_policy();
         let signature_decision = VaultController::verify_executor_signature(
@@ -4737,6 +5085,109 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(tenant_error, VaultError::TenantMismatch);
+    }
+
+    #[test]
+    fn production_readiness_requires_verified_hardened_sandbox_decision_when_supplied() {
+        let policy = tenant_policy();
+        let credential = credential();
+        let hardening = hardening_evidence();
+        let signature_decision = VaultController::verify_executor_signature(
+            &signature(),
+            &[trust_root()],
+            RiskLevel::High,
+        );
+        let adapters = all_adapter_evidence();
+        let adapter_decisions = all_adapter_decisions(&adapters);
+        let rotation_decision =
+            VaultController::verify_rotation_enforcement(&credential, &hardening);
+        let sandbox_adapter_decision = adapter_decisions
+            .iter()
+            .find(|decision| decision.kind == ProductionAdapterKind::HardenedSandbox)
+            .unwrap()
+            .clone();
+        let sandbox_evidence = hardened_sandbox_evidence(&sandbox_adapter_decision);
+        let sandbox_decision = VaultController::verify_hardened_sandbox(
+            &hardening,
+            &sandbox_adapter_decision,
+            &sandbox_evidence,
+        );
+
+        let ready = VaultController::evaluate_production_readiness_with_hardened_sandbox_decisions(
+            &policy,
+            std::slice::from_ref(&credential),
+            std::slice::from_ref(&signature_decision),
+            &hardening,
+            &adapters,
+            &adapter_decisions,
+            std::slice::from_ref(&rotation_decision),
+            std::slice::from_ref(&sandbox_decision),
+        )
+        .unwrap();
+
+        assert_eq!(ready.decision, ProductionReadinessDecisionKind::Ready);
+        assert!(ready.evidence_refs.contains(&sandbox_decision.decision_id));
+
+        let missing_decision_error =
+            VaultController::evaluate_production_readiness_with_hardened_sandbox_decisions(
+                &policy,
+                std::slice::from_ref(&credential),
+                std::slice::from_ref(&signature_decision),
+                &hardening,
+                &adapters,
+                &adapter_decisions,
+                std::slice::from_ref(&rotation_decision),
+                &[],
+            )
+            .unwrap_err();
+        assert_eq!(missing_decision_error, VaultError::MissingEvidence);
+
+        let duplicate_decisions = vec![sandbox_decision.clone(), sandbox_decision.clone()];
+        let duplicate_error =
+            VaultController::evaluate_production_readiness_with_hardened_sandbox_decisions(
+                &policy,
+                std::slice::from_ref(&credential),
+                std::slice::from_ref(&signature_decision),
+                &hardening,
+                &adapters,
+                &adapter_decisions,
+                std::slice::from_ref(&rotation_decision),
+                &duplicate_decisions,
+            )
+            .unwrap_err();
+        assert_eq!(duplicate_error, VaultError::MissingEvidence);
+
+        let mut mismatched_decision = sandbox_decision.clone();
+        mismatched_decision.hardened_sandbox_profile_ref = "container://tenant.a/other".into();
+        let mismatched_error =
+            VaultController::evaluate_production_readiness_with_hardened_sandbox_decisions(
+                &policy,
+                std::slice::from_ref(&credential),
+                std::slice::from_ref(&signature_decision),
+                &hardening,
+                &adapters,
+                &adapter_decisions,
+                std::slice::from_ref(&rotation_decision),
+                &[mismatched_decision],
+            )
+            .unwrap_err();
+        assert_eq!(mismatched_error, VaultError::MissingEvidence);
+
+        let mut rejected_decision = sandbox_decision;
+        rejected_decision.decision = HardenedSandboxDecisionKind::Rejected;
+        let rejected_error =
+            VaultController::evaluate_production_readiness_with_hardened_sandbox_decisions(
+                &policy,
+                std::slice::from_ref(&credential),
+                std::slice::from_ref(&signature_decision),
+                &hardening,
+                &adapters,
+                &adapter_decisions,
+                &[rotation_decision],
+                &[rejected_decision],
+            )
+            .unwrap_err();
+        assert_eq!(rejected_error, VaultError::MissingEvidence);
     }
 
     #[test]

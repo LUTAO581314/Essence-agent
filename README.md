@@ -162,6 +162,7 @@ now pass locally.
   `ProductionAuthEvidence`, `ProductionAuthDecision`,
   `ExternalSecretManagerEvidence`, `ExternalSecretManagerDecision`,
   `CryptographicVerifierEvidence`, `CryptographicVerifierDecision`,
+  `HardenedSandboxEvidence`, `HardenedSandboxDecision`,
   `RotationEnforcementDecision`, `ComplianceExportDeliveryDecision`, and
   `ProductionReadinessDecision` gates over
   production auth, external secret manager, crypto verifier, hardened sandbox,
@@ -180,7 +181,10 @@ now pass locally.
   tenant-bound decisions that bind signature decisions, sealed trust-root
   records and hashes, configured verifier refs, verifier policy,
   transparency-log, algorithm-suite, attestation refs, and a verified
-  CryptographicVerifier adapter decision; it also verifies secret injection receipts as tenant-bound
+  CryptographicVerifier adapter decision; it verifies hardened sandbox evidence
+  into tenant-bound decisions that bind the configured sandbox profile,
+  isolation, filesystem, network, syscall, resource policy, attestation refs,
+  and a verified HardenedSandbox adapter decision; it also verifies secret injection receipts as tenant-bound
   decisions that bind an allowed `SecretUseDecision`, an executor-injected
   credential, hardened sandbox and injection profiles, and a verified
   SecretInjection adapter decision. It can seal tenant policy packs with stable
@@ -547,6 +551,10 @@ publishable docs:
   bound to signature decisions, trust-root records and hashes, configured
   verifier refs, verifier policy, transparency-log, algorithm-suite,
   attestation refs, and verified CryptographicVerifier adapter decisions,
+  verifies hardened sandbox evidence into `HardenedSandboxDecision` records
+  bound to the configured sandbox profile, isolation, filesystem, network,
+  syscall, resource policy, attestation refs, and verified HardenedSandbox
+  adapter decisions,
   credential rotation refs into `RotationEnforcementDecision` records, verifies
   compliance export bundle delivery evidence into
   `ComplianceExportDeliveryDecision` records, and then produces
@@ -619,12 +627,15 @@ ExternalSecretManager adapter decision, verifies cryptographic verifier
 evidence into a decision bound to signature decisions, sealed trust-root
 records and hashes, configured verifier refs, verifier policy, transparency-log,
 algorithm-suite, attestation refs, and a verified CryptographicVerifier adapter
-decision, and now evaluates a fail-closed P1
+decision, verifies hardened sandbox evidence into a decision bound to the
+configured sandbox profile, isolation, filesystem, network, syscall, resource
+policy, attestation refs, and a verified HardenedSandbox adapter decision, and
+now evaluates a fail-closed P1
 execution-readiness decision plus production readiness decisions over
 trust-root, quorum, break-glass, audit-export, auth, secret-manager,
 crypto-verifier, sandbox, secret-injection, and rotation evidence. Production
 adapter evidence, production auth evidence, external secret-manager evidence,
-cryptographic verifier evidence, credential rotation refs, secret injection receipts, and compliance export delivery receipts are verified into
+cryptographic verifier evidence, hardened sandbox evidence, credential rotation refs, secret injection receipts, and compliance export delivery receipts are verified into
 tenant-bound decisions before readiness or review can cite them. P1 may only enter the P0 execution
 chain when that readiness decision is ready; it still cannot issue tickets,
 execute without P0, verify, or commit. Real OIDC/SSO authentication, real

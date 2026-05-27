@@ -276,7 +276,11 @@ ExternalSecretManager adapter decisions, cryptographic verifier evidence is
 verified into `CryptographicVerifierDecision` records bound to signature
 decisions, sealed trust-root records and hashes, configured verifier refs,
 verifier policy refs, transparency-log refs, algorithm-suite refs, attestation
-refs, and verified CryptographicVerifier adapter decisions, credential rotation refs are
+refs, and verified CryptographicVerifier adapter decisions, hardened sandbox
+evidence is verified into `HardenedSandboxDecision` records bound to the
+configured sandbox profile, isolation policy, filesystem policy, network
+policy, syscall policy, resource policy, attestation refs, and verified
+HardenedSandbox adapter decisions, credential rotation refs are
 verified into `RotationEnforcementDecision` records, secret injection receipts
 are verified into `SecretInjectionDecision` records bound to allowed
 `SecretUseDecision` values, executor-injected credentials, hardened sandbox
@@ -598,6 +602,7 @@ P0 boundary decisions:
   `ProductionAuthDecision`, `ExternalSecretManagerEvidence`,
   `ExternalSecretManagerDecision`, `RotationEnforcementDecision`,
   `CryptographicVerifierEvidence`, `CryptographicVerifierDecision`,
+  `HardenedSandboxEvidence`, `HardenedSandboxDecision`,
   `SecretInjectionEvidence`, `SecretInjectionDecision`,
   `ComplianceExportDeliveryEvidence`, `ComplianceExportDeliveryDecision`, and
   `ProductionReadinessDecision`,
@@ -620,7 +625,10 @@ P0 boundary decisions:
   evidence into tenant-bound decisions bound to signature decisions,
   hash-bound trust-root records, configured verifier refs, verifier policy,
   transparency-log, algorithm-suite, attestation refs, and verified
-  CryptographicVerifier adapter decisions, verifies credential rotation refs into tenant-bound
+  CryptographicVerifier adapter decisions, verifies hardened sandbox evidence
+  into tenant-bound decisions bound to the configured sandbox profile,
+  isolation, filesystem, network, syscall, resource policy, attestation refs,
+  and verified HardenedSandbox adapter decisions, verifies credential rotation refs into tenant-bound
   decisions, verifies secret injection receipts into tenant-bound decisions
   bound to allowed secret-use decisions, executor-injected credentials,
   hardened sandbox profiles, verified injection adapter decisions, executor

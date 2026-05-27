@@ -191,7 +191,7 @@ now pass locally.
   SecretInjection adapter decision. It can seal tenant policy packs with stable
   hashes, then seal P1 execution-readiness profiles into
   tenant-policy-record-bound `P1ExecutionReadinessProfileRecord` values, reload
-  them with policy/profile hash validation, and export redacted P1 readiness audit records
+  them with policy/profile hash and evidence-ref coverage validation, and export redacted P1 readiness audit records
   plus `P1ExecutionAuditBundle` values binding the runtime request, profile
   record, readiness decision, optional production readiness ref, redaction
   profile, and evidence refs for review. Production or credential-capable
@@ -587,8 +587,8 @@ publishable docs:
   grants P1 direct ticketing or execution authority.
 - P1 execution-readiness profiles can be sealed against tenant policy pack refs
   and sealed `TenantPolicyPackRecord` refs as
-  `P1ExecutionReadinessProfileRecord` values, reloaded with policy/profile hash
-  and tenant checks, and included in redacted audit exports and typed
+  `P1ExecutionReadinessProfileRecord` values, reloaded with policy/profile hash,
+  tenant checks, and evidence-ref coverage checks, and included in redacted audit exports and typed
   `P1ExecutionAuditBundle` records for P0/P1 execution interlock review.
   Bundles bind the runtime request, profile record, readiness decision, optional
   production readiness ref, redaction profile, and evidence refs, while still

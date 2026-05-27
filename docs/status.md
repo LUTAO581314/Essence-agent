@@ -654,8 +654,8 @@ P0 boundary decisions:
   auth, external secret-manager, cryptographic verifier, sandbox, rotation,
   secret-injection, compliance-delivery, and trust-root storage decisions,
   seals tenant policy packs with stable hashes, seals P1 execution
-  profiles against tenant policy record refs, policy/profile hashes, and
-  production readiness evidence hashes for credential-capable profiles,
+  profiles against tenant policy record refs, policy/profile hashes, required
+  evidence refs, and production readiness evidence hashes for credential-capable profiles,
   carries those readiness evidence hashes through P1 audit bundles and
   compliance export bundles,
   requires ready production readiness before sealing production or

@@ -73,8 +73,8 @@ P0 responsibilities:
   requires production-ready P0 evidence.
 - seal tenant policy packs into hash-bound records, seal P1 execution-readiness
   profiles against those tenant policy record references, reload them with
-  policy/profile hash validation, bind production/credential-capable profiles
-  to the attached production readiness evidence hash, and export redacted P1
+  policy/profile hash and evidence-ref coverage validation, bind
+  production/credential-capable profiles to the attached production readiness evidence hash, and export redacted P1
   readiness audit records plus typed P1 execution audit bundles. Bundles bind the runtime request,
   sealed profile record, readiness decision, optional production readiness ref,
   readiness evidence hash, redaction profile, and evidence refs. This makes the P0/P1 execution interlock

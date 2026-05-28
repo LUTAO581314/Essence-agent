@@ -38,8 +38,8 @@ tickets, or committing ledger events. `moxi-cli` adds the first CLI shell over
 that control plane for JSON admission, adapter manifest output, read-only
 runtime event-feed/query projection, a readable `status --text` view, an
 ASCII `status --panel` preview, a read-only Ratatui snapshot `tui` dashboard
-with a built-in no-input demo snapshot for onboarding plus scriptable
-pane-focus/task-selection/filter/refresh/quit keys, an
+with a `moxi` binary alias and default no-argument TUI demo entrypoint,
+plus scriptable pane-focus/task-selection/filter/refresh/quit keys, an
 approval display-only blockers pane, a compact projection-only Graph Summary
 pane, and a compact projection-only Task Detail pane, a read-only `tui --interactive`
 raw-mode skeleton for the same snapshot projection, an explicit `boundary`
@@ -55,16 +55,17 @@ now pass locally.
   HTTP API, SDK, MCP server, and automation channels. It normalizes external
   requests into an intent candidate plus entry metadata, without authenticating,
   issuing tickets, or touching tool capabilities.
-- `moxi-cli`: first CLI shell binary. It exposes `admit`, `manifest`,
+- `moxi-cli`: first CLI shell binary. It also installs a `moxi` binary alias
+  whose no-argument/default mode opens the read-only TUI demo dashboard. It exposes `admit`, `manifest`,
   `status`, `watch`, `tui`, `boundary`, and `repl` commands that call
   `moxi-shells` and write JSON shell contracts; `status --text` renders the
   same projection in a readable status view, `status --panel` renders a static
   terminal panel preview, `watch --input <snapshot.json>` refreshes that same
   file-backed projection preview, `tui --input <snapshot.json>` renders a
   read-only Ratatui dashboard with overview, graph summary, tasks,
-  approvals/blockers, task detail, boundary, and key-hint panes, and plain
-  `tui` falls back to a built-in read-only demo projection so users can preview
-  the shell without preparing JSON first. `tui --keys
+  approvals/blockers, task detail, boundary, and key-hint panes, and both
+  plain `moxi` and plain `tui` fall back to a built-in read-only demo projection
+  so users can preview the shell without preparing JSON first. `tui --keys
   tab,o,g,t,a,b,?,j,k,/filter,r,q` can replay a bounded read-only pane/task-
   selection/filter/refresh/quit sequence for tests and scripts.
   `tui --interactive` starts the same read-only snapshot dashboard in raw
@@ -503,9 +504,10 @@ shell projection as JSON or a readable `--text` view through `moxi-shells`;
 projection rendering for a bounded number of ticks. `tui` is the first
 read-only Ratatui dashboard skeleton over the same snapshot projection, using
 overview, graph summary, tasks, approvals/blockers, task detail, boundary, and
-key-hint panes. When no `--input` is supplied, `tui` renders a built-in
-read-only demo projection so first-run onboarding can show the interface
-without requiring users to locate or generate a snapshot file.
+key-hint panes. When launched as `moxi` or when no `--input` is supplied to
+`tui`, it renders a built-in read-only demo projection so first-run onboarding
+can show the interface without requiring users to locate or generate a snapshot
+file.
 Task Detail is compact and high-signal: it follows the selected task and shows
 state, stage, progress, capability, skill, blocker, and message while remaining
 projection-only. The approvals/blockers pane summarizes awaiting approvals as

@@ -4,6 +4,10 @@ edition.workspace = true
 license.workspace = true
 version.workspace = true
 
+[[bin]]
+name = "moxi"
+path = "src/main.rs"
+
 [dependencies]
 moxi-contracts = { path = "../moxi-contracts" }
 moxi-runtime = { path = "../moxi-runtime" }

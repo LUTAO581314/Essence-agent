@@ -384,16 +384,18 @@ submit-only, projection-only, and approval-display-only surfaces. The MVP
 supports shell request drafts, entry normalization, shell adapter manifests,
 runtime shell profile compatibility, event-feed projection, query-snapshot
 projection, and high-risk approval hints. `moxi-cli` now adds the first CLI
-binary with verified `admit`, `manifest`, `status`, `watch`, `tui`, `boundary`,
-and minimal `repl` commands. `status` renders runtime event-feed and query
+binary plus a `moxi` binary alias whose no-argument/default mode opens the
+read-only TUI demo dashboard, with verified `admit`, `manifest`, `status`,
+`watch`, `tui`, `boundary`, and minimal `repl` commands. `status` renders runtime event-feed and query
 snapshots as shell projections without executing or authorizing work,
 including readable `--text` output and a static ASCII `--panel` preview.
 `watch` repeats that same rendering from an explicit snapshot file for bounded
 ticks, so it is a preview loop rather than live runtime control. `tui` renders
 a Ratatui snapshot dashboard with overview, graph summary, tasks,
 approvals/blockers, task detail, boundary, and key-hint panes. When no
-`--input` is supplied, `tui` renders a built-in read-only demo projection so
-users can preview the shell without preparing JSON first. Its `--keys`
+`--input` is supplied, `tui` renders a built-in read-only demo projection, and
+plain `moxi` routes to the same dashboard so users can preview the shell
+without preparing JSON first. Its `--keys`
 replay model covers `tab`,
 `o`, `g`, `t`, `a`, `b`, `?`, `j`, `k`, `/filter`, `r`, and `q`, allowing pane
 cycling/focus, task selection, filtering, refresh count, and quit state to be

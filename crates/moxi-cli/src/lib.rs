@@ -24,8 +24,6 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum CliError {
-    #[error("missing command; try `moxi-cli help`")]
-    MissingCommand,
     #[error("unknown command: {0}")]
     UnknownCommand(String),
     #[error("missing value for {0}")]
@@ -279,8 +277,12 @@ where
     R: BufRead,
 {
     let Some((command, rest)) = args.split_first() else {
-        return Err(CliError::MissingCommand);
+        return run_tui(parse_tui(&[])?, writer).map(|()| 0);
     };
+
+    if command.starts_with('-') && !matches!(command.as_str(), "-h" | "--help") {
+        return run_tui(parse_tui(args)?, writer).map(|()| 0);
+    }
 
     match command.as_str() {
         "admit" => {
@@ -1941,7 +1943,7 @@ fn percent(value: f32) -> String {
 }
 
 fn help_text() -> &'static str {
-    "moxi-cli\n\nCommands:\n  admit --goal <text> [--tenant <id>] [--user <id>] [--workspace <path>] [--capability <id>] [--risk low|medium|high|critical]\n  manifest [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human]\n  boundary [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--text]\n  status [--feed|--query] [--input <snapshot.json>] [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--text|--panel] [--limit <n>]\n  watch [--feed|--query] --input <snapshot.json> [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--text|--panel] [--limit <n>] [--ticks <n>] [--interval-ms <n>]\n  tui [--feed|--query] --input <snapshot.json> [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--width <n>] [--height <n>] [--keys tab,o,g,t,a,b,?,j,k,/filter,r,q] [--interactive] [--poll-ms <n>]\n  repl\n\nBoundary: this CLI submits requests and renders shell contracts only; it can watch snapshot files and render a read-only TUI preview, but it cannot execute, authorize, issue tickets, verify, or commit ledger events."
+    "moxi\n\nDefault:\n  moxi\n    Opens the read-only TUI demo/onboarding dashboard.\n\nCommands:\n  admit --goal <text> [--tenant <id>] [--user <id>] [--workspace <path>] [--capability <id>] [--risk low|medium|high|critical]\n  manifest [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human]\n  boundary [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--text]\n  status [--feed|--query] [--input <snapshot.json>] [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--text|--panel] [--limit <n>]\n  watch [--feed|--query] --input <snapshot.json> [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--text|--panel] [--limit <n>] [--ticks <n>] [--interval-ms <n>]\n  tui [--feed|--query] [--input <snapshot.json>] [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--width <n>] [--height <n>] [--keys tab,o,g,t,a,b,?,j,k,/filter,r,q] [--interactive] [--poll-ms <n>]\n  repl\n\nBoundary: this CLI submits requests and renders shell contracts only; it can watch snapshot files and render a read-only TUI preview, but it cannot execute, authorize, issue tickets, verify, or commit ledger events."
 }
 
 #[cfg(test)]
@@ -2763,6 +2765,49 @@ mod tests {
     }
 
     #[test]
+    fn bare_moxi_opens_tui_demo_dashboard() {
+        let mut output = Vec::new();
+
+        let code = run(["moxi"], &mut output).unwrap();
+        let text = String::from_utf8(output).unwrap();
+
+        assert_eq!(code, 0);
+        assert!(text.contains("MOXI R10 TUI"));
+        assert!(text.contains("graph=demo_graph"));
+        assert!(text.contains("mode: read-only projection shell"));
+        assert!(text.contains("blocked in shell: no ticket"));
+    }
+
+    #[test]
+    fn bare_moxi_with_tui_options_opens_tui_demo_dashboard() {
+        let mut output = Vec::new();
+
+        let code = run(
+            ["moxi", "--width", "112", "--height", "30", "--keys", "q"],
+            &mut output,
+        )
+        .unwrap();
+        let text = String::from_utf8(output).unwrap();
+
+        assert_eq!(code, 0);
+        assert!(text.contains("MOXI R10 TUI"));
+        assert!(text.contains("graph=demo_graph"));
+        assert!(text.contains("active=Overview selected_task=0 filter=<none> quit=true"));
+    }
+
+    #[test]
+    fn bare_args_open_tui_demo_dashboard() {
+        let mut output = Vec::new();
+
+        let code = run(std::iter::empty::<&str>(), &mut output).unwrap();
+        let text = String::from_utf8(output).unwrap();
+
+        assert_eq!(code, 0);
+        assert!(text.contains("MOXI R10 TUI"));
+        assert!(text.contains("graph=demo_graph"));
+    }
+
+    #[test]
     fn watch_still_requires_snapshot_input_path() {
         let mut output = Vec::new();
 
@@ -2770,6 +2815,20 @@ mod tests {
 
         assert!(matches!(error, CliError::MissingRequired("--input")));
         assert!(output.is_empty());
+    }
+
+    #[test]
+    fn help_documents_default_tui_entrypoint() {
+        let mut output = Vec::new();
+
+        let code = run(["moxi", "help"], &mut output).unwrap();
+        let text = String::from_utf8(output).unwrap();
+
+        assert_eq!(code, 0);
+        assert!(text.contains("Default:"));
+        assert!(text.contains("moxi"));
+        assert!(text.contains("Opens the read-only TUI demo/onboarding dashboard."));
+        assert!(text.contains("tui [--feed|--query] [--input <snapshot.json>]"));
     }
 
     #[test]

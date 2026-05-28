@@ -402,7 +402,7 @@ Before credentialed or executable production actions, the architecture needs:
 17. Build `moxi-cli` as the first CLI binary over `moxi-shells` for JSON
     admission, adapter-manifest output, read-only runtime event-feed/query
     projection, a file-backed snapshot watch preview, a read-only Ratatui TUI
-    skeleton with a built-in no-input demo projection for first-run onboarding
+    skeleton with a `moxi` binary alias and built-in no-input demo projection for first-run onboarding
     and scriptable pane-focus/task-selection/filter/refresh/quit replay including graph focus, a raw-mode
     read-only snapshot loop and compact projection-only Task Detail preview
     behind `tui --interactive`, and a verified minimal REPL loop only. Task

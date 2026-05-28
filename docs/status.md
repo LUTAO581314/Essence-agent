@@ -522,6 +522,12 @@ Cargo, docs/config, trust, active agents, skills, tools, and context meter
 facts, while preserving the P2 shell boundary. It is intentionally local and
 non-authorizing, but gives later P1/P0 or model-gateway adapters a stable place
 to plug in without rewriting the chat, streaming, or task-tracking UI.
+Backend responses now also carry a structured local plan artifact: backend
+source, deterministic plan id, suggested plan steps, and explicitly blocked
+authority categories. The conversation body and Task Tracking detail render
+that artifact, making the TUI feel more like an agent workbench while still
+stopping all write, shell, Git/GitHub, ticket, proof, and ledger authority at
+the P2 boundary.
 The local demo runbook is now documented in `docs/r10-rich-cli-demo.md`, with a
 PowerShell helper script at `scripts/demo-r10-rich-cli.ps1`. The script supports
 `interactive`, `boot`, `core`, `flow`, and `status` modes so the Rich CLI can be

@@ -684,8 +684,23 @@ struct TuiBackendResponse {
     role: String,
     body: String,
     metadata: TuiMessageMeta,
+    plan: TuiBackendPlan,
     completed_step_detail: String,
     next_step_detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TuiBackendPlan {
+    plan_id: String,
+    source: String,
+    steps: Vec<TuiBackendPlanStep>,
+    blocked_authority: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TuiBackendPlanStep {
+    label: String,
+    detail: String,
 }
 
 trait TuiAgentBackend {
@@ -721,17 +736,20 @@ impl TuiAgentBackend for ReadOnlyWorkspaceBackend {
         if request.tools.iter().any(|tool| tool == "git.status") {
             response_tools.push("git.status".to_owned());
         }
+        let plan = read_only_backend_plan(&request);
+        let body = read_only_project_analysis(&request, &plan);
 
         TuiBackendResponse {
             agent: agent_name,
             role,
-            body: read_only_project_analysis(request),
+            body,
             metadata: TuiMessageMeta::from_tools(
                 model,
                 reasoning,
                 response_tools,
                 "state: complete | backend: read-only workspace",
             ),
+            plan,
             completed_step_detail:
                 "read-only backend response prepared; no execution authority was used".to_owned(),
             next_step_detail: "waiting for a real P1/P0 backend adapter or owner command"
@@ -740,14 +758,87 @@ impl TuiAgentBackend for ReadOnlyWorkspaceBackend {
     }
 }
 
-fn read_only_project_analysis(request: TuiBackendRequest<'_>) -> String {
+fn read_only_backend_plan(request: &TuiBackendRequest<'_>) -> TuiBackendPlan {
+    let focus = read_only_task_focus(request.task);
+    let first = match focus {
+        "project status" => TuiBackendPlanStep {
+            label: "Summarize project state".to_owned(),
+            detail: format!(
+                "Use cwd, git={}, cargo={}, docs={} as read-only facts",
+                request.workspace.git_state, request.workspace.cargo_state, request.workspace.docs_state
+            ),
+        },
+        "agent configuration" => TuiBackendPlanStep {
+            label: "Summarize active agents".to_owned(),
+            detail: format!(
+                "Use {} configured/fallback agents and {} skills without loading external authority",
+                request.agents.len(),
+                request.skills.len()
+            ),
+        },
+        "verification readiness" => TuiBackendPlanStep {
+            label: "Prepare verification plan".to_owned(),
+            detail: "List safe checks first; build/test execution still needs owner intent and P0 path"
+                .to_owned(),
+        },
+        "trust and risk" => TuiBackendPlanStep {
+            label: "Review trust boundary".to_owned(),
+            detail: format!(
+                "Current trust is {}; approvals remain local intent only",
+                request.trust.label()
+            ),
+        },
+        _ => TuiBackendPlanStep {
+            label: "Inspect workspace context".to_owned(),
+            detail: format!(
+                "Use context meter {}% and local workspace facts before proposing work",
+                request.context_percent
+            ),
+        },
+    };
+    TuiBackendPlan {
+        plan_id: format!("tui-readonly-turn-{}", request.turn),
+        source: "read-only-workspace-backend".to_owned(),
+        steps: vec![
+            first,
+            TuiBackendPlanStep {
+                label: "Produce owner-facing answer".to_owned(),
+                detail: "Explain findings in chat without executing tools or mutating files".to_owned(),
+            },
+            TuiBackendPlanStep {
+                label: "Wait for P0-capable adapter".to_owned(),
+                detail: "Any write, shell, Git/GitHub, ticket, proof, or ledger action remains blocked here"
+                    .to_owned(),
+            },
+        ],
+        blocked_authority: vec![
+            "write".to_owned(),
+            "shell.execute".to_owned(),
+            "git.github".to_owned(),
+            "ticket.issue".to_owned(),
+            "proof.verify".to_owned(),
+            "ledger.commit".to_owned(),
+        ],
+    }
+}
+
+fn read_only_project_analysis(request: &TuiBackendRequest<'_>, plan: &TuiBackendPlan) -> String {
     let focus = read_only_task_focus(request.task);
     let agent_count = request.agents.len();
     let skill_count = request.skills.len();
+    let first_step = plan
+        .steps
+        .first()
+        .map(|step| step.label.as_str())
+        .unwrap_or("Inspect workspace context");
     format!(
-        "Turn {} read-only backend analysis for \"{}\": focus={focus}; workspace={} ; git={} ; cargo={} ; docs={} ; config={} ; trust={} ; context={}%; agents={} ; skills={}. Next safe step: inspect context or ask for a concrete plan. P0 remains required for writes, shell execution, Git/GitHub, tickets, proofs, or ledger commits.",
+        "Turn {} read-only backend analysis for \"{}\": focus={focus}; backend={} ; plan={} ; first_step=\"{}\" ; blocked={}. workspace={} ; git={} ; cargo={} ; docs={} ; config={} ; trust={} ; context={}%; agents={} ; skills={}. Next safe step: inspect context or ask for a concrete plan. P0 remains required for writes, shell execution, Git/GitHub, tickets, proofs, or ledger commits.",
         request.turn,
         request.task,
+        plan.source,
+        plan.plan_id,
+        first_step,
+        plan.blocked_authority.join(","),
         request.workspace.short_path,
         request.workspace.git_state,
         request.workspace.cargo_state,
@@ -5612,6 +5703,14 @@ reasoning = "low"
             .body
             .contains("read-only backend analysis for \"inspect project status\""));
         assert!(completed_reply.body.contains("focus=project status"));
+        assert!(completed_reply
+            .body
+            .contains("backend=read-only-workspace-backend"));
+        assert!(completed_reply.body.contains("plan=tui-readonly-turn-2"));
+        assert!(completed_reply
+            .body
+            .contains("first_step=\"Summarize project state\""));
+        assert!(completed_reply.body.contains("blocked=write"));
         assert!(completed_reply.body.contains("context="));
         assert!(completed_reply.body.contains("agents="));
         assert!(completed_reply.body.contains("workspace="));
@@ -5677,6 +5776,17 @@ reasoning = "low"
         assert!(agents_response.body.contains("context=88%"));
         assert!(agents_response.body.contains("agents=1"));
         assert!(agents_response.body.contains("skills=2"));
+        assert_eq!(agents_response.plan.plan_id, "tui-readonly-turn-2");
+        assert_eq!(agents_response.plan.source, "read-only-workspace-backend");
+        assert_eq!(
+            agents_response.plan.steps[0].label,
+            "Summarize active agents"
+        );
+        assert!(agents_response
+            .plan
+            .blocked_authority
+            .iter()
+            .any(|authority| authority == "ledger.commit"));
 
         let verification = ReadOnlyWorkspaceBackend.respond(TuiBackendRequest {
             turn: 3,
@@ -5689,6 +5799,10 @@ reasoning = "low"
             context_percent: 88,
         });
         assert!(verification.body.contains("focus=verification readiness"));
+        assert_eq!(
+            verification.plan.steps[0].label,
+            "Prepare verification plan"
+        );
         assert!(verification.body.contains("P0 remains required"));
     }
 

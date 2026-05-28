@@ -532,6 +532,26 @@ pub struct ProductionAdapterReadinessContractRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProductionAdapterReadinessBundle {
+    pub bundle_id: String,
+    pub tenant_id: String,
+    pub scope_ref: String,
+    pub adapter_decision_refs: Vec<String>,
+    pub provider_config_record_refs: Vec<String>,
+    pub provider_config_hashes: Vec<String>,
+    pub readiness_contract_refs: Vec<String>,
+    pub readiness_contract_hashes: Vec<String>,
+    pub evidence_refs: Vec<String>,
+    pub contains_secret_material: bool,
+    pub can_issue_ticket_directly: bool,
+    pub can_execute_without_p0: bool,
+    pub can_commit_ledger: bool,
+    pub bundle_hash: String,
+    pub generated_by: String,
+    pub generated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct QuorumApproval {
     pub approval_id: String,
     pub request_ref: String,
@@ -1822,6 +1842,164 @@ impl VaultController {
         }
 
         Ok(record.contract.clone())
+    }
+
+    pub fn production_adapter_readiness_bundle(
+        scope_ref: impl Into<String>,
+        adapter_decisions: &[ProductionAdapterVerificationDecision],
+        provider_config_records: &[ProductionAdapterProviderConfigRecord],
+        readiness_contract_records: &[ProductionAdapterReadinessContractRecord],
+        generated_by: impl Into<String>,
+    ) -> Result<ProductionAdapterReadinessBundle, VaultError> {
+        if adapter_decisions.is_empty()
+            || adapter_decisions.len() != provider_config_records.len()
+            || adapter_decisions.len() != readiness_contract_records.len()
+        {
+            return Err(VaultError::MissingEvidence);
+        }
+        let tenant_id = adapter_decisions[0].tenant_id.clone();
+        if adapter_decisions
+            .iter()
+            .any(|decision| decision.tenant_id != tenant_id)
+            || provider_config_records
+                .iter()
+                .any(|record| record.tenant_id != tenant_id)
+            || readiness_contract_records
+                .iter()
+                .any(|record| record.tenant_id != tenant_id)
+        {
+            return Err(VaultError::TenantMismatch);
+        }
+
+        let config_records_by_ref = provider_config_records
+            .iter()
+            .map(|record| (record.record_id.as_str(), record))
+            .collect::<BTreeMap<_, _>>();
+        let contract_records_by_ref = readiness_contract_records
+            .iter()
+            .map(|record| (record.record_id.as_str(), record))
+            .collect::<BTreeMap<_, _>>();
+        if config_records_by_ref.len() != provider_config_records.len()
+            || contract_records_by_ref.len() != readiness_contract_records.len()
+        {
+            return Err(VaultError::MissingEvidence);
+        }
+
+        let mut adapter_decision_refs = Vec::new();
+        let mut provider_config_record_refs = Vec::new();
+        let mut provider_config_hashes = Vec::new();
+        let mut readiness_contract_refs = Vec::new();
+        let mut readiness_contract_hashes = Vec::new();
+        let mut evidence_refs = Vec::new();
+
+        for decision in adapter_decisions {
+            validate_adapter_decision(decision)?;
+            let Some(config_record) =
+                config_records_by_ref.get(decision.provider_config_record_ref.as_str())
+            else {
+                return Err(VaultError::MissingEvidence);
+            };
+            let Some(contract_record) =
+                contract_records_by_ref.get(decision.readiness_contract_ref.as_str())
+            else {
+                return Err(VaultError::MissingEvidence);
+            };
+            adapter_decision_satisfies_readiness_contract(
+                decision,
+                config_record,
+                contract_record,
+                decision.kind,
+                &decision.provider_ref,
+            )?;
+            if decision.provider_config_hash != config_record.config_hash
+                || decision.readiness_contract_hash != contract_record.contract_hash
+            {
+                return Err(VaultError::MissingEvidence);
+            }
+
+            adapter_decision_refs.push(decision.decision_id.clone());
+            provider_config_record_refs.push(config_record.record_id.clone());
+            provider_config_hashes.push(config_record.config_hash.clone());
+            readiness_contract_refs.push(contract_record.record_id.clone());
+            readiness_contract_hashes.push(contract_record.contract_hash.clone());
+            evidence_refs.push(decision.decision_id.clone());
+            evidence_refs.extend(decision.evidence_refs.clone());
+            evidence_refs.push(config_record.record_id.clone());
+            evidence_refs.push(config_record.config_hash.clone());
+            evidence_refs.extend(config_record.evidence_refs.clone());
+            evidence_refs.push(contract_record.record_id.clone());
+            evidence_refs.push(contract_record.contract_hash.clone());
+            evidence_refs.extend(contract_record.evidence_refs.clone());
+        }
+
+        adapter_decision_refs.sort();
+        adapter_decision_refs.dedup();
+        provider_config_record_refs.sort();
+        provider_config_record_refs.dedup();
+        provider_config_hashes.sort();
+        provider_config_hashes.dedup();
+        readiness_contract_refs.sort();
+        readiness_contract_refs.dedup();
+        readiness_contract_hashes.sort();
+        readiness_contract_hashes.dedup();
+        evidence_refs.sort();
+        evidence_refs.dedup();
+        if adapter_decision_refs.len() != adapter_decisions.len()
+            || provider_config_record_refs.len() != provider_config_records.len()
+            || readiness_contract_refs.len() != readiness_contract_records.len()
+            || evidence_refs.is_empty()
+            || evidence_refs.iter().any(|value| is_placeholder_ref(value))
+        {
+            return Err(VaultError::MissingEvidence);
+        }
+
+        let scope_ref = scope_ref.into();
+        let generated_by = generated_by.into();
+        if is_placeholder_ref(&scope_ref) || is_placeholder_ref(&generated_by) {
+            return Err(VaultError::MissingEvidence);
+        }
+        let bundle_hash = stable_id(
+            "production_adapter_readiness_bundle_hash",
+            &(
+                tenant_id.as_str(),
+                scope_ref.as_str(),
+                &adapter_decision_refs,
+                &provider_config_record_refs,
+                &provider_config_hashes,
+                &readiness_contract_refs,
+                &readiness_contract_hashes,
+                &evidence_refs,
+            ),
+        );
+
+        Ok(ProductionAdapterReadinessBundle {
+            bundle_id: stable_id(
+                "production_adapter_readiness_bundle",
+                &(tenant_id.as_str(), scope_ref.as_str(), bundle_hash.as_str()),
+            ),
+            tenant_id,
+            scope_ref,
+            adapter_decision_refs,
+            provider_config_record_refs,
+            provider_config_hashes,
+            readiness_contract_refs,
+            readiness_contract_hashes,
+            evidence_refs,
+            contains_secret_material: false,
+            can_issue_ticket_directly: false,
+            can_execute_without_p0: false,
+            can_commit_ledger: false,
+            bundle_hash,
+            generated_by,
+            generated_at: Utc::now(),
+        })
+    }
+
+    pub fn load_production_adapter_readiness_bundle(
+        bundle: &ProductionAdapterReadinessBundle,
+    ) -> Result<ProductionAdapterReadinessBundle, VaultError> {
+        validate_production_adapter_readiness_bundle(bundle)?;
+        Ok(bundle.clone())
     }
 
     pub fn seal_p1_execution_readiness_profile(
@@ -5143,6 +5321,80 @@ fn validate_adapter_decision(
     Ok(())
 }
 
+fn validate_production_adapter_readiness_bundle(
+    bundle: &ProductionAdapterReadinessBundle,
+) -> Result<(), VaultError> {
+    if bundle.tenant_id.trim().is_empty()
+        || is_placeholder_ref(&bundle.scope_ref)
+        || is_placeholder_ref(&bundle.generated_by)
+        || bundle.adapter_decision_refs.is_empty()
+        || bundle.provider_config_record_refs.is_empty()
+        || bundle.provider_config_hashes.is_empty()
+        || bundle.readiness_contract_refs.is_empty()
+        || bundle.readiness_contract_hashes.is_empty()
+        || bundle.evidence_refs.is_empty()
+        || bundle.contains_secret_material
+        || bundle.can_issue_ticket_directly
+        || bundle.can_execute_without_p0
+        || bundle.can_commit_ledger
+        || bundle
+            .adapter_decision_refs
+            .iter()
+            .any(|value| !bundle.evidence_refs.contains(value))
+        || bundle
+            .provider_config_record_refs
+            .iter()
+            .any(|value| !bundle.evidence_refs.contains(value))
+        || bundle
+            .provider_config_hashes
+            .iter()
+            .any(|value| !bundle.evidence_refs.contains(value))
+        || bundle
+            .readiness_contract_refs
+            .iter()
+            .any(|value| !bundle.evidence_refs.contains(value))
+        || bundle
+            .readiness_contract_hashes
+            .iter()
+            .any(|value| !bundle.evidence_refs.contains(value))
+        || bundle
+            .evidence_refs
+            .iter()
+            .any(|value| is_placeholder_ref(value))
+    {
+        return Err(VaultError::MissingEvidence);
+    }
+
+    let expected_bundle_hash = stable_id(
+        "production_adapter_readiness_bundle_hash",
+        &(
+            bundle.tenant_id.as_str(),
+            bundle.scope_ref.as_str(),
+            &bundle.adapter_decision_refs,
+            &bundle.provider_config_record_refs,
+            &bundle.provider_config_hashes,
+            &bundle.readiness_contract_refs,
+            &bundle.readiness_contract_hashes,
+            &bundle.evidence_refs,
+        ),
+    );
+    if bundle.bundle_hash != expected_bundle_hash
+        || bundle.bundle_id
+            != stable_id(
+                "production_adapter_readiness_bundle",
+                &(
+                    bundle.tenant_id.as_str(),
+                    bundle.scope_ref.as_str(),
+                    bundle.bundle_hash.as_str(),
+                ),
+            )
+    {
+        return Err(VaultError::MissingEvidence);
+    }
+
+    Ok(())
+}
+
 fn validate_rotation_decision(
     decision: &RotationEnforcementDecision,
     adapter_decisions: &[ProductionAdapterVerificationDecision],
@@ -6220,6 +6472,31 @@ mod tests {
             .collect()
     }
 
+    fn all_adapter_records() -> (
+        Vec<ProductionAdapterVerificationDecision>,
+        Vec<ProductionAdapterProviderConfigRecord>,
+        Vec<ProductionAdapterReadinessContractRecord>,
+    ) {
+        let adapters = all_adapter_evidence();
+        let mut decisions = Vec::new();
+        let mut config_records = Vec::new();
+        let mut contract_records = Vec::new();
+        for evidence in adapters {
+            let config_record = provider_config_record(evidence.kind, &evidence.provider_ref);
+            let contract_record = readiness_contract_record(&config_record);
+            let decision =
+                VaultController::verify_production_adapter_evidence_with_readiness_contract(
+                    &evidence,
+                    &config_record,
+                    &contract_record,
+                );
+            decisions.push(decision);
+            config_records.push(config_record);
+            contract_records.push(contract_record);
+        }
+        (decisions, config_records, contract_records)
+    }
+
     fn adapter_decision_with_records(
         kind: ProductionAdapterKind,
         provider_ref: &str,
@@ -7259,6 +7536,104 @@ mod tests {
             VaultController::load_production_adapter_readiness_contract(&record, &config_record)
                 .unwrap_err();
         assert_eq!(tamper_error, VaultError::MissingEvidence);
+    }
+
+    #[test]
+    fn production_adapter_readiness_bundle_binds_verified_records_without_authority() {
+        let (adapter_decisions, config_records, contract_records) = all_adapter_records();
+
+        let bundle = VaultController::production_adapter_readiness_bundle(
+            "adapter-readiness://tenant.a/r8",
+            &adapter_decisions,
+            &config_records,
+            &contract_records,
+            "vault.controller",
+        )
+        .unwrap();
+
+        assert_eq!(bundle.tenant_id, "tenant.a");
+        assert!(!bundle.contains_secret_material);
+        assert!(!bundle.can_issue_ticket_directly);
+        assert!(!bundle.can_execute_without_p0);
+        assert!(!bundle.can_commit_ledger);
+        assert_eq!(bundle.adapter_decision_refs.len(), adapter_decisions.len());
+        assert!(adapter_decisions
+            .iter()
+            .all(|decision| bundle.evidence_refs.contains(&decision.decision_id)));
+        assert!(config_records
+            .iter()
+            .all(|record| bundle.evidence_refs.contains(&record.record_id)
+                && bundle.evidence_refs.contains(&record.config_hash)));
+        assert!(contract_records
+            .iter()
+            .all(|record| bundle.evidence_refs.contains(&record.record_id)
+                && bundle.evidence_refs.contains(&record.contract_hash)));
+        let loaded = VaultController::load_production_adapter_readiness_bundle(&bundle).unwrap();
+        assert_eq!(loaded, bundle);
+    }
+
+    #[test]
+    fn production_adapter_readiness_bundle_rejects_swaps_and_authority_tamper() {
+        let (adapter_decisions, config_records, contract_records) = all_adapter_records();
+
+        let missing_contract_error = VaultController::production_adapter_readiness_bundle(
+            "adapter-readiness://tenant.a/r8",
+            &adapter_decisions,
+            &config_records,
+            &contract_records[1..],
+            "vault.controller",
+        )
+        .unwrap_err();
+        assert_eq!(missing_contract_error, VaultError::MissingEvidence);
+
+        let mut swapped_config = config_records.clone();
+        swapped_config[0].config_hash = "production_adapter_provider_config_hash.swapped".into();
+        let swapped_config_error = VaultController::production_adapter_readiness_bundle(
+            "adapter-readiness://tenant.a/r8",
+            &adapter_decisions,
+            &swapped_config,
+            &contract_records,
+            "vault.controller",
+        )
+        .unwrap_err();
+        assert_eq!(swapped_config_error, VaultError::MissingEvidence);
+
+        let mut cross_tenant_contracts = contract_records.clone();
+        cross_tenant_contracts[0].tenant_id = "tenant.b".into();
+        let tenant_error = VaultController::production_adapter_readiness_bundle(
+            "adapter-readiness://tenant.a/r8",
+            &adapter_decisions,
+            &config_records,
+            &cross_tenant_contracts,
+            "vault.controller",
+        )
+        .unwrap_err();
+        assert_eq!(tenant_error, VaultError::TenantMismatch);
+
+        let mut tampered_decision = adapter_decisions.clone();
+        tampered_decision[0].decision_id = "production_adapter_verification.tampered".into();
+        let tampered_decision_error = VaultController::production_adapter_readiness_bundle(
+            "adapter-readiness://tenant.a/r8",
+            &tampered_decision,
+            &config_records,
+            &contract_records,
+            "vault.controller",
+        )
+        .unwrap_err();
+        assert_eq!(tampered_decision_error, VaultError::MissingEvidence);
+
+        let mut bundle = VaultController::production_adapter_readiness_bundle(
+            "adapter-readiness://tenant.a/r8",
+            &adapter_decisions,
+            &config_records,
+            &contract_records,
+            "vault.controller",
+        )
+        .unwrap();
+        bundle.can_execute_without_p0 = true;
+        let authority_error =
+            VaultController::load_production_adapter_readiness_bundle(&bundle).unwrap_err();
+        assert_eq!(authority_error, VaultError::MissingEvidence);
     }
 
     #[test]

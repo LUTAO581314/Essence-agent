@@ -196,6 +196,11 @@ now pass locally.
   decision to preserve that adapter decision's sealed provider-config and
   readiness-contract evidence refs, so a consumer cannot keep only the adapter
   decision id while dropping the underlying sealed evidence bundle.
+  `ProductionAdapterReadinessBundle` now packages verified adapter decisions,
+  sealed provider config records, and sealed readiness contract records into a
+  tenant-bound review artifact that revalidates ids, hashes, evidence refs, and
+  non-authority flags without granting ticket, execution, verification, or
+  ledger authority.
   When rotation refs are configured it also requires every credential
   to bind to a verified rotation-enforcement decision, optionally bound to a
   verified RotationEnforcement adapter decision. It verifies production

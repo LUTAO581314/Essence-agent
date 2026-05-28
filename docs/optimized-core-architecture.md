@@ -307,6 +307,11 @@ Before credentialed or executable production actions, the architecture needs:
   storage, production auth, or hardened sandbox decisions that do not cite
   matching verified adapter decisions or that strip the cited adapter
   decision's sealed provider-config/readiness-contract evidence refs;
+  `ProductionAdapterReadinessBundle` can package verified adapter decisions,
+  sealed provider config records, and sealed readiness contract records into a
+  tenant-bound review artifact that revalidates ids, hashes, evidence refs, and
+  no-authority flags without granting ticket, execution, verification, or ledger
+  authority;
 - OS-level process sandbox hardening; the readiness gate can require a hardened
   sandbox profile ref and a tenant-bound sandbox decision over isolation,
   filesystem, network, syscall, resource policy, attestation refs, and a

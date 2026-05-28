@@ -289,6 +289,11 @@ typed-hardening readiness now also requires typed decisions that cite a
 verified adapter decision to retain that adapter decision's sealed
 provider-config and readiness-contract evidence refs, rejecting stripped
 consumer decisions that keep only the adapter decision id.
+`ProductionAdapterReadinessBundle` now packages verified adapter decisions,
+sealed provider config records, and sealed readiness contract records into a
+tenant-bound review artifact that revalidates ids, hashes, evidence refs, and
+non-authority flags without granting ticket, execution, verification, or ledger
+authority.
 Production auth evidence is
 verified into `ProductionAuthDecision` records bound to the configured auth
 provider, issuer/JWKS/token/session policy refs, and verified AuthProvider

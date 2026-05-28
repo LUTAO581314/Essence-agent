@@ -78,8 +78,10 @@ now pass locally.
   Summary shows task/done/running/waiting/blocking/failure counts from the same
   projection. `--limit`
   can cap rendered rows without truncating JSON projection
-  output, and `boundary` reports the shell-vs-P0 authority split. It has no
-  execute, approve, ticket, verify, or ledger commands.
+  output, and `boundary` reports the shell-vs-P0 authority split. The current
+  R10 demo guide is in `docs/r10-rich-cli-demo.md`, with a Windows helper at
+  `scripts/demo-r10-rich-cli.ps1`. It has no execute, approve, ticket, verify,
+  or ledger commands.
 - `moxi-gateway`: first trusted ingress boundary for deterministic tenant/user
   checks, rate limiting, blocked input scanning, and secret redaction.
 - `moxi-intent`: deterministic v0 intent compiler that turns trusted ingress

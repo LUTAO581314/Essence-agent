@@ -420,6 +420,106 @@ colorized badges, semantic task/blocker styles, and progress bars while
 preserving text fallbacks for deterministic tests and plain terminals. Plain
 `moxi` now enters the branded full-screen read-only TUI by default in real CLI
 use, while deterministic `--keys` runs still render snapshot frames for tests.
+Interactive startup no longer auto-rotates through Boot, Workspace Trust, and
+Agent Core pages; it starts at the logo page, waits for owner input, and uses
+Enter to advance Boot -> Trust -> Agent Core -> Workspace so onboarding feels
+like a real guarded workflow instead of disposable animation.
+The TUI now also owns a first `AgentSession` scaffold with a session id,
+read-only mode, detected workspace facts, initial agent messages, and session
+steps. The conversation and Task Tracking panes render this session state first,
+while runtime projection tasks remain visible as read-only supporting facts.
+Plain input submitted from the bottom task box now creates a new session turn:
+the owner message is appended to the conversation, `moxi-agent` emits a
+read-only planning reply, and Task Tracking receives the matching capture,
+planning, and backend-adapter placeholder steps. Slash commands remain
+display-only shell controls.
+Task Tracking now selects session steps rather than projection tasks: submitting
+a task follows the active session step, `j`/`k` switch to manual step selection,
+`/details` exposes selected-step detail, and `/follow` resumes active-step
+tracking.
+Workspace facts are now probed from the local project in read-only mode: the
+TUI session records cwd, `.moxi/agents.toml` presence, Git branch/dirty summary,
+Cargo workspace/package state, and `docs/status.md` presence. Header and
+conversation panes render these facts before any backend adapter is connected.
+The first state-backed slash commands are wired: `/status`, `/tasks`,
+`/agents`, and `/skills` append read-only session messages into the conversation
+using the current workspace facts, session steps, fallback agent profiles, skill
+list, and tool list. These commands still do not authorize, issue tickets,
+execute tools, or mutate the ledger.
+Active agents now load from `.moxi/agents.toml` when present. The read-only
+loader accepts `[[agents]]` records with `name`, `role`, `model`, and
+`reasoning`, skips records without `name`, defaults missing metadata to
+session-local values, and falls back to the documented `moxi-agent`,
+`ui-agent`, and `guard-agent` profiles when configuration is missing or empty.
+The conversation pane now has its own scroll state for multi-turn sessions:
+new user tasks and state-backed slash-command messages follow the latest
+message by default, PageUp/PageDown or scripted `chat-up`/`chat-down` switch to
+manual chat review, and the pane keeps a fixed status line plus hidden-line
+markers so older and newer messages remain discoverable without covering the
+input box or Task Tracking pane.
+User-submitted tasks now enter a local streaming visual state before completing:
+the conversation shows a `streaming` badge, the agent reply carries a loading
+marker and stream metadata, Task Tracking keeps the response-planning step
+active, and refresh advances the demo frame until the message is marked
+complete. This is still a P2-only visual state; no backend execution,
+authorization, ticket issuance, proof, or ledger commit occurs.
+`/context` is now state-backed. The session derives a context snapshot from cwd,
+Git status, Cargo workspace state, `docs/status.md`, `.moxi/agents.toml`, active
+agent profiles, conversation messages, and task steps. The bottom status line
+uses that snapshot for the context progress meter instead of a hard-coded
+number, and `/context` appends the source list into the conversation while
+remaining read-only.
+Workspace trust now has a first local decision skeleton. The TUI detects
+`.moxi/trust.toml`, records trust reasons from trust/config/git facts, and only
+shows the Workspace Trust gate during startup when review is needed or trust was
+denied. `/approve` captures read-only local-session trust intent and `/deny`
+marks the local TUI session denied; both remain owner-intent display signals
+only and do not authorize writes, shell commands, tickets, execution,
+verification, proofs, or ledger commits.
+The input area now owns risk prompting for task text. Before a risky task is
+submitted, the TUI detects write/delete/shell/Git/GitHub/execution-like intent
+as high risk and build/test/install/network/download-like intent as medium
+risk, renders the warning inside the thick input frame, and waits for
+`/approve` or `/deny`. Approval only converts the text into a local planning
+turn; denial drops it without creating a conversation turn or task steps.
+Per-message metadata is now structured. Each TUI message carries model,
+reasoning, tools, and status separately, then renders those fields compactly
+under the agent or owner message. This lets configured agents expose different
+model/reasoning/tool state in the conversation without changing the P2 shell
+boundary or claiming backend execution authority.
+The local demo response is now a read-only project analysis instead of a fixed
+placeholder. When a streamed task completes, `moxi-agent` summarizes the user
+task focus, workspace name, Git state, Cargo state, docs/config presence, and
+trust state, then states the next safe step and the P0-only boundary for writes,
+shell execution, Git/GitHub, tickets, proofs, and ledger commits.
+The slash command menu is now a lightweight command palette rather than a
+static help block. `?` opens the palette, `/` filters safe commands, Up/Down
+moves the selected command without moving Task Tracking, and Enter runs the
+selected local command. The palette includes status, tasks, agents, skills,
+context, trust, approve/deny, details/follow, boundary, help, and quit entries,
+while reminding the user that all effects remain P0-gated.
+The TUI now has a first session-persistence skeleton. `/save` writes a local
+JSON snapshot to `.moxi/session/tui-session.json` with schema version, session
+id, mode, workspace facts, trust state, context sources, messages, steps, active
+step, and turn count. `/resume` reads that file and appends a summary message
+without overwriting the active session, so persistence remains local, explicit,
+and P2-only.
+The startup and Agent Core pages now have a stronger visual pass for demos.
+Boot renders a large `MOXI // AGENT` ANSI wordmark, Silver Core / P0 / P2 status
+chips, and an initialization waterfall tied to workspace facts. The Agent Core
+page separates identity, trust/mode/context, runtime facts, configured agents,
+tools, skills, and the session snapshot path so the first-run experience feels
+like a guarded agent console rather than a generic dashboard.
+The R10 TUI test suite now hardens the end-to-end demo path: onboarding through
+Boot -> Trust -> Agent Core -> Workspace, task submission, streaming completion,
+read-only analysis, snapshot save/resume, and quit are covered as one flow. A
+separate high-risk approval test verifies that `/approve` for a risky task only
+creates a local planning turn and does not mark the workspace trusted or grant
+execution authority.
+The local demo runbook is now documented in `docs/r10-rich-cli-demo.md`, with a
+PowerShell helper script at `scripts/demo-r10-rich-cli.ps1`. The script supports
+`interactive`, `boot`, `core`, `flow`, and `status` modes so the Rich CLI can be
+shown live or rendered deterministically for review.
 The footer is now a command pane with safe display-only commands: `/help`,
 `/status`, `/boundary`, `/demo`, `/filter <text>`, `/clear`, and `/quit`.
 After visual review against Claude-style agent CLIs, the TUI has shifted from a

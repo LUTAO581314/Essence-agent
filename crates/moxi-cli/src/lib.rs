@@ -17,6 +17,8 @@ use ratatui::{
 use std::{
     env, fs,
     io::{BufRead, Stdout, Write},
+    path::{Path, PathBuf},
+    process::Command,
     thread,
     time::Duration,
 };
@@ -171,12 +173,17 @@ struct TuiOptions {
 struct TuiState {
     screen: TuiScreen,
     active_pane: TuiPane,
+    session: TuiAgentSession,
     filter: Option<String>,
     command_input: String,
     command_status: String,
+    pending_risk: Option<TuiRiskPrompt>,
+    conversation_scroll: usize,
+    follow_latest_message: bool,
     selected_task_index: usize,
     follow_active_step: bool,
     show_command_palette: bool,
+    command_palette_index: usize,
     refresh_count: usize,
     should_quit: bool,
 }
@@ -186,16 +193,1050 @@ impl Default for TuiState {
         Self {
             screen: TuiScreen::Workspace,
             active_pane: TuiPane::Overview,
+            session: TuiAgentSession::default(),
             filter: None,
             command_input: String::new(),
             command_status: "ready: ? shortcuts · / command menu".into(),
+            pending_risk: None,
+            conversation_scroll: 0,
+            follow_latest_message: true,
             selected_task_index: 0,
             follow_active_step: true,
             show_command_palette: false,
+            command_palette_index: 0,
             refresh_count: 0,
             should_quit: false,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct TuiAgentSession {
+    id: String,
+    mode: TuiSessionMode,
+    workspace: WorkspaceFacts,
+    trust: TuiTrustState,
+    agents: Vec<TuiAgentProfile>,
+    skills: Vec<String>,
+    tools: Vec<String>,
+    messages: Vec<TuiMessage>,
+    steps: Vec<TuiStep>,
+    active_step_index: usize,
+    loading_tick: usize,
+    turn_count: usize,
+}
+
+impl Default for TuiAgentSession {
+    fn default() -> Self {
+        let workspace = WorkspaceFacts::detect();
+        let agents = TuiAgentProfile::load_for_workspace(&workspace);
+        Self {
+            id: "local-r10-demo-session".to_owned(),
+            mode: TuiSessionMode::ReadOnly,
+            workspace: workspace.clone(),
+            trust: TuiTrustState::from_workspace(&workspace),
+            agents,
+            skills: vec![
+                "tui.design".to_owned(),
+                "risk.review".to_owned(),
+                "docs.prepare".to_owned(),
+                "github.prepare".to_owned(),
+            ],
+            tools: vec![
+                "file.read".to_owned(),
+                "repo.inspect".to_owned(),
+                "git.status".to_owned(),
+                "context.trace".to_owned(),
+            ],
+            messages: vec![
+                TuiMessage {
+                    agent: "moxi-agent".to_owned(),
+                    role: "orchestrator".to_owned(),
+                    body: format!(
+                        "I opened a guarded read-only session for {}.",
+                        workspace.summary()
+                    ),
+                    task: None,
+                    metadata: TuiMessageMeta::new(
+                        "session-local",
+                        "medium",
+                        ["workspace.probe"],
+                        "boundary: read-only display",
+                    ),
+                    state: TuiMessageState::Complete,
+                },
+                TuiMessage {
+                    agent: "guard-agent".to_owned(),
+                    role: "risk".to_owned(),
+                    body: "Startup is waiting for owner-controlled handoff before workbench use."
+                        .to_owned(),
+                    task: None,
+                    metadata: TuiMessageMeta::new(
+                        "guard",
+                        "medium",
+                        ["trust.boundary"],
+                        "boundary: P2 display-only",
+                    ),
+                    state: TuiMessageState::Waiting,
+                },
+            ],
+            steps: vec![
+                TuiStep::done(1, "Create session shell", "TUI state is resident"),
+                TuiStep::active(
+                    1,
+                    "Collect workspace facts",
+                    "cwd/config/mode are available to the workbench",
+                ),
+                TuiStep::pending(
+                    1,
+                    "Wait for task input",
+                    "next turn will bind input to session",
+                ),
+            ],
+            active_step_index: 1,
+            loading_tick: 0,
+            turn_count: 1,
+        }
+    }
+}
+
+impl TuiAgentSession {
+    const PERSISTENCE_SCHEMA_VERSION: u8 = 1;
+
+    fn push_system_message(&mut self, topic: &str, body: String) {
+        let meta = self.agent_meta(
+            "moxi-agent",
+            ["session.state"],
+            "boundary: read-only display",
+        );
+        self.messages.push(TuiMessage {
+            agent: "moxi-agent".to_owned(),
+            role: topic.to_owned(),
+            body,
+            task: None,
+            metadata: meta,
+            state: TuiMessageState::Complete,
+        });
+    }
+
+    fn push_status_message(&mut self) {
+        self.push_system_message(
+            "status",
+            format!(
+                "Session {} is {} in {}. git={}, cargo={}, config={}, docs={}, steps={}.",
+                self.id,
+                self.mode.label(),
+                self.workspace.short_path,
+                self.workspace.git_state,
+                self.workspace.cargo_state,
+                self.workspace.config_state,
+                self.workspace.docs_state,
+                self.steps.len()
+            ),
+        );
+    }
+
+    fn push_tasks_message(&mut self) {
+        let active = self
+            .steps
+            .get(self.active_step_index)
+            .map(|step| format!("Turn {} / {}", step.turn, step.label))
+            .unwrap_or_else(|| "<none>".to_owned());
+        self.push_system_message(
+            "tasks",
+            format!(
+                "Task Tracking has {} session steps; active step is {}.",
+                self.steps.len(),
+                active
+            ),
+        );
+    }
+
+    fn push_agents_message(&mut self) {
+        let agents = self
+            .agents
+            .iter()
+            .map(TuiAgentProfile::summary)
+            .collect::<Vec<_>>()
+            .join("; ");
+        self.push_system_message("agents", format!("Active agents: {agents}."));
+    }
+
+    fn push_skills_message(&mut self) {
+        self.push_system_message(
+            "skills",
+            format!(
+                "Loaded skills: {}. Available tools: {}.",
+                self.skills.join(", "),
+                self.tools.join(", ")
+            ),
+        );
+    }
+
+    fn push_context_message(&mut self) {
+        let snapshot = self.context_snapshot();
+        let sources = snapshot
+            .sources
+            .iter()
+            .map(|source| format!("{}={} ({})", source.label, source.state, source.detail))
+            .collect::<Vec<_>>()
+            .join("; ");
+        self.push_system_message(
+            "context",
+            format!(
+                "Context meter is {}%. Sources: {sources}.",
+                snapshot.percent
+            ),
+        );
+    }
+
+    fn push_resume_message(&mut self, snapshot: &TuiSessionSnapshot) {
+        self.push_system_message(
+            "resume",
+            format!(
+                "Found persisted TUI snapshot schema={} session={} turn={} messages={} steps={} context={}%. It was read as local state only; current session was not overwritten.",
+                snapshot.schema_version,
+                snapshot.session_id,
+                snapshot.turn_count,
+                snapshot.messages.len(),
+                snapshot.steps.len(),
+                snapshot.context_percent
+            ),
+        );
+    }
+
+    fn push_trust_message(&mut self) {
+        let reasons = self.trust.reasons.join("; ");
+        self.push_system_message(
+            "trust",
+            format!(
+                "Workspace trust is {}. Decision: {}. Reasons: {}.",
+                self.trust.status.label(),
+                self.trust.decision_label(),
+                reasons
+            ),
+        );
+    }
+
+    fn approve_read_only_trust(&mut self) {
+        self.trust.status = TuiTrustStatus::TrustedReadOnly;
+        self.trust.reasons = vec![
+            "owner accepted this workspace for read-only TUI inspection".to_owned(),
+            "writes, shell commands, Git/GitHub, tickets, proofs, and ledger commits remain P0-gated"
+                .to_owned(),
+        ];
+    }
+
+    fn deny_trust(&mut self) {
+        self.trust.status = TuiTrustStatus::Denied;
+        self.trust.reasons = vec![
+            "owner denied workspace trust intent for this local TUI session".to_owned(),
+            "P2 shell will keep risky actions blocked".to_owned(),
+        ];
+    }
+
+    fn context_snapshot(&self) -> TuiContextSnapshot {
+        let sources = vec![
+            TuiContextSource::available("cwd", "present", &self.workspace.cwd, 10),
+            TuiContextSource::new(
+                "git",
+                &self.workspace.git_state,
+                "branch and dirty-state summary",
+                !self.workspace.git_state.contains("not a git repo")
+                    && !self.workspace.git_state.contains("unavailable")
+                    && !self.workspace.git_state.contains("failed"),
+                12,
+            ),
+            TuiContextSource::new(
+                "cargo",
+                &self.workspace.cargo_state,
+                "workspace/package summary",
+                !self.workspace.cargo_state.contains("missing"),
+                14,
+            ),
+            TuiContextSource::new(
+                "docs/status.md",
+                &self.workspace.docs_state,
+                "project status document",
+                self.workspace.docs_state == "present",
+                14,
+            ),
+            TuiContextSource::new(
+                ".moxi/agents.toml",
+                &self.workspace.config_state,
+                "agent configuration source",
+                self.workspace.config_state == "present",
+                12,
+            ),
+            TuiContextSource::available(
+                "active agents",
+                &format!("{} profiles", self.agents.len()),
+                "runtime or fallback agent roster",
+                10,
+            ),
+            TuiContextSource::available(
+                "messages",
+                &format!("{} messages", self.messages.len()),
+                "current conversation window",
+                14,
+            ),
+            TuiContextSource::available(
+                "steps",
+                &format!("{} steps", self.steps.len()),
+                "task tracking state",
+                14,
+            ),
+        ];
+        TuiContextSnapshot::from_sources(sources)
+    }
+
+    fn submit_user_task(&mut self, task: &str) {
+        let task = task.trim();
+        if task.is_empty() {
+            return;
+        }
+
+        self.turn_count += 1;
+        let turn = self.turn_count;
+        self.messages.push(TuiMessage {
+            agent: "owner".to_owned(),
+            role: "user".to_owned(),
+            body: task.to_owned(),
+            task: None,
+            metadata: TuiMessageMeta::new(
+                "owner-input",
+                "none",
+                ["local.tui"],
+                "source: input task",
+            ),
+            state: TuiMessageState::Complete,
+        });
+        self.messages.push(TuiMessage {
+            agent: "moxi-agent".to_owned(),
+            role: "orchestrator".to_owned(),
+            body: format!(
+                "Turn {turn} is streaming: reading workspace facts and preparing a safe plan..."
+            ),
+            task: Some(task.to_owned()),
+            metadata: self.agent_meta("moxi-agent", ["task.plan"], "state: streaming"),
+            state: TuiMessageState::Streaming,
+        });
+
+        self.steps.push(TuiStep::done(
+            turn,
+            "Capture user task",
+            "input was appended to the session message stream",
+        ));
+        self.steps.push(TuiStep::active(
+            turn,
+            "Prepare read-only plan",
+            "next step will connect project facts and agent response generation",
+        ));
+        self.steps.push(TuiStep::pending(
+            turn,
+            "Await backend adapter",
+            "P2 has not executed tools or requested P0 authority",
+        ));
+        self.active_step_index = self.steps.len().saturating_sub(2);
+        self.loading_tick = 0;
+    }
+
+    fn advance_loading(&mut self) {
+        let workspace = self.workspace.clone();
+        let trust = self.trust.status;
+        let Some(message) = self
+            .messages
+            .iter_mut()
+            .rev()
+            .find(|message| message.state == TuiMessageState::Streaming)
+        else {
+            return;
+        };
+        self.loading_tick = self.loading_tick.saturating_add(1);
+        let turn = self.turn_count;
+        if self.loading_tick >= 3 {
+            let task = message.task.as_deref().unwrap_or("<unknown task>");
+            message.body = read_only_project_analysis(turn, task, &workspace, trust);
+            message.metadata.status = "state: complete".to_owned();
+            message.state = TuiMessageState::Complete;
+            if let Some(step) = self.steps.get_mut(self.active_step_index) {
+                step.state = TuiStepState::Done;
+                step.detail =
+                    "read-only response prepared; no execution authority was used".to_owned();
+            }
+            if let Some(next_step) = self.steps.get_mut(self.active_step_index.saturating_add(1)) {
+                next_step.state = TuiStepState::Active;
+                next_step.detail = "waiting for a real backend adapter or owner command".to_owned();
+                self.active_step_index = self.active_step_index.saturating_add(1);
+            }
+        } else {
+            let frame = loading_frame(self.loading_tick);
+            message.body = format!(
+                "{frame} Turn {turn} streaming: reading workspace facts, checking risk, and drafting response..."
+            );
+            message.metadata.status = format!("stream tick {}", self.loading_tick);
+        }
+    }
+
+    fn is_streaming(&self) -> bool {
+        self.messages
+            .iter()
+            .any(|message| message.state == TuiMessageState::Streaming)
+    }
+
+    fn agent_meta<const N: usize>(
+        &self,
+        agent_name: &str,
+        tools: [&str; N],
+        status: &str,
+    ) -> TuiMessageMeta {
+        if let Some(agent) = self.agents.iter().find(|agent| agent.name == agent_name) {
+            TuiMessageMeta::new(&agent.model, &agent.reasoning, tools, status)
+        } else {
+            TuiMessageMeta::new("session-local", "medium", tools, status)
+        }
+    }
+
+    fn persistence_snapshot(&self) -> TuiSessionSnapshot {
+        let context = self.context_snapshot();
+        TuiSessionSnapshot {
+            schema_version: Self::PERSISTENCE_SCHEMA_VERSION,
+            session_id: self.id.clone(),
+            mode: self.mode,
+            workspace: self.workspace.clone(),
+            trust: self.trust.clone(),
+            context_percent: context.percent,
+            context_sources: context.sources,
+            messages: self.messages.clone(),
+            steps: self.steps.clone(),
+            active_step_index: self.active_step_index,
+            turn_count: self.turn_count,
+        }
+    }
+
+    fn persistence_path(&self) -> PathBuf {
+        Path::new(&self.workspace.cwd)
+            .join(".moxi")
+            .join("session")
+            .join("tui-session.json")
+    }
+
+    fn save_persistence_snapshot(&self) -> CliResult<PathBuf> {
+        let path = self.persistence_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let json = serde_json::to_string_pretty(&self.persistence_snapshot())?;
+        fs::write(&path, json)?;
+        Ok(path)
+    }
+
+    fn load_persistence_snapshot(path: &Path) -> CliResult<TuiSessionSnapshot> {
+        let text = fs::read_to_string(path)?;
+        Ok(serde_json::from_str(&text)?)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct TuiSessionSnapshot {
+    schema_version: u8,
+    session_id: String,
+    mode: TuiSessionMode,
+    workspace: WorkspaceFacts,
+    trust: TuiTrustState,
+    context_percent: u8,
+    context_sources: Vec<TuiContextSource>,
+    messages: Vec<TuiMessage>,
+    steps: Vec<TuiStep>,
+    active_step_index: usize,
+    turn_count: usize,
+}
+
+fn read_only_project_analysis(
+    turn: usize,
+    task: &str,
+    workspace: &WorkspaceFacts,
+    trust: TuiTrustStatus,
+) -> String {
+    let focus = read_only_task_focus(task);
+    format!(
+        "Turn {turn} read-only analysis for \"{task}\": focus={focus}; workspace={} ; git={} ; cargo={} ; docs={} ; config={} ; trust={}. Next safe step: inspect context or ask for a concrete plan. P0 remains required for writes, shell execution, Git/GitHub, tickets, proofs, or ledger commits.",
+        workspace.short_path,
+        workspace.git_state,
+        workspace.cargo_state,
+        workspace.docs_state,
+        workspace.config_state,
+        trust.label(),
+    )
+}
+
+fn read_only_task_focus(task: &str) -> &'static str {
+    let normalized = normalize_token(task);
+    let words = normalized
+        .split('_')
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>();
+    if words
+        .iter()
+        .any(|word| matches!(*word, "status" | "state" | "progress"))
+    {
+        "project status"
+    } else if words
+        .iter()
+        .any(|word| matches!(*word, "agent" | "agents" | "skill" | "skills"))
+    {
+        "agent configuration"
+    } else if words
+        .iter()
+        .any(|word| matches!(*word, "test" | "tests" | "build" | "cargo"))
+    {
+        "verification readiness"
+    } else if words
+        .iter()
+        .any(|word| matches!(*word, "risk" | "trust" | "approve" | "approval"))
+    {
+        "trust and risk"
+    } else {
+        "workspace inspection"
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct TuiTrustState {
+    status: TuiTrustStatus,
+    reasons: Vec<String>,
+}
+
+impl TuiTrustState {
+    fn from_workspace(workspace: &WorkspaceFacts) -> Self {
+        let mut reasons = Vec::new();
+        if workspace.trust_state == "present" {
+            reasons.push(".moxi/trust.toml is present".to_owned());
+        } else {
+            reasons.push(".moxi/trust.toml is missing; workspace trust is unknown".to_owned());
+        }
+        if workspace.config_state == "present" {
+            reasons.push(".moxi/agents.toml is present and may affect active agents".to_owned());
+        } else {
+            reasons.push(".moxi/agents.toml is missing; using fallback agents".to_owned());
+        }
+        if workspace.git_state.contains("dirty") {
+            reasons.push(format!(
+                "Git workspace has pending changes: {}",
+                workspace.git_state
+            ));
+        }
+        let status = if workspace.trust_state == "present" {
+            TuiTrustStatus::KnownReadOnly
+        } else {
+            TuiTrustStatus::NeedsReview
+        };
+        Self { status, reasons }
+    }
+
+    fn should_show_gate(&self) -> bool {
+        matches!(
+            self.status,
+            TuiTrustStatus::NeedsReview | TuiTrustStatus::Denied
+        )
+    }
+
+    fn decision_label(&self) -> &'static str {
+        match self.status {
+            TuiTrustStatus::KnownReadOnly => "trust file present; read-only entry can continue",
+            TuiTrustStatus::NeedsReview => "owner review recommended before entering workspace",
+            TuiTrustStatus::TrustedReadOnly => "owner accepted read-only local session intent",
+            TuiTrustStatus::Denied => "owner denied workspace trust intent",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+enum TuiTrustStatus {
+    KnownReadOnly,
+    NeedsReview,
+    TrustedReadOnly,
+    Denied,
+}
+
+impl TuiTrustStatus {
+    fn label(self) -> &'static str {
+        match self {
+            Self::KnownReadOnly => "known-read-only",
+            Self::NeedsReview => "needs-review",
+            Self::TrustedReadOnly => "trusted-read-only",
+            Self::Denied => "denied",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct TuiContextSnapshot {
+    percent: u8,
+    sources: Vec<TuiContextSource>,
+}
+
+impl TuiContextSnapshot {
+    fn from_sources(sources: Vec<TuiContextSource>) -> Self {
+        let total = sources
+            .iter()
+            .map(|source| source.weight)
+            .sum::<u16>()
+            .max(1);
+        let used = sources
+            .iter()
+            .filter(|source| source.available)
+            .map(|source| source.weight)
+            .sum::<u16>();
+        let percent = ((used * 100) / total).min(100) as u8;
+        Self { percent, sources }
+    }
+
+    fn ratio(&self) -> f32 {
+        self.percent as f32 / 100.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct TuiContextSource {
+    label: String,
+    state: String,
+    detail: String,
+    available: bool,
+    weight: u16,
+}
+
+impl TuiContextSource {
+    fn available(label: &str, state: &str, detail: &str, weight: u16) -> Self {
+        Self::new(label, state, detail, true, weight)
+    }
+
+    fn new(label: &str, state: &str, detail: &str, available: bool, weight: u16) -> Self {
+        Self {
+            label: label.to_owned(),
+            state: state.to_owned(),
+            detail: detail.to_owned(),
+            available,
+            weight,
+        }
+    }
+}
+
+fn loading_frame(tick: usize) -> &'static str {
+    match tick % 4 {
+        0 => "[|]",
+        1 => "[/]",
+        2 => "[-]",
+        _ => "[\\]",
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct TuiAgentProfile {
+    name: String,
+    role: String,
+    model: String,
+    reasoning: String,
+}
+
+impl TuiAgentProfile {
+    fn load_for_workspace(workspace: &WorkspaceFacts) -> Vec<Self> {
+        let path = Path::new(&workspace.cwd).join(".moxi").join("agents.toml");
+        let Ok(text) = fs::read_to_string(path) else {
+            return Self::fallback_profiles();
+        };
+        let agents = Self::parse_agents_toml(&text);
+        if agents.is_empty() {
+            Self::fallback_profiles()
+        } else {
+            agents
+        }
+    }
+
+    fn fallback_profiles() -> Vec<Self> {
+        vec![
+            Self::new("moxi-agent", "orchestrator", "session-local", "medium"),
+            Self::new("ui-agent", "rich-cli", "session-local", "medium"),
+            Self::new("guard-agent", "risk", "session-local", "medium"),
+        ]
+    }
+
+    fn parse_agents_toml(text: &str) -> Vec<Self> {
+        let mut agents = Vec::new();
+        let mut current = ParsedAgentProfile::default();
+        let mut in_agent = false;
+
+        for raw_line in text.lines() {
+            let line = raw_line.split('#').next().unwrap_or("").trim();
+            if line.is_empty() {
+                continue;
+            }
+            if line == "[[agents]]" {
+                if in_agent {
+                    if let Some(agent) = current.finish() {
+                        agents.push(agent);
+                    }
+                    current = ParsedAgentProfile::default();
+                }
+                in_agent = true;
+                continue;
+            }
+            if !in_agent {
+                continue;
+            }
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            let Some(value) = parse_toml_string(value.trim()) else {
+                continue;
+            };
+            match key.trim() {
+                "name" => current.name = Some(value),
+                "role" => current.role = Some(value),
+                "model" => current.model = Some(value),
+                "reasoning" => current.reasoning = Some(value),
+                _ => {}
+            }
+        }
+
+        if in_agent {
+            if let Some(agent) = current.finish() {
+                agents.push(agent);
+            }
+        }
+        agents
+    }
+
+    fn new(name: &str, role: &str, model: &str, reasoning: &str) -> Self {
+        Self {
+            name: name.to_owned(),
+            role: role.to_owned(),
+            model: model.to_owned(),
+            reasoning: reasoning.to_owned(),
+        }
+    }
+
+    fn summary(&self) -> String {
+        format!(
+            "{} [{}] model={} reasoning={}",
+            self.name, self.role, self.model, self.reasoning
+        )
+    }
+}
+
+#[derive(Default)]
+struct ParsedAgentProfile {
+    name: Option<String>,
+    role: Option<String>,
+    model: Option<String>,
+    reasoning: Option<String>,
+}
+
+impl ParsedAgentProfile {
+    fn finish(self) -> Option<TuiAgentProfile> {
+        let name = self.name?;
+        Some(TuiAgentProfile {
+            role: self.role.unwrap_or_else(|| "agent".to_owned()),
+            model: self.model.unwrap_or_else(|| "session-local".to_owned()),
+            reasoning: self.reasoning.unwrap_or_else(|| "medium".to_owned()),
+            name,
+        })
+    }
+}
+
+fn parse_toml_string(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.len() < 2 || !value.starts_with('"') || !value.ends_with('"') {
+        return None;
+    }
+    Some(value[1..value.len() - 1].replace("\\\"", "\""))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+enum TuiSessionMode {
+    ReadOnly,
+}
+
+impl TuiSessionMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read-only",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct WorkspaceFacts {
+    cwd: String,
+    short_path: String,
+    config_path: String,
+    config_state: String,
+    trust_path: String,
+    trust_state: String,
+    git_state: String,
+    cargo_state: String,
+    docs_state: String,
+    trust: String,
+}
+
+impl WorkspaceFacts {
+    fn detect() -> Self {
+        let cwd_path = env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("C:\\MOXI-Essence-agent\\MOXI-Essence-agent"));
+        Self::detect_at(&cwd_path)
+    }
+
+    fn detect_at(cwd_path: &Path) -> Self {
+        let cwd = cwd_path.display().to_string();
+        let short_path = cwd_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .or_else(|| {
+                cwd.rsplit(['\\', '/'])
+                    .next()
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| cwd.clone());
+        let config_path = ".moxi\\agents.toml".to_owned();
+        let trust_path = ".moxi\\trust.toml".to_owned();
+        let config_state = presence_state(&cwd_path.join(".moxi").join("agents.toml"));
+        let trust_state = presence_state(&cwd_path.join(".moxi").join("trust.toml"));
+        let docs_state = presence_state(&cwd_path.join("docs").join("status.md"));
+        let cargo_state = cargo_workspace_state(&cwd_path.join("Cargo.toml"));
+        let git_state = git_workspace_state(cwd_path);
+        Self {
+            config_path,
+            config_state,
+            trust_path,
+            trust_state,
+            git_state,
+            cargo_state,
+            docs_state,
+            trust: "pending".to_owned(),
+            cwd,
+            short_path,
+        }
+    }
+
+    fn summary(&self) -> String {
+        format!(
+            "{} | git: {} | cargo: {}",
+            self.short_path, self.git_state, self.cargo_state
+        )
+    }
+}
+
+fn presence_state(path: &Path) -> String {
+    if path.is_file() {
+        "present".to_owned()
+    } else {
+        "missing".to_owned()
+    }
+}
+
+fn cargo_workspace_state(path: &Path) -> String {
+    let Ok(text) = fs::read_to_string(path) else {
+        return "Cargo.toml missing".to_owned();
+    };
+    let member_count = text.matches("\"crates/").count();
+    if text.contains("[workspace]") {
+        format!("workspace {member_count} crates")
+    } else {
+        "package".to_owned()
+    }
+}
+
+fn git_workspace_state(cwd: &Path) -> String {
+    if !cwd.join(".git").exists() {
+        return "not a git repo".to_owned();
+    }
+    let Ok(output) = Command::new("git")
+        .args(["status", "--short", "--branch"])
+        .current_dir(cwd)
+        .output()
+    else {
+        return "git unavailable".to_owned();
+    };
+    if !output.status.success() {
+        return "git status failed".to_owned();
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut lines = text.lines();
+    let branch = lines
+        .next()
+        .unwrap_or("## <unknown>")
+        .trim_start_matches("## ")
+        .trim()
+        .to_owned();
+    let dirty_count = lines.filter(|line| !line.trim().is_empty()).count();
+    if dirty_count == 0 {
+        format!("{branch} clean")
+    } else {
+        format!("{branch} dirty {dirty_count}")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct TuiMessage {
+    agent: String,
+    role: String,
+    body: String,
+    task: Option<String>,
+    metadata: TuiMessageMeta,
+    state: TuiMessageState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct TuiMessageMeta {
+    model: String,
+    reasoning: String,
+    tools: Vec<String>,
+    status: String,
+}
+
+impl TuiMessageMeta {
+    fn new<const N: usize>(model: &str, reasoning: &str, tools: [&str; N], status: &str) -> Self {
+        Self {
+            model: model.to_owned(),
+            reasoning: reasoning.to_owned(),
+            tools: tools.iter().map(|tool| (*tool).to_owned()).collect(),
+            status: status.to_owned(),
+        }
+    }
+
+    fn render(&self) -> String {
+        format!(
+            "model: {} | reasoning: {} | tools: {} | {}",
+            self.model,
+            self.reasoning,
+            self.tools.join(","),
+            self.status
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+enum TuiMessageState {
+    Complete,
+    Streaming,
+    Waiting,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TuiRiskPrompt {
+    task: String,
+    level: TuiRiskLevel,
+    reason: String,
+}
+
+impl TuiRiskPrompt {
+    fn detect(task: &str) -> Option<Self> {
+        let normalized = normalize_token(task);
+        let words = normalized
+            .split('_')
+            .filter(|word| !word.is_empty())
+            .collect::<Vec<_>>();
+        let high_tokens = [
+            "delete",
+            "remove",
+            "rm",
+            "write",
+            "edit",
+            "modify",
+            "commit",
+            "push",
+            "github",
+            "shell",
+            "execute",
+            "powershell",
+            "cargo_run",
+        ];
+        let medium_tokens = ["install", "network", "download", "test", "tests", "build"];
+        if high_tokens.iter().any(|token| {
+            words.contains(token)
+                || (token.contains('_') && normalized.contains(token))
+                || (*token == "rm" && normalized == "rm")
+        }) {
+            Some(Self {
+                task: task.to_owned(),
+                level: TuiRiskLevel::High,
+                reason: "task appears to request write, shell, Git/GitHub, or execution authority"
+                    .to_owned(),
+            })
+        } else if medium_tokens.iter().any(|token| words.contains(token)) {
+            Some(Self {
+                task: task.to_owned(),
+                level: TuiRiskLevel::Medium,
+                reason: "task may require build, test, install, network, or expanded context"
+                    .to_owned(),
+            })
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TuiRiskLevel {
+    Medium,
+    High,
+}
+
+impl TuiRiskLevel {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+
+    fn color(self) -> Color {
+        match self {
+            Self::Medium => Color::Yellow,
+            Self::High => Color::Red,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct TuiStep {
+    turn: usize,
+    label: String,
+    detail: String,
+    state: TuiStepState,
+}
+
+impl TuiStep {
+    fn done(turn: usize, label: &str, detail: &str) -> Self {
+        Self::new(turn, label, detail, TuiStepState::Done)
+    }
+
+    fn active(turn: usize, label: &str, detail: &str) -> Self {
+        Self::new(turn, label, detail, TuiStepState::Active)
+    }
+
+    fn pending(turn: usize, label: &str, detail: &str) -> Self {
+        Self::new(turn, label, detail, TuiStepState::Pending)
+    }
+
+    fn new(turn: usize, label: &str, detail: &str, state: TuiStepState) -> Self {
+        Self {
+            turn,
+            label: label.to_owned(),
+            detail: detail.to_owned(),
+            state,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+enum TuiStepState {
+    Done,
+    Active,
+    Pending,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -245,6 +1286,8 @@ enum TuiKey {
     Tab,
     Focus(TuiPane),
     Screen(TuiScreen),
+    MoveConversationDown,
+    MoveConversationUp,
     MoveTaskDown,
     MoveTaskUp,
     Refresh,
@@ -421,6 +1464,8 @@ fn run_tui(options: TuiOptions, writer: &mut impl Write) -> CliResult<()> {
     let mut state = TuiState::default();
     let mut projection = project_status(options.status.clone(), None::<&[u8]>)?;
     if options.interactive {
+        state.screen = TuiScreen::Boot;
+        state.command_status = "startup: Enter continues · q exits".into();
         return run_tui_interactive(options, projection, state);
     }
     for key in &options.keys {
@@ -466,20 +1511,6 @@ fn run_tui_interactive_inner(
 ) -> CliResult<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
-    for screen in [TuiScreen::Boot, TuiScreen::Trust, TuiScreen::Core] {
-        state.screen = screen;
-        terminal.draw(|frame| {
-            let area = frame.area();
-            render_tui_snapshot(frame, area, projection, state);
-        })?;
-        thread::sleep(Duration::from_millis(match screen {
-            TuiScreen::Boot => 720,
-            TuiScreen::Trust => 520,
-            TuiScreen::Core => 760,
-            TuiScreen::Workspace => 0,
-        }));
-    }
-    state.screen = TuiScreen::Workspace;
     loop {
         terminal.draw(|frame| {
             let area = frame.area();
@@ -507,6 +1538,8 @@ fn tui_key_from_event(event: KeyEvent) -> Option<TuiKey> {
         KeyCode::Tab => Some(TuiKey::Tab),
         KeyCode::Enter => Some(TuiKey::SubmitCommand),
         KeyCode::Backspace => Some(TuiKey::Backspace),
+        KeyCode::PageDown => Some(TuiKey::MoveConversationDown),
+        KeyCode::PageUp => Some(TuiKey::MoveConversationUp),
         KeyCode::Down => Some(TuiKey::MoveTaskDown),
         KeyCode::Up => Some(TuiKey::MoveTaskUp),
         KeyCode::Char('?') => Some(TuiKey::Focus(TuiPane::Keys)),
@@ -534,17 +1567,48 @@ fn apply_tui_key(state: &mut TuiState, key: &TuiKey) {
         TuiKey::Tab => state.active_pane = state.active_pane.next(),
         TuiKey::Focus(pane) => state.active_pane = *pane,
         TuiKey::Screen(screen) => state.screen = *screen,
+        TuiKey::MoveConversationDown => {
+            state.active_pane = TuiPane::Overview;
+            state.follow_latest_message = false;
+            state.conversation_scroll = state.conversation_scroll.saturating_add(1);
+        }
+        TuiKey::MoveConversationUp => {
+            state.active_pane = TuiPane::Overview;
+            state.follow_latest_message = false;
+            state.conversation_scroll = state.conversation_scroll.saturating_sub(1);
+        }
         TuiKey::MoveTaskDown => {
-            state.active_pane = TuiPane::Tasks;
-            state.follow_active_step = false;
-            state.selected_task_index = state.selected_task_index.saturating_add(1);
+            if state.show_command_palette {
+                move_command_palette_selection(state, 1);
+            } else {
+                state.active_pane = TuiPane::Tasks;
+                state.follow_active_step = false;
+                let max_index = state.session.steps.len().saturating_sub(1);
+                state.selected_task_index =
+                    state.selected_task_index.saturating_add(1).min(max_index);
+            }
         }
         TuiKey::MoveTaskUp => {
-            state.active_pane = TuiPane::Tasks;
-            state.follow_active_step = false;
-            state.selected_task_index = state.selected_task_index.saturating_sub(1);
+            if state.show_command_palette {
+                move_command_palette_selection(state, -1);
+            } else {
+                state.active_pane = TuiPane::Tasks;
+                state.follow_active_step = false;
+                state.selected_task_index = state.selected_task_index.saturating_sub(1);
+            }
         }
-        TuiKey::Refresh => state.refresh_count += 1,
+        TuiKey::Refresh => {
+            state.refresh_count += 1;
+            state.session.advance_loading();
+            state.follow_latest_message = true;
+            state.conversation_scroll = 0;
+            state.selected_task_index = state.session.active_step_index;
+            state.command_status = if state.session.is_streaming() {
+                "streaming agent response; refresh advances local demo frame".into()
+            } else {
+                "latest agent response is complete; shell remains read-only".into()
+            };
+        }
         TuiKey::Quit => state.should_quit = true,
         TuiKey::Filter(value) => {
             state.filter = if value.is_empty() {
@@ -557,7 +1621,9 @@ fn apply_tui_key(state: &mut TuiState, key: &TuiKey) {
         TuiKey::ToggleCommandPalette => {
             state.show_command_palette = !state.show_command_palette;
             if state.show_command_palette {
-                state.command_status = "command menu open".into();
+                state.active_pane = TuiPane::Keys;
+                state.command_palette_index = 0;
+                state.command_status = "command palette open: Up/Down select, Enter run".into();
             } else {
                 state.command_status = "ready: ? shortcuts · / command menu".into();
             }
@@ -565,13 +1631,91 @@ fn apply_tui_key(state: &mut TuiState, key: &TuiKey) {
         TuiKey::InputChar(value) => {
             state.command_input.push(*value);
             state.active_pane = TuiPane::Keys;
-            state.show_command_palette = *value == '/';
+            if state.command_input.starts_with('/') {
+                state.show_command_palette = true;
+                state.command_palette_index = 0;
+                state.command_status =
+                    "command palette filtering; Enter runs selected command".into();
+            }
         }
         TuiKey::Backspace => {
             state.command_input.pop();
             state.active_pane = TuiPane::Keys;
+            if state.command_input.starts_with('/') {
+                state.show_command_palette = true;
+                state.command_palette_index = 0;
+            } else if state.command_input.is_empty() {
+                state.show_command_palette = false;
+            }
         }
-        TuiKey::SubmitCommand => submit_tui_command(state),
+        TuiKey::SubmitCommand => {
+            if state.screen != TuiScreen::Workspace && state.command_input.trim().is_empty() {
+                advance_tui_startup_screen(state);
+            } else if state.show_command_palette {
+                submit_selected_palette_command(state);
+            } else {
+                submit_tui_command(state);
+            }
+        }
+    }
+}
+
+fn move_command_palette_selection(state: &mut TuiState, delta: isize) {
+    let commands = filtered_command_palette_entries(state.command_input.trim());
+    if commands.is_empty() {
+        state.command_palette_index = 0;
+        return;
+    }
+    let max_index = commands.len() - 1;
+    if delta < 0 {
+        state.command_palette_index = state.command_palette_index.saturating_sub(1);
+    } else {
+        state.command_palette_index = state.command_palette_index.saturating_add(1).min(max_index);
+    }
+    state.command_status = format!(
+        "command palette selected {}",
+        commands[state.command_palette_index].command
+    );
+}
+
+fn submit_selected_palette_command(state: &mut TuiState) {
+    let commands = filtered_command_palette_entries(state.command_input.trim());
+    if let Some(entry) = commands.get(
+        state
+            .command_palette_index
+            .min(commands.len().saturating_sub(1)),
+    ) {
+        state.command_input = entry.command.to_owned();
+        submit_tui_command(state);
+    } else {
+        state.command_input.clear();
+        state.show_command_palette = false;
+        state.command_status = "no matching command".into();
+    }
+}
+
+fn advance_tui_startup_screen(state: &mut TuiState) {
+    match state.screen {
+        TuiScreen::Boot => {
+            if state.session.trust.should_show_gate() {
+                state.screen = TuiScreen::Trust;
+                state.command_status =
+                    "trust gate: Enter read-only · /approve accept · /deny block".into();
+            } else {
+                state.screen = TuiScreen::Core;
+                state.command_status = "trusted read-only workspace; Agent Core ready".into();
+            }
+        }
+        TuiScreen::Trust => {
+            state.screen = TuiScreen::Core;
+            state.command_status = "Agent Core ready: Enter opens workspace".into();
+        }
+        TuiScreen::Core => {
+            state.screen = TuiScreen::Workspace;
+            state.active_pane = TuiPane::Keys;
+            state.command_status = "ready: type a task or open / command menu".into();
+        }
+        TuiScreen::Workspace => {}
     }
 }
 
@@ -579,6 +1723,26 @@ fn submit_tui_command(state: &mut TuiState) {
     let command = state.command_input.trim().to_owned();
     state.command_input.clear();
     state.show_command_palette = false;
+    if !command.starts_with('/') && !command.is_empty() {
+        if let Some(prompt) = TuiRiskPrompt::detect(&command) {
+            state.pending_risk = Some(prompt);
+            state.active_pane = TuiPane::Approvals;
+            state.command_status = "risk prompt pending near input; use /approve or /deny".into();
+            return;
+        }
+        state.session.submit_user_task(&command);
+        state.screen = TuiScreen::Workspace;
+        state.active_pane = TuiPane::Keys;
+        state.follow_active_step = true;
+        state.follow_latest_message = true;
+        state.conversation_scroll = 0;
+        state.selected_task_index = state.session.active_step_index;
+        state.command_status = format!(
+            "submitted Turn {} to session {}; streaming local agent response",
+            state.session.turn_count, state.session.id
+        );
+        return;
+    }
     match normalize_token(command.trim_start_matches('/')).as_str() {
         "" => {
             state.command_status = "ready: ? shortcuts · / command menu".into();
@@ -590,40 +1754,128 @@ fn submit_tui_command(state: &mut TuiState) {
         }
         "status" => {
             state.active_pane = TuiPane::Overview;
-            state.command_status = "showing runtime projection status".into();
+            state.session.push_status_message();
+            state.follow_latest_message = true;
+            state.conversation_scroll = 0;
+            state.command_status = format!(
+                "showing session {} status ({})",
+                state.session.id,
+                state.session.mode.label()
+            );
         }
         "tasks" => {
             state.active_pane = TuiPane::Tasks;
             state.screen = TuiScreen::Workspace;
-            state.command_status = "showing task tracking".into();
+            state.session.push_tasks_message();
+            state.follow_latest_message = true;
+            state.conversation_scroll = 0;
+            state.command_status = format!("showing {} session steps", state.session.steps.len());
         }
         "agents" | "core" => {
+            state.session.push_agents_message();
+            state.follow_latest_message = true;
+            state.conversation_scroll = 0;
             state.screen = TuiScreen::Core;
             state.command_status = "showing Agent Core information".into();
         }
         "skills" => {
+            state.session.push_skills_message();
+            state.follow_latest_message = true;
+            state.conversation_scroll = 0;
             state.screen = TuiScreen::Core;
             state.command_status = "showing loaded tools and skills".into();
         }
+        "context" => {
+            state.active_pane = TuiPane::Overview;
+            state.screen = TuiScreen::Workspace;
+            state.session.push_context_message();
+            state.follow_latest_message = true;
+            state.conversation_scroll = 0;
+            let snapshot = state.session.context_snapshot();
+            state.command_status = format!(
+                "showing {} context sources ({}%)",
+                snapshot.sources.len(),
+                snapshot.percent
+            );
+        }
+        "save" | "persist" => match state.session.save_persistence_snapshot() {
+            Ok(path) => {
+                state.active_pane = TuiPane::Overview;
+                state.command_status =
+                    format!("saved local TUI session snapshot to {}", path.display());
+            }
+            Err(error) => {
+                state.active_pane = TuiPane::Boundary;
+                state.command_status = format!("session snapshot save failed: {error}");
+            }
+        },
+        "resume" | "load" => {
+            let path = state.session.persistence_path();
+            match TuiAgentSession::load_persistence_snapshot(&path) {
+                Ok(snapshot) => {
+                    state.active_pane = TuiPane::Overview;
+                    state.screen = TuiScreen::Workspace;
+                    state.session.push_resume_message(&snapshot);
+                    state.follow_latest_message = true;
+                    state.conversation_scroll = 0;
+                    state.command_status =
+                        format!("loaded local TUI snapshot summary from {}", path.display());
+                }
+                Err(error) => {
+                    state.active_pane = TuiPane::Boundary;
+                    state.command_status = format!("no readable TUI snapshot: {error}");
+                }
+            }
+        }
         "trust" => {
             state.screen = TuiScreen::Trust;
-            state.command_status = "workspace trust review".into();
+            state.session.push_trust_message();
+            state.follow_latest_message = true;
+            state.conversation_scroll = 0;
+            state.command_status = "workspace trust review opened".into();
         }
         "approve" | "y" => {
             state.active_pane = TuiPane::Approvals;
-            state.command_status = "approval intent captured; P0 still authorizes".into();
+            if let Some(prompt) = state.pending_risk.take() {
+                let task = prompt.task;
+                state.session.submit_user_task(&task);
+                state.screen = TuiScreen::Workspace;
+                state.follow_active_step = true;
+                state.follow_latest_message = true;
+                state.conversation_scroll = 0;
+                state.selected_task_index = state.session.active_step_index;
+                state.command_status =
+                    "risk intent accepted for local planning only; P0 still authorizes effects"
+                        .into();
+            } else {
+                state.session.approve_read_only_trust();
+                state.screen = TuiScreen::Core;
+                state.command_status =
+                    "read-only trust intent captured; P0 still authorizes effects".into();
+            }
         }
         "deny" | "n" => {
             state.active_pane = TuiPane::Approvals;
-            state.command_status = "denied; risky action remains blocked".into();
+            if state.pending_risk.take().is_some() {
+                state.screen = TuiScreen::Workspace;
+                state.command_status = "risk prompt denied; task was not submitted".into();
+            } else {
+                state.session.deny_trust();
+                state.screen = TuiScreen::Trust;
+                state.command_status =
+                    "workspace trust denied; risky action remains blocked".into();
+            }
         }
         "details" => {
             state.active_pane = TuiPane::Tasks;
+            state.selected_task_index = selected_session_step_index(state);
+            state.follow_active_step = false;
             state.command_status = "selected step detail is visible in task tracking".into();
         }
         "follow" => {
             state.active_pane = TuiPane::Tasks;
             state.follow_active_step = true;
+            state.selected_task_index = state.session.active_step_index;
             state.command_status = "task tracking follows active step".into();
         }
         "boundary" => {
@@ -1317,6 +2569,8 @@ fn parse_tui_key(value: &str) -> CliResult<TuiKey> {
         "trust" | "risk" | "2" => Ok(TuiKey::Screen(TuiScreen::Trust)),
         "core" | "agents" | "3" => Ok(TuiKey::Screen(TuiScreen::Core)),
         "workspace" | "chat" | "4" => Ok(TuiKey::Screen(TuiScreen::Workspace)),
+        "chat_down" | "pagedown" | "page_down" => Ok(TuiKey::MoveConversationDown),
+        "chat_up" | "pageup" | "page_up" => Ok(TuiKey::MoveConversationUp),
         "j" | "down" => Ok(TuiKey::MoveTaskDown),
         "k" | "up" => Ok(TuiKey::MoveTaskUp),
         "r" | "refresh" => Ok(TuiKey::Refresh),
@@ -1690,8 +2944,8 @@ fn render_tui_snapshot(
 ) {
     match state.screen {
         TuiScreen::Boot => render_tui_boot(frame, area, projection),
-        TuiScreen::Trust => render_tui_trust(frame, area, projection),
-        TuiScreen::Core => render_tui_core(frame, area, projection),
+        TuiScreen::Trust => render_tui_trust(frame, area, projection, state),
+        TuiScreen::Core => render_tui_core(frame, area, projection, state),
         TuiScreen::Workspace => render_tui_workspace(frame, area, projection, state),
     }
 }
@@ -1722,7 +2976,7 @@ fn render_tui_workspace(
     frame.render_widget(tui_input_box(state), vertical[2]);
     frame.render_widget(tui_status_bar(projection, state), vertical[3]);
     if state.show_command_palette {
-        render_command_palette(frame, area);
+        render_command_palette(frame, area, state);
     }
 }
 
@@ -1732,48 +2986,76 @@ fn render_tui_boot(
     projection: &moxi_shells::ShellProjection,
 ) {
     let lines = vec![
-        Line::from(""),
+        Line::from(vec![
+            Span::styled("      MOXI", style_gradient_1()),
+            Span::styled(" // ", style_dim()),
+            Span::styled("AGENT", style_gradient_3()),
+            Span::styled("      guarded terminal intelligence", style_dim()),
+        ]),
         Line::from(vec![Span::styled(
-            "        M O X I - A G E N T",
+            "  ███╗   ███╗ ██████╗ ██╗  ██╗██╗       █████╗  ██████╗ ███████╗███╗   ██╗████████╗",
             style_gradient_1(),
         )]),
         Line::from(vec![Span::styled(
-            "        ===================",
+            "  ████╗ ████║██╔═══██╗╚██╗██╔╝██║      ██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝",
             style_gradient_2(),
         )]),
         Line::from(vec![Span::styled(
-            "        SILVER CORE ONLINE",
+            "  ██╔████╔██║██║   ██║ ╚███╔╝ ██║█████╗███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║",
             style_gradient_3(),
         )]),
         Line::from(vec![Span::styled(
-            "        GUARDED RICH CLI",
+            "  ██║╚██╔╝██║██║   ██║ ██╔██╗ ██║╚════╝██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║",
             style_gradient_2(),
         )]),
         Line::from(vec![Span::styled(
-            "        ===================",
+            "  ██║ ╚═╝ ██║╚██████╔╝██╔╝ ██╗██║      ██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║",
             style_gradient_1(),
+        )]),
+        Line::from(vec![Span::styled(
+            "  ╚═╝     ╚═╝ ╚═════╝ ╚═╝  ╚═╝╚═╝      ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝",
+            style_dim(),
+        )]),
+        Line::from(""),
+        Line::from(vec![Span::styled(
+            "        SILVER CORE ONLINE  |  P0 GUARDED  |  P2 RICH CLI",
+            style_focus(),
         )]),
         Line::from(""),
         Line::from(vec![
-            Span::styled("        moxi-agent", style_brand()),
-            Span::styled(
-                "  Silver Core | guarded agent operating system",
-                style_dim(),
-            ),
+            Span::styled("  moxi-agent", style_brand()),
+            Span::styled("  guarded agent operating system", style_dim()),
+            Span::styled("    session ", style_label()),
+            Span::styled("local-r10-demo-session", style_value()),
         ]),
         Line::from(""),
+        Line::from(vec![
+            Span::styled("  CORE ", style_label()),
+            badge("Silver Core", Color::Yellow),
+            Span::raw(" "),
+            Span::styled("SHELL ", style_label()),
+            badge("P2 rich-cli", Color::Cyan),
+            Span::raw(" "),
+            Span::styled("MODE ", style_label()),
+            badge("guarded read-only", Color::Green),
+        ]),
+        Line::from(""),
+        Line::from(vec![Span::styled(
+            "  Initialization waterfall",
+            style_warning(),
+        )]),
         Line::from(vec![
             Span::styled("  > ", style_focus()),
             Span::styled("Initializing Silver Core", style_value()),
-            Span::raw("  "),
-            progress_bar(0.72, 28),
+            Span::raw("       "),
+            progress_bar(0.78, 24),
         ]),
         Line::from(vec![Span::styled(
-            "  + Loading Agent Core",
+            "  + Loading Agent Core profiles",
             style_success(),
         )]),
         Line::from(vec![Span::styled(
-            "  + Loading runtime adapters",
+            "  + Reading configured skills and tools",
             style_success(),
         )]),
         Line::from(vec![Span::styled(
@@ -1788,16 +3070,21 @@ fn render_tui_boot(
             style_dim(),
         )]),
         Line::from(vec![Span::styled(
-            "  - Opening Rich CLI control panel",
+            "  - Waiting for owner handoff",
             style_dim(),
         )]),
         Line::from(""),
         Line::from(vec![
-            Span::styled("  core ", style_label()),
-            Span::styled("P0 protected", style_success()),
-            Span::styled("    shell ", style_label()),
-            Span::styled("P2 rich-cli", style_focus()),
-            Span::styled("    graph ", style_label()),
+            Span::styled("  Enter", style_focus()),
+            Span::styled(" continue startup flow", style_value()),
+            Span::styled("    4", style_focus()),
+            Span::styled(" workspace", style_value()),
+            Span::styled("    q", style_danger()),
+            Span::styled(" quit", style_value()),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  graph ", style_label()),
             Span::styled(
                 projection
                     .graph_id
@@ -1806,17 +3093,19 @@ fn render_tui_boot(
                     .to_owned(),
                 style_value(),
             ),
+            Span::styled("    context ", style_label()),
+            Span::styled("workspace facts ready", style_success()),
         ]),
     ];
     frame.render_widget(
         Paragraph::new(lines)
             .block(tui_panel_block(
-                "moxi-agent",
+                "moxi-agent // startup",
                 Color::Yellow,
                 BorderType::Double,
             ))
             .wrap(Wrap { trim: true }),
-        centered_rect(area, 88, 22),
+        centered_rect(area, 100, 28),
     );
 }
 
@@ -1824,13 +3113,30 @@ fn render_tui_trust(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
     projection: &moxi_shells::ShellProjection,
+    state: &TuiState,
 ) {
-    let lines = vec![
+    let mut lines = vec![
         Line::from(vec![Span::styled(
             "moxi-agent will enter this workspace:",
             style_label(),
         )]),
-        Line::from(vec![Span::styled(workspace_display_path(), style_value())]),
+        Line::from(vec![Span::styled(
+            state.session.workspace.cwd.clone(),
+            style_value(),
+        )]),
+        Line::from(vec![
+            Span::styled("trust state: ", style_label()),
+            Span::styled(
+                state.session.trust.status.label(),
+                match state.session.trust.status {
+                    TuiTrustStatus::KnownReadOnly | TuiTrustStatus::TrustedReadOnly => {
+                        style_success()
+                    }
+                    TuiTrustStatus::NeedsReview => style_warning(),
+                    TuiTrustStatus::Denied => style_danger(),
+                },
+            ),
+        ]),
         Line::from(""),
         Line::from(vec![Span::styled("Current safety mode", style_warning())]),
         Line::from(vec![Span::styled(
@@ -1849,6 +3155,19 @@ fn render_tui_trust(
             "o Git commit / GitHub push: require owner confirmation",
             style_dim(),
         )]),
+        Line::from(""),
+        Line::from(vec![Span::styled("Trust reasons", style_warning())]),
+    ];
+    lines.extend(
+        state
+            .session
+            .trust
+            .reasons
+            .iter()
+            .take(4)
+            .map(|reason| Line::from(vec![Span::styled(format!("* {reason}"), style_value())])),
+    );
+    lines.extend([
         Line::from(""),
         Line::from(vec![Span::styled("Risk note", style_warning())]),
         Line::from(vec![Span::styled(
@@ -1873,7 +3192,7 @@ fn render_tui_trust(
             Span::styled("profile ", style_label()),
             Span::styled(projection.profile_id.clone(), style_value()),
         ]),
-    ];
+    ]);
     frame.render_widget(
         Paragraph::new(lines)
             .block(tui_panel_block(
@@ -1890,24 +3209,45 @@ fn render_tui_core(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
     projection: &moxi_shells::ShellProjection,
+    state: &TuiState,
 ) {
     let body = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(32), Constraint::Percentage(68)])
-        .split(centered_rect(area, 104, 28));
+        .constraints([Constraint::Percentage(34), Constraint::Percentage(66)])
+        .split(centered_rect(area, 108, 29));
     let logo = vec![
-        Line::from(vec![Span::styled("        [ MOXI ]", style_gradient_1())]),
-        Line::from(vec![Span::styled("        [AGENT ]", style_gradient_2())]),
-        Line::from(vec![Span::styled("        [ CORE ]", style_gradient_3())]),
-        Line::from(vec![Span::styled("        [ P0   ]", style_gradient_2())]),
-        Line::from(vec![Span::styled("        [ P2   ]", style_gradient_1())]),
+        Line::from(vec![Span::styled("   M O X I", style_gradient_1())]),
+        Line::from(vec![Span::styled("   AGENT CORE", style_gradient_3())]),
+        Line::from(vec![Span::styled("   ===========", style_gradient_2())]),
+        Line::from(""),
+        Line::from(vec![Span::styled("  [MOXI]", style_gradient_1())]),
+        Line::from(vec![Span::styled("  [CORE]", style_gradient_2())]),
+        Line::from(vec![Span::styled("  [ P0 ] protected", style_success())]),
+        Line::from(vec![Span::styled("  [ P2 ] rich-cli", style_focus())]),
         Line::from(""),
         Line::from(vec![Span::styled("moxi-agent", style_brand())]),
-        Line::from(vec![Span::styled("Silver Core", style_success())]),
+        Line::from(vec![Span::styled("Silver Core online", style_success())]),
         Line::from(vec![Span::styled(
-            "Session: 20260528_r10_demo",
+            format!("Session: {}", state.session.id),
             style_dim(),
         )]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("trust ", style_label()),
+            badge(state.session.trust.status.label(), Color::Yellow),
+        ]),
+        Line::from(vec![
+            Span::styled("mode  ", style_label()),
+            badge(state.session.mode.label(), Color::Green),
+        ]),
+        Line::from(vec![
+            Span::styled("ctx   ", style_label()),
+            progress_bar(state.session.context_snapshot().ratio(), 12),
+            Span::styled(
+                format!("{}%", state.session.context_snapshot().percent),
+                style_focus(),
+            ),
+        ]),
     ];
     frame.render_widget(
         Paragraph::new(logo)
@@ -1920,6 +3260,16 @@ fn render_tui_core(
         body[0],
     );
 
+    let snapshot_path = state.session.persistence_path();
+    let snapshot_dir = snapshot_path
+        .parent()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "<none>".to_owned());
+    let snapshot_file = snapshot_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("tui-session.json")
+        .to_owned();
     let lines = vec![
         Line::from(vec![
             Span::styled("moxi-agent v0.1.0", style_brand()),
@@ -1927,11 +3277,14 @@ fn render_tui_core(
         ]),
         Line::from(vec![
             Span::styled("cwd: ", style_label()),
-            Span::styled(workspace_display_path(), style_value()),
+            Span::styled(state.session.workspace.cwd.clone(), style_value()),
         ]),
         Line::from(vec![
             Span::styled("config: ", style_label()),
-            Span::styled(".moxi\\agents.toml", style_value()),
+            Span::styled(state.session.workspace.config_path.clone(), style_value()),
+            Span::styled(" (", style_dim()),
+            Span::styled(state.session.workspace.config_state.clone(), style_dim()),
+            Span::styled(")", style_dim()),
             Span::styled(" | graph=", style_label()),
             Span::styled(
                 projection
@@ -1944,27 +3297,49 @@ fn render_tui_core(
         ]),
         Line::from(""),
         Line::from(vec![Span::styled("Agent Runtime", style_warning())]),
-        Line::from("orchestrator: adaptive"),
-        Line::from("trust: pending | mode: read-only"),
-        Line::from("approval: required for write / shell / git"),
+        Line::from(vec![
+            Span::styled("orchestrator ", style_label()),
+            badge("adaptive", Color::Magenta),
+            Span::raw(" "),
+            Span::styled("mode ", style_label()),
+            badge(state.session.mode.label(), Color::Green),
+            Span::raw(" "),
+            Span::styled("trust ", style_label()),
+            badge(state.session.trust.status.label(), Color::Yellow),
+        ]),
+        Line::from("approval: required for write / shell / git / github"),
+        Line::from(vec![
+            Span::styled("session dir: ", style_label()),
+            Span::styled(snapshot_dir, style_dim()),
+        ]),
+        Line::from(vec![
+            Span::styled("session file: ", style_label()),
+            Span::styled(snapshot_file, style_dim()),
+        ]),
         Line::from(""),
         Line::from(vec![Span::styled("Loaded Agents", style_warning())]),
-        Line::from("moxi-agent: orchestrator, planning, task routing"),
-        Line::from("ui-agent: rich-cli, terminal-design, ratatui"),
-        Line::from("guard-agent: trust-boundary, approval, risk-review"),
+    ];
+    let mut lines = lines;
+    lines.extend(
+        state
+            .session
+            .agents
+            .iter()
+            .map(|agent| Line::from(agent.summary())),
+    );
+    lines.extend([
         Line::from(""),
         Line::from(vec![Span::styled("Available Tools", style_warning())]),
-        Line::from("file.read | repo.inspect | git.status | test.run"),
-        Line::from("shell.preview | context.trace | command.palette"),
+        Line::from(state.session.tools.join(" | ")),
         Line::from(""),
         Line::from(vec![Span::styled("Available Skills", style_warning())]),
-        Line::from("tui.design | risk.review | docs.prepare | github.prepare"),
+        Line::from(state.session.skills.join(" | ")),
         Line::from(""),
         Line::from(vec![Span::styled(
-            "Press 4 to open workspace",
+            "Press Enter to open workspace, or 4 to jump there directly",
             style_focus(),
         )]),
-    ];
+    ]);
     frame.render_widget(
         Paragraph::new(lines)
             .block(tui_panel_block(
@@ -1977,28 +3352,155 @@ fn render_tui_core(
     );
 }
 
-fn render_command_palette(frame: &mut ratatui::Frame<'_>, area: Rect) {
-    let area = centered_rect(area, 48, 11);
-    let lines = vec![
-        Line::from("/status    current runtime status"),
-        Line::from("/tasks     open task tracking"),
-        Line::from("/agents    inspect Agent Core"),
-        Line::from("/skills    inspect loaded skills"),
-        Line::from("/approve   confirm current risk intent"),
-        Line::from("/deny      reject current risk"),
-        Line::from("/trust     open workspace trust gate"),
-        Line::from("/help      show this menu"),
+fn render_command_palette(frame: &mut ratatui::Frame<'_>, area: Rect, state: &TuiState) {
+    let area = centered_rect(area, 58, 13);
+    let entries = filtered_command_palette_entries(state.command_input.trim());
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("filter ", style_label()),
+            Span::styled(
+                if state.command_input.trim().is_empty() {
+                    "/"
+                } else {
+                    state.command_input.trim()
+                },
+                style_value(),
+            ),
+            Span::styled("  Up/Down select · Enter run · Esc quit", style_dim()),
+        ]),
+        Line::from(""),
     ];
+    if entries.is_empty() {
+        lines.push(Line::from(vec![Span::styled(
+            "No safe command matches this filter",
+            style_warning(),
+        )]));
+    } else {
+        let selected = state.command_palette_index.min(entries.len() - 1);
+        for (index, entry) in entries.iter().enumerate() {
+            let is_selected = index == selected;
+            lines.push(Line::from(vec![
+                Span::styled(
+                    if is_selected { "> " } else { "  " },
+                    if is_selected {
+                        style_focus()
+                    } else {
+                        style_dim()
+                    },
+                ),
+                Span::styled(
+                    entry.command,
+                    if is_selected {
+                        style_focus()
+                    } else {
+                        style_value()
+                    },
+                ),
+                Span::styled("  ", style_dim()),
+                Span::styled(entry.description, style_dim()),
+            ]));
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![Span::styled(
+        "P2 shell: commands render local state only; effects remain P0-gated",
+        style_warning(),
+    )]));
     frame.render_widget(
         Paragraph::new(lines)
             .block(tui_panel_block(
-                "Commands",
+                "Command Palette",
                 Color::Yellow,
                 BorderType::Rounded,
             ))
             .wrap(Wrap { trim: true }),
         area,
     );
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CommandPaletteEntry {
+    command: &'static str,
+    description: &'static str,
+}
+
+const COMMAND_PALETTE_ENTRIES: &[CommandPaletteEntry] = &[
+    CommandPaletteEntry {
+        command: "/status",
+        description: "current session and workspace facts",
+    },
+    CommandPaletteEntry {
+        command: "/tasks",
+        description: "open task tracking and selected step",
+    },
+    CommandPaletteEntry {
+        command: "/agents",
+        description: "inspect active Agent Core profiles",
+    },
+    CommandPaletteEntry {
+        command: "/skills",
+        description: "inspect loaded skills and shell tools",
+    },
+    CommandPaletteEntry {
+        command: "/context",
+        description: "show context meter sources",
+    },
+    CommandPaletteEntry {
+        command: "/save",
+        description: "write local TUI session snapshot",
+    },
+    CommandPaletteEntry {
+        command: "/resume",
+        description: "read local snapshot summary",
+    },
+    CommandPaletteEntry {
+        command: "/trust",
+        description: "open workspace trust review",
+    },
+    CommandPaletteEntry {
+        command: "/approve",
+        description: "accept current local risk/trust intent",
+    },
+    CommandPaletteEntry {
+        command: "/deny",
+        description: "deny current local risk/trust intent",
+    },
+    CommandPaletteEntry {
+        command: "/details",
+        description: "show selected task-step details",
+    },
+    CommandPaletteEntry {
+        command: "/follow",
+        description: "resume active-step following",
+    },
+    CommandPaletteEntry {
+        command: "/boundary",
+        description: "show shell authority boundary",
+    },
+    CommandPaletteEntry {
+        command: "/help",
+        description: "keep this palette open",
+    },
+    CommandPaletteEntry {
+        command: "/quit",
+        description: "exit the TUI",
+    },
+];
+
+fn filtered_command_palette_entries(filter: &str) -> Vec<CommandPaletteEntry> {
+    let filter = filter.trim().trim_start_matches('/');
+    if filter.is_empty() {
+        return COMMAND_PALETTE_ENTRIES.to_vec();
+    }
+    let filter = normalize_token(filter);
+    COMMAND_PALETTE_ENTRIES
+        .iter()
+        .copied()
+        .filter(|entry| {
+            normalize_token(entry.command.trim_start_matches('/')).contains(&filter)
+                || normalize_token(entry.description).contains(&filter)
+        })
+        .collect()
 }
 
 fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
@@ -2021,25 +3523,32 @@ fn workspace_display_path() -> String {
 }
 
 fn tui_header(projection: &moxi_shells::ShellProjection, state: &TuiState) -> Paragraph<'static> {
+    let context = state.session.context_snapshot();
     Paragraph::new(vec![
         Line::from(vec![
             Span::styled("moxi-agent", style_brand()),
-            Span::raw("                                                  "),
-            badge("guarded", Color::Yellow),
+            Span::styled(" // Silver Core", style_gradient_2()),
+            Span::raw("    "),
+            badge("P0 guarded", Color::Yellow),
             Span::raw(" "),
-            badge("read-only", Color::Green),
+            badge("P2 rich-cli", Color::Cyan),
+            Span::raw(" "),
+            badge(state.session.mode.label(), Color::Green),
         ]),
         Line::from(vec![
             Span::styled("cwd: ", style_label()),
-            Span::styled(workspace_display_path(), style_value()),
+            Span::styled(state.session.workspace.cwd.clone(), style_value()),
         ]),
         Line::from(vec![
             Span::styled("config: ", style_label()),
-            Span::styled(".moxi\\agents.toml", style_value()),
+            Span::styled(state.session.workspace.config_path.clone(), style_value()),
+            Span::styled(" (", style_dim()),
+            Span::styled(state.session.workspace.config_state.clone(), style_dim()),
+            Span::styled(")", style_dim()),
             Span::styled(" | core: ", style_label()),
             Span::styled("Silver Core", style_success()),
             Span::styled(" | trust: ", style_label()),
-            Span::styled("pending", style_warning()),
+            Span::styled(state.session.trust.status.label(), style_focus()),
             Span::styled(" | graph: ", style_label()),
             Span::styled(
                 projection
@@ -2051,15 +3560,32 @@ fn tui_header(projection: &moxi_shells::ShellProjection, state: &TuiState) -> Pa
             ),
         ]),
         Line::from(vec![
+            Span::styled("git: ", style_label()),
+            Span::styled(state.session.workspace.git_state.clone(), style_value()),
+            Span::styled(" | cargo: ", style_label()),
+            Span::styled(state.session.workspace.cargo_state.clone(), style_value()),
+            Span::styled(" | docs: ", style_label()),
+            Span::styled(state.session.workspace.docs_state.clone(), style_value()),
+            Span::styled(" | context: ", style_label()),
+            progress_bar(context.ratio(), 8),
+            Span::styled(format!("{}%", context.percent), style_focus()),
+        ]),
+        Line::from(vec![
             Span::styled("screen: ", style_label()),
             Span::styled(format!("{:?}", state.screen), style_dim()),
             Span::styled(" | pane=", style_label()),
             Span::styled(state.active_pane.label(), style_dim()),
             Span::styled(" | refresh: ", style_label()),
             Span::styled(state.refresh_count.to_string(), style_dim()),
+            Span::styled(" | session: ", style_label()),
+            Span::styled(state.session.id.clone(), style_dim()),
         ]),
     ])
-    .block(tui_panel_block("", Color::DarkGray, BorderType::Plain))
+    .block(tui_panel_block(
+        "moxi-agent control plane",
+        Color::Cyan,
+        BorderType::Plain,
+    ))
     .style(style_value())
 }
 
@@ -2073,45 +3599,95 @@ fn tui_chat_stream(
         .iter()
         .filter(|blocker| blocker.blocker == ResumeBlocker::AwaitingApproval)
         .count();
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled("* moxi-agent ", style_brand()),
-            Span::styled("[orchestrator]", style_dim()),
-        ]),
-        Line::from(vec![Span::styled(
-            "I will inspect the workspace first, then prepare a safe plan.",
-            style_value(),
-        )]),
-        Line::from(vec![Span::styled(
-            "model: gpt-5.5 | reasoning: high | tools: planner",
+    let mut lines = vec![Line::from(vec![
+        Span::styled("Session ", style_label()),
+        Span::styled(state.session.id.clone(), style_value()),
+        Span::raw(" "),
+        badge(state.session.mode.label(), Color::Green),
+        Span::raw(" "),
+        badge(format!("turn {}", state.session.turn_count), Color::Blue),
+        Span::raw(" "),
+        badge(
+            if state.session.is_streaming() {
+                "streaming"
+            } else {
+                "idle"
+            },
+            if state.session.is_streaming() {
+                Color::Yellow
+            } else {
+                Color::DarkGray
+            },
+        ),
+        Span::raw(" "),
+        badge(
+            if state.follow_latest_message {
+                "chat follow"
+            } else {
+                "chat manual"
+            },
+            if state.follow_latest_message {
+                Color::Green
+            } else {
+                Color::Yellow
+            },
+        ),
+        Span::styled(
+            format!(" scroll={}", state.conversation_scroll),
             style_dim(),
-        )]),
+        ),
+    ])];
+
+    for message in &state.session.messages {
+        lines.extend([
+            Line::from(""),
+            Line::from(vec![
+                Span::styled(
+                    message_state_marker(message.state),
+                    message_state_style(message.state),
+                ),
+                Span::raw(" "),
+                Span::styled(message.agent.clone(), style_brand()),
+                Span::raw(" "),
+                Span::styled(format!("[{}]", message.role), style_dim()),
+            ]),
+            Line::from(vec![Span::styled(message.body.clone(), style_value())]),
+            Line::from(vec![Span::styled(message.metadata.render(), style_dim())]),
+        ]);
+    }
+
+    lines.extend([
         Line::from(""),
         Line::from(vec![
-            Span::styled("* ui-agent ", style_focus()),
-            Span::styled("[rich-cli]", style_dim()),
+            Span::styled("Workspace ", style_label()),
+            Span::styled(state.session.workspace.short_path.clone(), style_value()),
+            Span::styled(" | git ", style_label()),
+            Span::styled(state.session.workspace.git_state.clone(), style_value()),
+            Span::styled(" | cargo ", style_label()),
+            Span::styled(state.session.workspace.cargo_state.clone(), style_value()),
         ]),
-        Line::from(vec![Span::styled(
-            "The CLI should feel like a safe agent control panel, not a dashboard.",
-            style_value(),
-        )]),
-        Line::from(vec![Span::styled(
-            "model: code-ui | reasoning: high | tools: ratatui",
-            style_dim(),
-        )]),
-        Line::from(""),
         Line::from(vec![
-            Span::styled("> guard-agent ", style_warning()),
-            Span::styled("is checking workspace risk...", style_value()),
+            Span::styled("Sources ", style_label()),
+            Span::styled(
+                format!(
+                    "config={} docs={}",
+                    state.session.workspace.config_state, state.session.workspace.docs_state
+                ),
+                style_dim(),
+            ),
         ]),
-        Line::from(vec![Span::styled(
-            "model: guard | reasoning: medium",
-            style_dim(),
-        )]),
         Line::from(""),
         Line::from(vec![
             Span::styled("Status ", style_label()),
-            badge(format!("{} tasks", projection.tasks.len()), Color::Blue),
+            badge(
+                format!("{} session steps", state.session.steps.len()),
+                Color::Blue,
+            ),
+            Span::raw(" "),
+            badge(
+                format!("{} projection tasks", projection.tasks.len()),
+                Color::Cyan,
+            ),
             Span::raw(" "),
             badge(format!("{} approvals", awaiting_approval), Color::Yellow),
             Span::raw(" "),
@@ -2133,7 +3709,7 @@ fn tui_chat_stream(
                 style_value(),
             ),
         ]),
-    ];
+    ]);
 
     if let Some(task) = selected {
         lines.extend([
@@ -2163,17 +3739,67 @@ fn tui_chat_stream(
         }
     }
 
-    Paragraph::new(lines)
-        .block(tui_panel_block(
-            "Conversation",
-            Color::Cyan,
-            BorderType::Rounded,
-        ))
+    let title = format!("Conversation · {} messages", state.session.messages.len());
+    let visible_lines = visible_conversation_lines(lines, state);
+    Paragraph::new(visible_lines)
+        .block(tui_panel_block(title, Color::Cyan, BorderType::Rounded))
         .wrap(Wrap { trim: true })
 }
 
+fn visible_conversation_lines(lines: Vec<Line<'static>>, state: &TuiState) -> Vec<Line<'static>> {
+    let limit = 18usize;
+    if lines.len() <= limit {
+        return lines;
+    }
+    let mut visible = vec![lines[0].clone()];
+    let body = &lines[1..];
+    let content_limit = limit.saturating_sub(1);
+    let max_start = body.len().saturating_sub(content_limit);
+    let start = if state.follow_latest_message {
+        max_start
+    } else {
+        state.conversation_scroll.min(max_start)
+    };
+    let has_earlier = start > 0;
+    let mut visible_content_limit = content_limit.saturating_sub(usize::from(has_earlier));
+    let has_newer = start.saturating_add(visible_content_limit) < body.len();
+    visible_content_limit = visible_content_limit.saturating_sub(usize::from(has_newer));
+    let end = start.saturating_add(visible_content_limit).min(body.len());
+    if start > 0 {
+        visible.push(Line::from(vec![Span::styled(
+            format!("... {} earlier lines hidden (PageUp/PageDown)", start),
+            style_dim(),
+        )]));
+    }
+    visible.extend(body[start..end].iter().cloned());
+    if end < body.len() {
+        visible.push(Line::from(vec![Span::styled(
+            format!("... {} newer lines hidden (PageDown)", body.len() - end),
+            style_dim(),
+        )]));
+    }
+    visible
+}
+
 fn tui_input_box(state: &TuiState) -> Paragraph<'static> {
-    Paragraph::new(Line::from(vec![
+    let mut lines = Vec::new();
+    if let Some(prompt) = &state.pending_risk {
+        lines.push(Line::from(vec![
+            Span::styled("risk ", style_label()),
+            badge(prompt.level.label(), prompt.level.color()),
+            Span::raw(" "),
+            Span::styled(prompt.reason.clone(), style_warning()),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("/approve", style_focus()),
+            Span::raw(" continue as local planning intent  "),
+            Span::styled("/deny", style_danger()),
+            Span::raw(" cancel"),
+        ]));
+    } else {
+        lines.push(Line::from(""));
+    }
+    lines.push(Line::from(vec![
         Span::styled("> ", style_focus()),
         Span::styled(
             if state.command_input.is_empty() {
@@ -2187,22 +3813,24 @@ fn tui_input_box(state: &TuiState) -> Paragraph<'static> {
                 style_value()
             },
         ),
-    ]))
-    .block(tui_panel_block(
-        "Input Task",
-        Color::Yellow,
-        BorderType::Double,
-    ))
-    .wrap(Wrap { trim: true })
+    ]));
+    Paragraph::new(lines)
+        .block(tui_panel_block(
+            "Input Task",
+            Color::Yellow,
+            BorderType::Double,
+        ))
+        .wrap(Wrap { trim: true })
 }
 
 fn tui_status_bar(
     projection: &moxi_shells::ShellProjection,
     state: &TuiState,
 ) -> Paragraph<'static> {
+    let context = state.session.context_snapshot();
     Paragraph::new(Line::from(vec![
         Span::raw(format!(
-            "graph={} pane={} active={} selected_task={} filter={} refresh={} quit={} | ",
+            "graph={} pane={} active={} selected_task={} filter={} refresh={} quit={} | context ",
             projection.graph_id.as_deref().unwrap_or("<none>"),
             state.active_pane.label(),
             state.active_pane.label(),
@@ -2211,17 +3839,13 @@ fn tui_status_bar(
             state.refresh_count,
             state.should_quit
         )),
-        Span::styled("? shortcuts", style_dim()),
-        Span::styled(" | ", style_label()),
-        Span::styled("/ command menu", style_dim()),
+        progress_bar(context.ratio(), 10),
+        Span::styled(format!("{}%", context.percent), style_focus()),
+        Span::styled(" /context", style_dim()),
+        Span::styled(" | ? shortcuts | profile ", style_label()),
+        Span::styled(projection.profile_id.clone(), style_dim()),
         Span::styled(" | ", style_label()),
         Span::styled(state.command_status.clone(), style_value()),
-        Span::raw("      "),
-        Span::styled("context ", style_label()),
-        progress_bar(0.72, 10),
-        Span::styled("72%", style_focus()),
-        Span::styled(" | profile ", style_label()),
-        Span::styled(projection.profile_id.clone(), style_dim()),
     ]))
 }
 
@@ -2230,16 +3854,75 @@ fn tui_task_tracker(
     state: &TuiState,
 ) -> Paragraph<'static> {
     let tasks = filtered_tasks(projection, state);
-    let selected = selected_index(state.selected_task_index, tasks.len());
-    let mut lines = vec![
-        Line::from(vec![Span::styled("Turn 1", style_warning())]),
-        Line::from(vec![Span::styled("* Detect workspace", style_success())]),
-        Line::from(vec![Span::styled("* Load Agent Core", style_success())]),
-        Line::from(vec![Span::styled("> Check risk", style_focus())]),
-        Line::from(vec![Span::styled("o Wait for owner", style_dim())]),
-        Line::from(""),
-        Line::from(vec![Span::styled("Turn 2", style_warning())]),
-    ];
+    let selected_step_index = selected_session_step_index(state);
+    let selected_step = state.session.steps.get(selected_step_index);
+    let mut lines = Vec::new();
+    lines.push(Line::from(vec![
+        Span::styled("follow: ", style_label()),
+        Span::styled(
+            if state.follow_active_step {
+                "active"
+            } else {
+                "manual"
+            },
+            if state.follow_active_step {
+                style_success()
+            } else {
+                style_warning()
+            },
+        ),
+        Span::styled(" | selected: ", style_label()),
+        Span::styled(
+            selected_step
+                .map(|step| step.label.clone())
+                .unwrap_or_else(|| "<none>".to_owned()),
+            style_value(),
+        ),
+    ]));
+    if let Some(step) = selected_step {
+        lines.push(Line::from(vec![
+            Span::styled("detail: ", style_label()),
+            Span::styled(step.detail.clone(), style_value()),
+        ]));
+    }
+    lines.push(Line::from(""));
+
+    let mut current_turn = None;
+    for (index, step) in state.session.steps.iter().enumerate() {
+        if current_turn != Some(step.turn) {
+            if current_turn.is_some() {
+                lines.push(Line::from(""));
+            }
+            current_turn = Some(step.turn);
+            lines.push(Line::from(vec![Span::styled(
+                format!("Turn {}", step.turn),
+                style_warning(),
+            )]));
+        }
+        let is_active = index == state.session.active_step_index;
+        let is_selected = index == selected_step_index;
+        lines.push(Line::from(vec![
+            Span::styled(
+                tui_step_marker(step.state, is_active, is_selected),
+                tui_step_style(step.state, is_active, is_selected),
+            ),
+            Span::raw(" "),
+            Span::styled(
+                step.label.clone(),
+                tui_step_style(step.state, is_active, is_selected),
+            ),
+        ]));
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(step.detail.clone(), style_dim()),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![Span::styled(
+        "Runtime projection",
+        style_warning(),
+    )]));
 
     if tasks.is_empty() {
         lines.push(Line::from(vec![Span::styled(
@@ -2247,17 +3930,9 @@ fn tui_task_tracker(
             style_dim(),
         )]));
     } else {
-        for (index, task) in tasks.iter().enumerate() {
-            let marker = if Some(index) == selected {
-                "> "
-            } else if task.progress >= 1.0 {
-                "* "
-            } else {
-                "o "
-            };
-            let style = if Some(index) == selected {
-                style_focus()
-            } else if task.progress >= 1.0 {
+        for task in tasks.iter() {
+            let marker = if task.progress >= 1.0 { "* " } else { "o " };
+            let style = if task.progress >= 1.0 {
                 style_success()
             } else {
                 style_dim()
@@ -2282,6 +3957,50 @@ fn tui_task_tracker(
             BorderType::Rounded,
         ))
         .wrap(Wrap { trim: true })
+}
+
+fn message_state_marker(state: TuiMessageState) -> &'static str {
+    match state {
+        TuiMessageState::Complete => "*",
+        TuiMessageState::Streaming => "~",
+        TuiMessageState::Waiting => ">",
+    }
+}
+
+fn message_state_style(state: TuiMessageState) -> Style {
+    match state {
+        TuiMessageState::Complete => style_success(),
+        TuiMessageState::Streaming => style_warning(),
+        TuiMessageState::Waiting => style_focus(),
+    }
+}
+
+fn tui_step_marker(state: TuiStepState, is_active: bool, is_selected: bool) -> &'static str {
+    if is_selected {
+        ">"
+    } else if is_active {
+        "@"
+    } else {
+        match state {
+            TuiStepState::Done => "*",
+            TuiStepState::Active => "@",
+            TuiStepState::Pending => "o",
+        }
+    }
+}
+
+fn tui_step_style(state: TuiStepState, is_active: bool, is_selected: bool) -> Style {
+    if is_selected {
+        style_focus()
+    } else if is_active {
+        style_warning()
+    } else {
+        match state {
+            TuiStepState::Done => style_success(),
+            TuiStepState::Active => style_warning(),
+            TuiStepState::Pending => style_dim(),
+        }
+    }
 }
 
 fn tui_panel_block<T>(title: T, border_color: Color, border_type: BorderType) -> Block<'static>
@@ -2428,6 +4147,19 @@ fn selected_index(index: usize, len: usize) -> Option<usize> {
     }
 }
 
+fn selected_session_step_index(state: &TuiState) -> usize {
+    if state.session.steps.is_empty() {
+        0
+    } else if state.follow_active_step {
+        state
+            .session
+            .active_step_index
+            .min(state.session.steps.len() - 1)
+    } else {
+        state.selected_task_index.min(state.session.steps.len() - 1)
+    }
+}
+
 fn selected_task<'a>(
     projection: &'a moxi_shells::ShellProjection,
     state: &TuiState,
@@ -2547,7 +4279,7 @@ fn percent(value: f32) -> String {
 }
 
 fn help_text() -> &'static str {
-    "moxi\n\nDefault:\n  moxi\n    Opens the branded full-screen read-only TUI demo/onboarding dashboard.\n\nCommands:\n  admit --goal <text> [--tenant <id>] [--user <id>] [--workspace <path>] [--capability <id>] [--risk low|medium|high|critical]\n  manifest [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human]\n  boundary [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--text]\n  status [--feed|--query] [--input <snapshot.json>] [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--text|--panel] [--limit <n>]\n  watch [--feed|--query] --input <snapshot.json> [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--text|--panel] [--limit <n>] [--ticks <n>] [--interval-ms <n>]\n  tui [--feed|--query] [--input <snapshot.json>] [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--width <n>] [--height <n>] [--keys tab,o,g,t,a,b,?,j,k,/filter,r,q] [--interactive] [--poll-ms <n>]\n  repl\n\nTUI commands: /help, /status, /boundary, /demo, /filter <text>, /clear, /quit.\n\nBoundary: this CLI submits requests and renders shell contracts only; it can watch snapshot files and render a read-only TUI preview, but it cannot execute, authorize, issue tickets, verify, or commit ledger events."
+    "moxi\n\nDefault:\n  moxi\n    Opens the resident branded read-only TUI workbench. Startup pages wait for owner input instead of flashing through onboarding.\n\nCommands:\n  admit --goal <text> [--tenant <id>] [--user <id>] [--workspace <path>] [--capability <id>] [--risk low|medium|high|critical]\n  manifest [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human]\n  boundary [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--text]\n  status [--feed|--query] [--input <snapshot.json>] [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--text|--panel] [--limit <n>]\n  watch [--feed|--query] --input <snapshot.json> [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--text|--panel] [--limit <n>] [--ticks <n>] [--interval-ms <n>]\n  tui [--feed|--query] [--input <snapshot.json>] [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--width <n>] [--height <n>] [--keys tab,o,g,t,a,b,?,j,k,/filter,r,q] [--interactive] [--poll-ms <n>]\n  repl\n\nTUI startup: Enter advances Boot -> Trust -> Agent Core -> Workspace; 4 jumps to the workbench.\nTUI commands: /help, /status, /boundary, /demo, /filter <text>, /clear, /quit.\n\nBoundary: this CLI submits requests and renders shell contracts only; it can watch snapshot files and render a read-only TUI preview, but it cannot execute, authorize, issue tickets, verify, or commit ledger events."
 }
 
 #[cfg(test)]
@@ -3316,9 +5048,9 @@ mod tests {
                 "--input",
                 path.to_str().unwrap(),
                 "--width",
-                "100",
+                "120",
                 "--height",
-                "28",
+                "36",
             ],
             &mut output,
         )
@@ -3327,10 +5059,12 @@ mod tests {
 
         assert_eq!(code, 0);
         assert!(text.contains("moxi-agent"));
-        assert!(text.contains("The CLI should feel like a safe agent control panel"));
+        assert!(text.contains("local-r10-demo-session"));
+        assert!(text.contains("guarded read-only session"));
+        assert!(text.contains("Create session shell"));
         assert!(text.contains("Input Task"));
         assert!(text.contains("graph=graph_detail"));
-        assert!(text.contains("1 tasks"));
+        assert!(text.contains("1 projection tasks"));
         assert!(text.contains("1 approvals"));
         assert!(text.contains("task_1"));
         assert!(text.contains("Task Tracking"));
@@ -3352,10 +5086,11 @@ mod tests {
         assert_eq!(code, 0);
         assert!(text.contains("moxi-agent"));
         assert!(text.contains("graph=demo_graph"));
-        assert!(text.contains("preview MOXI shell experience"));
-        assert!(text.contains("The CLI should feel like a safe agent control panel"));
-        assert!(text.contains("4 tasks"));
-        assert!(text.contains("1 approvals"));
+        assert!(text.contains("local-r10-demo-session"));
+        assert!(text.contains("guarded read-only session"));
+        assert!(text.contains("model: session-local"));
+        assert!(text.contains("tools: workspace.probe"));
+        assert!(text.contains("Collect workspace facts"));
         assert!(text.contains("Input Task"));
         assert!(text.contains("active=Graph selected_task=0 filter=<none>"));
         assert!(text.contains("quit=true"));
@@ -3383,9 +5118,948 @@ mod tests {
 
         assert_eq!(code, 0);
         assert!(text.contains("pane=Boundary"));
-        assert!(text.contains("safe plan"));
         assert!(text.contains("> Ask moxi-agent"));
         assert!(text.contains("Task Tracking"));
+    }
+
+    #[test]
+    fn tui_state_starts_with_agent_session_scaffold() {
+        let state = TuiState::default();
+
+        assert_eq!(state.session.id, "local-r10-demo-session");
+        assert_eq!(state.session.mode, TuiSessionMode::ReadOnly);
+        assert_eq!(state.session.turn_count, 1);
+        assert_eq!(state.session.agents.len(), 3);
+        assert!(state
+            .session
+            .skills
+            .iter()
+            .any(|skill| skill == "tui.design"));
+        assert!(state.session.tools.iter().any(|tool| tool == "git.status"));
+        assert_eq!(state.session.messages.len(), 2);
+        assert_eq!(state.session.steps.len(), 3);
+        assert_eq!(
+            state.session.steps[state.session.active_step_index].label,
+            "Collect workspace facts"
+        );
+        assert!(state.session.workspace.cwd.contains("MOXI-Essence-agent"));
+        assert_eq!(state.session.workspace.config_path, ".moxi\\agents.toml");
+        assert_eq!(state.session.workspace.trust, "pending");
+        assert_eq!(state.session.workspace.trust_path, ".moxi\\trust.toml");
+        assert_eq!(state.session.trust.status, TuiTrustStatus::NeedsReview);
+        assert!(!state.session.workspace.cargo_state.is_empty());
+        assert!(!state.session.workspace.docs_state.is_empty());
+    }
+
+    #[test]
+    fn workspace_probe_reports_missing_files_without_failing() {
+        let temp = tempfile::tempdir().unwrap();
+
+        let facts = WorkspaceFacts::detect_at(temp.path());
+
+        assert_eq!(
+            facts.short_path,
+            temp.path().file_name().unwrap().to_string_lossy()
+        );
+        assert_eq!(facts.config_state, "missing");
+        assert_eq!(facts.trust_state, "missing");
+        assert_eq!(facts.docs_state, "missing");
+        assert_eq!(facts.cargo_state, "Cargo.toml missing");
+        assert_eq!(facts.git_state, "not a git repo");
+    }
+
+    #[test]
+    fn trust_state_detects_known_read_only_workspace_marker() {
+        let temp = tempfile::tempdir().unwrap();
+        let moxi_dir = temp.path().join(".moxi");
+        std::fs::create_dir(&moxi_dir).unwrap();
+        std::fs::write(moxi_dir.join("trust.toml"), "mode = \"read-only\"\n").unwrap();
+        let workspace = WorkspaceFacts::detect_at(temp.path());
+
+        let trust = TuiTrustState::from_workspace(&workspace);
+
+        assert_eq!(workspace.trust_state, "present");
+        assert_eq!(trust.status, TuiTrustStatus::KnownReadOnly);
+        assert!(!trust.should_show_gate());
+    }
+
+    #[test]
+    fn startup_flow_conditionally_skips_trust_when_marker_exists() {
+        let mut state = TuiState {
+            screen: TuiScreen::Boot,
+            ..TuiState::default()
+        };
+        apply_tui_key(&mut state, &TuiKey::SubmitCommand);
+        assert_eq!(state.screen, TuiScreen::Trust);
+
+        state.screen = TuiScreen::Boot;
+        state.session.trust.status = TuiTrustStatus::KnownReadOnly;
+        apply_tui_key(&mut state, &TuiKey::SubmitCommand);
+        assert_eq!(state.screen, TuiScreen::Core);
+    }
+
+    #[test]
+    fn trust_commands_capture_local_intent_without_authority() {
+        let mut state = TuiState {
+            command_input: "/approve".to_owned(),
+            ..TuiState::default()
+        };
+
+        submit_tui_command(&mut state);
+
+        assert_eq!(state.session.trust.status, TuiTrustStatus::TrustedReadOnly);
+        assert_eq!(state.screen, TuiScreen::Core);
+        assert!(state.command_status.contains("P0 still authorizes"));
+
+        state.command_input = "/deny".to_owned();
+        submit_tui_command(&mut state);
+
+        assert_eq!(state.session.trust.status, TuiTrustStatus::Denied);
+        assert_eq!(state.screen, TuiScreen::Trust);
+        assert!(state.command_status.contains("blocked"));
+    }
+
+    #[test]
+    fn workspace_probe_reads_repo_cargo_and_docs_facts() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("moxi-cli crate should live under crates/moxi-cli");
+
+        let facts = WorkspaceFacts::detect_at(root);
+
+        assert!(facts.cargo_state.contains("workspace"));
+        assert_eq!(facts.docs_state, "present");
+    }
+
+    #[test]
+    fn tui_context_snapshot_scores_available_sources() {
+        let session = TuiAgentSession::default();
+
+        let snapshot = session.context_snapshot();
+
+        assert_eq!(snapshot.sources.len(), 8);
+        assert!(snapshot.percent > 50);
+        assert!(snapshot
+            .sources
+            .iter()
+            .any(|source| source.label == "messages" && source.available));
+        assert!(snapshot
+            .sources
+            .iter()
+            .any(|source| source.label == "steps" && source.available));
+    }
+
+    #[test]
+    fn tui_session_persistence_snapshot_roundtrips_as_local_json() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = WorkspaceFacts::detect_at(temp.path());
+        let mut session = TuiAgentSession {
+            workspace,
+            ..TuiAgentSession::default()
+        };
+        session.submit_user_task("inspect project status");
+        session.advance_loading();
+        session.advance_loading();
+        session.advance_loading();
+
+        let path = session.save_persistence_snapshot().unwrap();
+        assert_eq!(
+            path,
+            temp.path()
+                .join(".moxi")
+                .join("session")
+                .join("tui-session.json")
+        );
+
+        let snapshot = TuiAgentSession::load_persistence_snapshot(&path).unwrap();
+
+        assert_eq!(snapshot.schema_version, 1);
+        assert_eq!(snapshot.session_id, "local-r10-demo-session");
+        assert_eq!(snapshot.workspace.cwd, temp.path().display().to_string());
+        assert_eq!(snapshot.turn_count, 2);
+        assert!(snapshot.context_percent > 0);
+        assert!(snapshot
+            .messages
+            .iter()
+            .any(|message| message.body.contains("read-only analysis")));
+        assert!(snapshot
+            .steps
+            .iter()
+            .any(|step| step.label == "Await backend adapter"));
+    }
+
+    #[test]
+    fn agent_profiles_load_from_agents_toml() {
+        let text = r#"
+[[agents]]
+name = "moxi-agent"
+role = "orchestrator"
+model = "gpt-5.5"
+reasoning = "high"
+
+[[agents]]
+name = "ui-agent"
+role = "rich-cli"
+"#;
+
+        let agents = TuiAgentProfile::parse_agents_toml(text);
+
+        assert_eq!(agents.len(), 2);
+        assert_eq!(agents[0].name, "moxi-agent");
+        assert_eq!(agents[0].model, "gpt-5.5");
+        assert_eq!(agents[0].reasoning, "high");
+        assert_eq!(agents[1].name, "ui-agent");
+        assert_eq!(agents[1].role, "rich-cli");
+        assert_eq!(agents[1].model, "session-local");
+        assert_eq!(agents[1].reasoning, "medium");
+    }
+
+    #[test]
+    fn agent_profiles_fallback_when_config_is_missing() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = WorkspaceFacts::detect_at(temp.path());
+
+        let agents = TuiAgentProfile::load_for_workspace(&workspace);
+
+        assert_eq!(agents.len(), 3);
+        assert!(agents.iter().any(|agent| agent.name == "moxi-agent"));
+    }
+
+    #[test]
+    fn agent_profiles_load_for_workspace_config_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let config_dir = temp.path().join(".moxi");
+        std::fs::create_dir(&config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("agents.toml"),
+            r#"
+[[agents]]
+name = "research-agent"
+role = "workspace-research"
+model = "local-probe"
+reasoning = "low"
+"#,
+        )
+        .unwrap();
+        let workspace = WorkspaceFacts::detect_at(temp.path());
+
+        let agents = TuiAgentProfile::load_for_workspace(&workspace);
+
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].name, "research-agent");
+        assert_eq!(agents[0].role, "workspace-research");
+    }
+
+    #[test]
+    fn tui_messages_carry_structured_model_reasoning_and_tools() {
+        let mut state = TuiState {
+            command_input: "inspect project status".to_owned(),
+            ..TuiState::default()
+        };
+
+        submit_tui_command(&mut state);
+
+        let agent_message = state
+            .session
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.agent == "moxi-agent")
+            .unwrap();
+        assert_eq!(agent_message.metadata.model, "session-local");
+        assert_eq!(agent_message.metadata.reasoning, "medium");
+        assert_eq!(agent_message.metadata.tools, vec!["task.plan"]);
+        assert_eq!(agent_message.metadata.status, "state: streaming");
+
+        apply_tui_key(&mut state, &TuiKey::Refresh);
+        let agent_message = state
+            .session
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.agent == "moxi-agent")
+            .unwrap();
+        assert_eq!(agent_message.metadata.status, "stream tick 1");
+        assert!(agent_message
+            .metadata
+            .render()
+            .contains("model: session-local"));
+        assert!(agent_message.metadata.render().contains("tools: task.plan"));
+    }
+
+    #[test]
+    fn tui_session_converts_user_task_into_messages_and_steps() {
+        let mut state = TuiState {
+            command_input: "inspect project status".to_owned(),
+            ..TuiState::default()
+        };
+
+        submit_tui_command(&mut state);
+
+        assert_eq!(state.session.turn_count, 2);
+        assert_eq!(state.session.messages.len(), 4);
+        assert!(state
+            .session
+            .messages
+            .iter()
+            .any(|message| message.agent == "owner" && message.body == "inspect project status"));
+        assert!(state
+            .session
+            .messages
+            .iter()
+            .any(|message| message.agent == "moxi-agent"
+                && message.body.contains("Turn 2")
+                && message.state == TuiMessageState::Streaming));
+        assert_eq!(state.session.steps.len(), 6);
+        assert_eq!(
+            state.session.steps[state.session.active_step_index].label,
+            "Prepare read-only plan"
+        );
+        assert_eq!(state.selected_task_index, state.session.active_step_index);
+        assert!(state.follow_active_step);
+        assert!(state.command_status.contains("submitted Turn 2"));
+    }
+
+    #[test]
+    fn tui_detects_risky_input_before_submission() {
+        let high = TuiRiskPrompt::detect("commit and push these changes to github").unwrap();
+        assert_eq!(high.level, TuiRiskLevel::High);
+        assert!(high.reason.contains("write"));
+
+        let medium = TuiRiskPrompt::detect("run tests for the workspace").unwrap();
+        assert_eq!(medium.level, TuiRiskLevel::Medium);
+
+        assert!(TuiRiskPrompt::detect("inspect project status").is_none());
+    }
+
+    #[test]
+    fn tui_risky_task_waits_for_local_approval_intent() {
+        let mut state = TuiState {
+            command_input: "commit and push current branch".to_owned(),
+            ..TuiState::default()
+        };
+
+        submit_tui_command(&mut state);
+
+        assert!(state.pending_risk.is_some());
+        assert_eq!(state.active_pane, TuiPane::Approvals);
+        assert_eq!(state.session.turn_count, 1);
+        assert!(state.command_status.contains("risk prompt pending"));
+
+        state.command_input = "/approve".to_owned();
+        submit_tui_command(&mut state);
+
+        assert!(state.pending_risk.is_none());
+        assert_eq!(state.session.turn_count, 2);
+        assert!(state.session.is_streaming());
+        assert!(state.command_status.contains("local planning only"));
+    }
+
+    #[test]
+    fn tui_risky_task_can_be_denied_without_submission() {
+        let mut state = TuiState {
+            command_input: "delete generated files".to_owned(),
+            ..TuiState::default()
+        };
+
+        submit_tui_command(&mut state);
+        assert!(state.pending_risk.is_some());
+
+        state.command_input = "/deny".to_owned();
+        submit_tui_command(&mut state);
+
+        assert!(state.pending_risk.is_none());
+        assert_eq!(state.session.turn_count, 1);
+        assert!(state.command_status.contains("not submitted"));
+    }
+
+    #[test]
+    fn tui_refresh_advances_streaming_agent_reply() {
+        let mut state = TuiState {
+            command_input: "inspect project status".to_owned(),
+            ..TuiState::default()
+        };
+
+        submit_tui_command(&mut state);
+        assert!(state.session.is_streaming());
+
+        apply_tui_key(&mut state, &TuiKey::Refresh);
+        assert!(state.session.is_streaming());
+        assert_eq!(state.session.loading_tick, 1);
+        assert!(state.command_status.contains("streaming agent response"));
+
+        apply_tui_key(&mut state, &TuiKey::Refresh);
+        apply_tui_key(&mut state, &TuiKey::Refresh);
+
+        assert!(!state.session.is_streaming());
+        assert!(state.command_status.contains("complete"));
+        assert_eq!(
+            state.session.steps[state.session.active_step_index].label,
+            "Await backend adapter"
+        );
+        assert_eq!(
+            state.session.steps[state.session.active_step_index].state,
+            TuiStepState::Active
+        );
+        let completed_reply = state
+            .session
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.agent == "moxi-agent")
+            .unwrap();
+        assert!(completed_reply
+            .body
+            .contains("read-only analysis for \"inspect project status\""));
+        assert!(completed_reply.body.contains("focus=project status"));
+        assert!(completed_reply.body.contains("workspace="));
+        assert!(completed_reply.body.contains("git="));
+        assert!(completed_reply.body.contains("cargo="));
+        assert!(completed_reply.body.contains("P0 remains required"));
+    }
+
+    #[test]
+    fn tui_read_only_analysis_focus_tracks_task_text() {
+        let workspace = WorkspaceFacts {
+            cwd: "C:\\demo".to_owned(),
+            short_path: "demo".to_owned(),
+            config_path: ".moxi\\agents.toml".to_owned(),
+            config_state: "present".to_owned(),
+            trust_path: ".moxi\\trust.toml".to_owned(),
+            trust_state: "present".to_owned(),
+            git_state: "main clean".to_owned(),
+            cargo_state: "workspace 2 crates".to_owned(),
+            docs_state: "present".to_owned(),
+            trust: "pending".to_owned(),
+        };
+
+        let agents = read_only_project_analysis(
+            2,
+            "summarize active agents and skills",
+            &workspace,
+            TuiTrustStatus::KnownReadOnly,
+        );
+        assert!(agents.contains("focus=agent configuration"));
+        assert!(agents.contains("config=present"));
+        assert!(agents.contains("trust=known-read-only"));
+
+        let verification = read_only_project_analysis(
+            3,
+            "check cargo tests",
+            &workspace,
+            TuiTrustStatus::KnownReadOnly,
+        );
+        assert!(verification.contains("focus=verification readiness"));
+        assert!(verification.contains("P0 remains required"));
+    }
+
+    #[test]
+    fn tui_slash_commands_append_state_backed_messages() {
+        let mut state = TuiState {
+            command_input: "/status".to_owned(),
+            ..TuiState::default()
+        };
+        submit_tui_command(&mut state);
+        assert!(state
+            .session
+            .messages
+            .iter()
+            .any(|message| message.role == "status" && message.body.contains("git=")));
+
+        state.command_input = "/tasks".to_owned();
+        submit_tui_command(&mut state);
+        assert!(state
+            .session
+            .messages
+            .iter()
+            .any(|message| message.role == "tasks" && message.body.contains("active step")));
+
+        state.command_input = "/agents".to_owned();
+        submit_tui_command(&mut state);
+        assert!(state
+            .session
+            .messages
+            .iter()
+            .any(|message| message.role == "agents" && message.body.contains("ui-agent")));
+
+        state.command_input = "/skills".to_owned();
+        submit_tui_command(&mut state);
+        assert!(state
+            .session
+            .messages
+            .iter()
+            .any(|message| message.role == "skills" && message.body.contains("tui.design")));
+
+        state.command_input = "/context".to_owned();
+        submit_tui_command(&mut state);
+        assert!(state
+            .session
+            .messages
+            .iter()
+            .any(|message| message.role == "context"
+                && message.body.contains("Context meter")
+                && message.body.contains("messages=")));
+        assert!(state.command_status.contains("context sources"));
+    }
+
+    #[test]
+    fn tui_save_and_resume_commands_use_local_snapshot_summary() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = WorkspaceFacts::detect_at(temp.path());
+        let mut state = TuiState {
+            session: TuiAgentSession {
+                workspace,
+                ..TuiAgentSession::default()
+            },
+            command_input: "inspect project status".to_owned(),
+            ..TuiState::default()
+        };
+        submit_tui_command(&mut state);
+        apply_tui_key(&mut state, &TuiKey::Refresh);
+        apply_tui_key(&mut state, &TuiKey::Refresh);
+        apply_tui_key(&mut state, &TuiKey::Refresh);
+
+        state.command_input = "/save".to_owned();
+        submit_tui_command(&mut state);
+
+        let path = temp
+            .path()
+            .join(".moxi")
+            .join("session")
+            .join("tui-session.json");
+        assert!(path.is_file());
+        assert!(state
+            .command_status
+            .contains("saved local TUI session snapshot"));
+
+        let messages_before_resume = state.session.messages.len();
+        state.command_input = "/resume".to_owned();
+        submit_tui_command(&mut state);
+
+        assert_eq!(state.active_pane, TuiPane::Overview);
+        assert!(state
+            .command_status
+            .contains("loaded local TUI snapshot summary"));
+        assert_eq!(state.session.messages.len(), messages_before_resume + 1);
+        assert!(state
+            .session
+            .messages
+            .iter()
+            .any(|message| message.role == "resume"
+                && message.body.contains("current session was not overwritten")));
+    }
+
+    #[test]
+    fn tui_demo_flow_onboards_completes_task_saves_and_resumes() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = WorkspaceFacts::detect_at(temp.path());
+        let mut state = TuiState {
+            screen: TuiScreen::Boot,
+            session: TuiAgentSession {
+                workspace,
+                ..TuiAgentSession::default()
+            },
+            ..TuiState::default()
+        };
+
+        for key in [
+            TuiKey::SubmitCommand,
+            TuiKey::SubmitCommand,
+            TuiKey::SubmitCommand,
+        ] {
+            apply_tui_key(&mut state, &key);
+        }
+        assert_eq!(state.screen, TuiScreen::Workspace);
+        assert_eq!(state.active_pane, TuiPane::Keys);
+
+        state.command_input = "inspect project status".to_owned();
+        submit_tui_command(&mut state);
+        assert_eq!(state.session.turn_count, 2);
+        assert!(state.session.is_streaming());
+
+        for _ in 0..3 {
+            apply_tui_key(&mut state, &TuiKey::Refresh);
+        }
+        assert!(!state.session.is_streaming());
+        assert!(state
+            .session
+            .messages
+            .iter()
+            .any(|message| message.body.contains("read-only analysis")));
+        assert_eq!(
+            state.session.steps[state.session.active_step_index].label,
+            "Await backend adapter"
+        );
+
+        state.command_input = "/save".to_owned();
+        submit_tui_command(&mut state);
+        assert!(state.session.persistence_path().is_file());
+
+        let messages_after_save = state.session.messages.len();
+        state.command_input = "/resume".to_owned();
+        submit_tui_command(&mut state);
+        assert_eq!(state.session.messages.len(), messages_after_save + 1);
+        assert!(state
+            .command_status
+            .contains("loaded local TUI snapshot summary"));
+
+        apply_tui_key(&mut state, &TuiKey::Quit);
+        assert!(state.should_quit);
+    }
+
+    #[test]
+    fn tui_high_risk_approval_creates_local_plan_without_trusting_workspace() {
+        let mut state = TuiState {
+            command_input: "commit and push current branch".to_owned(),
+            ..TuiState::default()
+        };
+
+        submit_tui_command(&mut state);
+        assert!(state.pending_risk.is_some());
+        assert_eq!(state.session.trust.status, TuiTrustStatus::NeedsReview);
+
+        state.command_input = "/approve".to_owned();
+        submit_tui_command(&mut state);
+
+        assert!(state.pending_risk.is_none());
+        assert_eq!(state.session.trust.status, TuiTrustStatus::NeedsReview);
+        assert_eq!(state.screen, TuiScreen::Workspace);
+        assert!(state.session.is_streaming());
+        assert_eq!(state.session.turn_count, 2);
+        assert!(state.command_status.contains("local planning only"));
+        assert!(state
+            .session
+            .messages
+            .iter()
+            .any(|message| message.agent == "owner"
+                && message.body == "commit and push current branch"));
+    }
+
+    #[test]
+    fn tui_status_command_renders_session_state_message() {
+        let mut output = Vec::new();
+
+        let code = run(
+            [
+                "moxi-cli",
+                "tui",
+                "--width",
+                "132",
+                "--height",
+                "38",
+                "--keys",
+                "type:/,type:s,type:t,type:a,type:t,type:u,type:s,enter,q",
+            ],
+            &mut output,
+        )
+        .unwrap();
+        let text = String::from_utf8(output).unwrap();
+
+        assert_eq!(code, 0);
+        assert!(text.contains("[status]"));
+        assert!(text.contains("git="));
+        assert!(text.contains("cargo="));
+    }
+
+    #[test]
+    fn tui_context_command_renders_context_meter_and_sources() {
+        let mut output = Vec::new();
+
+        let code = run(
+            [
+                "moxi-cli",
+                "tui",
+                "--width",
+                "132",
+                "--height",
+                "38",
+                "--keys",
+                "type:/,type:c,type:o,type:n,type:t,type:e,type:x,type:t,enter,q",
+            ],
+            &mut output,
+        )
+        .unwrap();
+        let text = String::from_utf8(output).unwrap();
+
+        assert_eq!(code, 0);
+        assert!(text.contains("[context]"));
+        assert!(text.contains("Context meter"));
+        assert!(text.contains("docs/status.md"));
+        assert!(text.contains("/context"));
+    }
+
+    #[test]
+    fn tui_task_tracking_can_pause_and_resume_active_step_follow() {
+        let mut state = TuiState {
+            command_input: "inspect project status".to_owned(),
+            ..TuiState::default()
+        };
+        submit_tui_command(&mut state);
+        assert_eq!(
+            selected_session_step_index(&state),
+            state.session.active_step_index
+        );
+
+        apply_tui_key(&mut state, &TuiKey::MoveTaskUp);
+        assert!(!state.follow_active_step);
+        assert_eq!(state.active_pane, TuiPane::Tasks);
+        assert_eq!(
+            selected_session_step_index(&state),
+            state.session.active_step_index - 1
+        );
+
+        state.command_input = "/follow".to_owned();
+        submit_tui_command(&mut state);
+        assert!(state.follow_active_step);
+        assert_eq!(
+            selected_session_step_index(&state),
+            state.session.active_step_index
+        );
+        assert_eq!(state.selected_task_index, state.session.active_step_index);
+    }
+
+    #[test]
+    fn tui_input_task_renders_generated_conversation_turn() {
+        let mut output = Vec::new();
+
+        let code = run(
+            [
+                "moxi-cli",
+                "tui",
+                "--width",
+                "132",
+                "--height",
+                "34",
+                "--keys",
+                "type:i,type:n,type:s,type:p,type:e,type:c,type:t,enter,q",
+            ],
+            &mut output,
+        )
+        .unwrap();
+        let text = String::from_utf8(output).unwrap();
+
+        assert_eq!(code, 0);
+        assert!(text.contains("owner"));
+        assert!(text.contains("inspect"));
+        assert!(text.contains("Turn 2"));
+        assert!(text.contains("streaming"));
+        assert!(text.contains("follow:"));
+        assert!(text.contains("selected:"));
+        assert!(text.contains("detail:"));
+        assert!(text.contains("Capture user task"));
+        assert!(text.contains("Prepare read-only plan"));
+    }
+
+    #[test]
+    fn tui_streaming_reply_renders_loading_frame() {
+        let mut output = Vec::new();
+
+        let code = run(
+            [
+                "moxi-cli",
+                "tui",
+                "--width",
+                "132",
+                "--height",
+                "34",
+                "--keys",
+                "type:i,type:n,type:s,type:p,type:e,type:c,type:t,enter,r,q",
+            ],
+            &mut output,
+        )
+        .unwrap();
+        let text = String::from_utf8(output).unwrap();
+
+        assert_eq!(code, 0);
+        assert!(text.contains("streaming"));
+        assert!(text.contains("stream tick 1"));
+        assert!(text.contains("drafting response"));
+    }
+
+    #[test]
+    fn tui_risk_prompt_renders_near_input_box() {
+        let mut output = Vec::new();
+
+        let code = run(
+            [
+                "moxi-cli",
+                "tui",
+                "--width",
+                "132",
+                "--height",
+                "34",
+                "--keys",
+                "type:c,type:o,type:m,type:m,type:i,type:t,enter,q",
+            ],
+            &mut output,
+        )
+        .unwrap();
+        let text = String::from_utf8(output).unwrap();
+
+        assert_eq!(code, 0);
+        assert!(text.contains("risk"));
+        assert!(text.contains("high"));
+        assert!(text.contains("/approve"));
+        assert!(text.contains("/deny"));
+        assert!(text.contains("local planning intent"));
+    }
+
+    #[test]
+    fn tui_conversation_scroll_tracks_multi_turn_messages() {
+        let mut state = TuiState::default();
+
+        for task in [
+            "inspect project status",
+            "summarize active agents",
+            "prepare next safe plan",
+        ] {
+            state.command_input = task.to_owned();
+            submit_tui_command(&mut state);
+        }
+
+        assert_eq!(state.session.turn_count, 4);
+        assert_eq!(state.session.messages.len(), 8);
+        assert!(state.follow_latest_message);
+        assert_eq!(state.conversation_scroll, 0);
+
+        apply_tui_key(&mut state, &TuiKey::MoveConversationDown);
+        assert_eq!(state.active_pane, TuiPane::Overview);
+        assert!(!state.follow_latest_message);
+        assert_eq!(state.conversation_scroll, 1);
+
+        state.command_input = "resume latest turn".to_owned();
+        submit_tui_command(&mut state);
+
+        assert_eq!(state.session.turn_count, 5);
+        assert!(state.follow_latest_message);
+        assert_eq!(state.conversation_scroll, 0);
+    }
+
+    #[test]
+    fn tui_conversation_scroll_renders_hidden_line_markers() {
+        let mut output = Vec::new();
+
+        let code = run(
+            [
+                "moxi-cli",
+                "tui",
+                "--width",
+                "132",
+                "--height",
+                "36",
+                "--keys",
+                "type:a,enter,type:b,enter,type:c,enter,type:d,enter,chat_up,q",
+            ],
+            &mut output,
+        )
+        .unwrap();
+        let text = String::from_utf8(output).unwrap();
+
+        assert_eq!(code, 0);
+        assert!(text.contains("Conversation"));
+        assert!(text.contains("chat manual"));
+        assert!(text.contains("newer lines hidden"));
+    }
+
+    #[test]
+    fn tui_enter_advances_startup_flow_before_submitting_workspace_input() {
+        let mut state = TuiState {
+            screen: TuiScreen::Boot,
+            command_status: "startup: Enter continues · q exits".into(),
+            ..TuiState::default()
+        };
+
+        apply_tui_key(&mut state, &TuiKey::SubmitCommand);
+        assert_eq!(state.screen, TuiScreen::Trust);
+        assert_eq!(
+            state.command_status,
+            "trust gate: Enter read-only · /approve accept · /deny block"
+        );
+
+        apply_tui_key(&mut state, &TuiKey::SubmitCommand);
+        assert_eq!(state.screen, TuiScreen::Core);
+        assert_eq!(
+            state.command_status,
+            "Agent Core ready: Enter opens workspace"
+        );
+
+        apply_tui_key(&mut state, &TuiKey::SubmitCommand);
+        assert_eq!(state.screen, TuiScreen::Workspace);
+        assert_eq!(state.active_pane, TuiPane::Keys);
+        assert_eq!(
+            state.command_status,
+            "ready: type a task or open / command menu"
+        );
+
+        let mut output = Vec::new();
+
+        let code = run(
+            [
+                "moxi-cli",
+                "tui",
+                "--width",
+                "120",
+                "--height",
+                "30",
+                "--keys",
+                "boot,enter,enter,enter,q",
+            ],
+            &mut output,
+        )
+        .unwrap();
+        let text = String::from_utf8(output).unwrap();
+
+        assert_eq!(code, 0);
+        assert!(text.contains("moxi-agent"));
+        assert!(text.contains("Conversation"));
+        assert!(text.contains("Task Tracking"));
+        assert!(text.contains("Input Task"));
+        assert!(text.contains("quit=true"));
+    }
+
+    #[test]
+    fn tui_startup_pages_are_addressable_without_auto_flash() {
+        let mut output = Vec::new();
+
+        let code = run(
+            [
+                "moxi-cli", "tui", "--width", "112", "--height", "30", "--keys", "boot,q",
+            ],
+            &mut output,
+        )
+        .unwrap();
+        let text = String::from_utf8(output).unwrap();
+
+        assert_eq!(code, 0);
+        assert!(text.contains("MOXI // AGENT"));
+        assert!(text.contains("SILVER CORE ONLINE"));
+        assert!(text.contains("Initialization waterfall"));
+        assert!(text.contains("Waiting for owner handoff"));
+        assert!(text.contains("continue startup flow"));
+    }
+
+    #[test]
+    fn tui_core_page_renders_visual_identity_and_runtime_facts() {
+        let mut output = Vec::new();
+
+        let code = run(
+            [
+                "moxi-cli", "tui", "--width", "132", "--height", "34", "--keys", "core,q",
+            ],
+            &mut output,
+        )
+        .unwrap();
+        let text = String::from_utf8(output).unwrap();
+
+        assert_eq!(code, 0);
+        assert!(text.contains("AGENT CORE"));
+        assert!(text.contains("[ P0 ] protected"));
+        assert!(text.contains("[ P2 ] rich-cli"));
+        assert!(text.contains("Agent Runtime"));
+        assert!(text.contains("session file:"));
+        assert!(text.contains("tui-session.json"));
+        assert!(text.contains("Loaded Agents"));
     }
 
     #[test]
@@ -3398,7 +6072,10 @@ mod tests {
         assert_eq!(code, 0);
         assert!(text.contains("moxi-agent"));
         assert!(text.contains("graph=demo_graph"));
-        assert!(text.contains("The CLI should feel like a safe agent control panel"));
+        assert!(text.contains("local-r10-demo-session"));
+        assert!(text.contains("guarded read-only session"));
+        assert!(text.contains("cargo"));
+        assert!(text.contains("workspace"));
         assert!(text.contains("guarded"));
     }
 
@@ -3452,9 +6129,9 @@ mod tests {
         assert_eq!(code, 0);
         assert!(text.contains("Default:"));
         assert!(text.contains("moxi"));
-        assert!(
-            text.contains("Opens the branded full-screen read-only TUI demo/onboarding dashboard.")
-        );
+        assert!(text.contains("Opens the resident branded read-only TUI workbench."));
+        assert!(text.contains("Startup pages wait for owner input"));
+        assert!(text.contains("Enter advances Boot -> Trust -> Agent Core -> Workspace"));
         assert!(text.contains("tui [--feed|--query] [--input <snapshot.json>]"));
     }
 
@@ -3504,9 +6181,9 @@ mod tests {
                 "--input",
                 path.to_str().unwrap(),
                 "--width",
-                "112",
+                "132",
                 "--height",
-                "30",
+                "38",
                 "--keys",
                 "tab,tab,/task_2,r,q,tab",
             ],
@@ -3519,7 +6196,7 @@ mod tests {
         assert!(text.contains("pane=Tasks"));
         assert!(text.contains("refresh=1"));
         assert!(text.contains("filter=task_2"));
-        assert!(text.contains("active=Tasks selected_task=0 filter=task_2"));
+        assert!(text.contains("active=Tasks selected_task=1 filter=task_2"));
         assert!(text.contains("quit=true"));
         assert!(text.contains("task_2"));
         assert!(text.contains("file.read"));
@@ -3557,9 +6234,61 @@ mod tests {
         let text = String::from_utf8(output).unwrap();
 
         assert_eq!(code, 0);
-        assert!(text.contains("Commands"));
+        assert!(text.contains("Command Palette"));
         assert!(text.contains("/status"));
+        assert!(text.contains("Up/Down select"));
         assert!(text.contains("Ask moxi-agent"));
+    }
+
+    #[test]
+    fn tui_command_palette_filters_and_runs_selected_command() {
+        let mut state = TuiState {
+            command_input: "/con".to_owned(),
+            show_command_palette: true,
+            ..TuiState::default()
+        };
+
+        let entries = filtered_command_palette_entries(&state.command_input);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].command, "/context");
+
+        apply_tui_key(&mut state, &TuiKey::SubmitCommand);
+
+        assert!(!state.show_command_palette);
+        assert_eq!(state.command_input, "");
+        assert_eq!(state.active_pane, TuiPane::Overview);
+        assert_eq!(state.screen, TuiScreen::Workspace);
+        assert!(state.command_status.contains("context sources"));
+        assert!(state
+            .session
+            .messages
+            .iter()
+            .any(|message| message.role == "context"));
+    }
+
+    #[test]
+    fn tui_command_palette_selection_moves_without_task_selection() {
+        let mut state = TuiState {
+            show_command_palette: true,
+            ..TuiState::default()
+        };
+        let selected_task = state.selected_task_index;
+
+        apply_tui_key(&mut state, &TuiKey::MoveTaskDown);
+        apply_tui_key(&mut state, &TuiKey::MoveTaskDown);
+
+        assert_eq!(state.selected_task_index, selected_task);
+        assert_eq!(state.command_palette_index, 2);
+        assert!(state.command_status.contains("/agents"));
+
+        apply_tui_key(&mut state, &TuiKey::SubmitCommand);
+
+        assert_eq!(state.screen, TuiScreen::Core);
+        assert!(state
+            .session
+            .messages
+            .iter()
+            .any(|message| message.role == "agents"));
     }
 
     #[test]
@@ -3597,7 +6326,8 @@ mod tests {
         assert!(text.contains("active=Graph selected_task=0 filter=<none>"));
         assert!(text.contains("quit=true"));
         assert!(text.contains("graph=graph_detail"));
-        assert!(text.contains("The CLI should feel like a safe agent control panel"));
+        assert!(text.contains("local-r10-demo-session"));
+        assert!(text.contains("guarded read-only session"));
     }
 
     #[test]
@@ -3633,8 +6363,8 @@ mod tests {
         assert_eq!(code, 0);
         assert!(text.contains("pane=Tasks"));
         assert!(text.contains("active=Tasks selected_task=1"));
-        assert!(text.contains("task_2"));
-        assert!(text.contains("file.read"));
+        assert!(text.contains("Collect workspace facts"));
+        assert!(text.contains("cwd/config/mode"));
         assert!(text.contains("Task Tracking"));
     }
 

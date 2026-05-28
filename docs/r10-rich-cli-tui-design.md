@@ -32,26 +32,35 @@ changes, permissions are elevated, or the user clears trust state.
 Purpose: visual impact and product identity.
 
 Use a large `moxi-agent` wordmark with ANSI color gradients, an optional ASCII
-or pixel logo, and a short loading waterfall. Keep this fast, around 0.8-1.5
-seconds.
+or pixel logo, and a short loading waterfall. This page must represent real
+initialization state and must not flash past automatically in the interactive
+CLI. It waits for owner input, then advances through trust, Agent Core, and the
+workspace.
 
 ```text
-        M O X I - A G E N T
-        ===================
-        SILVER CORE ONLINE
-        GUARDED RICH CLI
-        ===================
+        MOXI // AGENT      guarded terminal intelligence
+        ███╗   ███╗ ██████╗ ██╗  ██╗██╗       █████╗  ██████╗ ███████╗███╗   ██╗████████╗
+        ████╗ ████║██╔═══██╗╚██╗██╔╝██║      ██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝
+        ██╔████╔██║██║   ██║ ╚███╔╝ ██║█████╗███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║
+        ██║╚██╔╝██║██║   ██║ ██╔██╗ ██║╚════╝██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║
+        ██║ ╚═╝ ██║╚██████╔╝██╔╝ ██╗██║      ██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║
 
-        moxi-agent  Silver Core | guarded agent operating system
+        SILVER CORE ONLINE | P0 GUARDED | P2 RICH CLI
 
-  > Initializing Silver Core  [####################--------]
-  + Loading Agent Core
-  + Loading runtime adapters
+        moxi-agent  guarded agent operating system  session local-r10-demo-session
+        CORE Silver Core  SHELL P2 rich-cli  MODE guarded read-only
+
+  Initialization waterfall
+  > Initializing Silver Core  [###################-----]
+  + Loading Agent Core profiles
+  + Reading configured skills and tools
   > Reading workspace context: C:\MOXI-Essence-agent\MOXI-Essence-agent
   - Checking trust boundary
-  - Opening Rich CLI control panel
+  - Waiting for owner handoff
 
-  core P0 protected    shell P2 rich-cli    mode guarded
+  Enter continue startup flow    4 workspace    q quit
+
+  graph demo_graph    context workspace facts ready
 ```
 
 ## Page 2: Workspace Trust Risk Gate
@@ -123,6 +132,12 @@ Loaded Agents
 moxi-agent: orchestrator, planning, task routing
 ui-agent: rich-cli, terminal-design, ratatui
 guard-agent: trust-boundary, approval, risk-review
+
+Agent config source:
+`.moxi/agents.toml` may define `[[agents]]` entries with `name`, `role`,
+`model`, and `reasoning`. The TUI should show configured active agents first.
+If config is missing or incomplete, it may fall back to a small documented
+local demo set; the product must not assume a permanent five-agent roster.
 
 Available Tools
 file.read | repo.inspect | git.status | test.run

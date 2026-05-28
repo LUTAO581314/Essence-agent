@@ -803,11 +803,7 @@ impl RuntimePlanningAdapter {
             .with_policy_profile(RuntimePolicyProfile::shell_ide_readonly());
         let intent = read_only_intent(request.task, &request.workspace.cwd, "file.read");
         let planner = runtime.planner_plan(&intent).ok()?;
-        let steps = planner
-            .steps
-            .iter()
-            .map(runtime_planner_step_to_tui)
-            .collect::<Vec<_>>();
+        let steps = runtime_planner_steps_to_tui(request, &planner.steps);
         Some(TuiBackendPlan {
             plan_id: format!("runtime-{}", planner.plan_id),
             source: format!("runtime-planner:{:?}", planner.source),
@@ -817,14 +813,72 @@ impl RuntimePlanningAdapter {
     }
 }
 
-fn runtime_planner_step_to_tui(step: &PlannerStep) -> TuiBackendPlanStep {
-    TuiBackendPlanStep {
-        label: format!("{} via {}", step.capability_id, step.step_id),
-        detail: format!(
-            "{}; target={:?}:{}; risk={:?}",
-            step.rationale, step.target.resource_type, step.target.resource_ref, step.risk_level
-        ),
+fn runtime_planner_steps_to_tui(
+    request: &TuiBackendRequest<'_>,
+    runtime_steps: &[PlannerStep],
+) -> Vec<TuiBackendPlanStep> {
+    let focus = read_only_task_focus(request.task);
+    let runtime_evidence = runtime_steps
+        .iter()
+        .map(runtime_planner_step_evidence)
+        .collect::<Vec<_>>()
+        .join(" | ");
+    let runtime_evidence = if runtime_evidence.is_empty() {
+        "runtime planner returned no concrete local step".to_owned()
+    } else {
+        runtime_evidence
+    };
+
+    vec![
+        TuiBackendPlanStep {
+            label: format!("Understand {focus}"),
+            detail: format!(
+                "Classify owner request as {focus}; trust={}; context={}%; P2 shell grants no authority",
+                request.trust.label(),
+                request.context_percent
+            ),
+        },
+        TuiBackendPlanStep {
+            label: runtime_context_step_label(focus).to_owned(),
+            detail: format!(
+                "Use cwd={}, git={}, cargo={}, docs={}, config={}. runtime evidence: {}",
+                request.workspace.short_path,
+                request.workspace.git_state,
+                request.workspace.cargo_state,
+                request.workspace.docs_state,
+                request.workspace.config_state,
+                runtime_evidence
+            ),
+        },
+        TuiBackendPlanStep {
+            label: "Draft read-only response".to_owned(),
+            detail:
+                "Answer in the conversation and keep writes, shell, Git/GitHub, tickets, proofs, and ledger blocked"
+                    .to_owned(),
+        },
+    ]
+}
+
+fn runtime_context_step_label(focus: &str) -> &'static str {
+    match focus {
+        "project status" => "Read project status facts",
+        "agent configuration" => "Read agent and skill context",
+        "verification readiness" => "Prepare safe verification outline",
+        "trust and risk" => "Review trust and risk signals",
+        _ => "Read workspace context",
     }
+}
+
+fn runtime_planner_step_evidence(step: &PlannerStep) -> String {
+    format!(
+        "{} via {}; target={:?}:{}; risk={:?}; {}",
+        step.capability_id,
+        step.step_id,
+        step.target.resource_type,
+        step.target.resource_ref,
+        step.risk_level,
+        step.rationale
+    )
 }
 
 fn read_only_backend_plan(request: &TuiBackendRequest<'_>) -> TuiBackendPlan {
@@ -5571,7 +5625,7 @@ mod tests {
         assert!(snapshot
             .steps
             .iter()
-            .any(|step| step.label.starts_with("Plan: file.read via")));
+            .any(|step| step.label == "Plan: Understand project status"));
         assert!(snapshot
             .steps
             .iter()
@@ -5806,7 +5860,9 @@ reasoning = "low"
             .body
             .contains("backend=runtime-planner:Deterministic"));
         assert!(completed_reply.body.contains("plan=runtime-plan_"));
-        assert!(completed_reply.body.contains("first_step=\"file.read via"));
+        assert!(completed_reply
+            .body
+            .contains("first_step=\"Understand project status\""));
         assert!(completed_reply.body.contains("blocked=write"));
         assert!(completed_reply.body.contains("context="));
         assert!(completed_reply.body.contains("agents="));
@@ -5832,7 +5888,12 @@ reasoning = "low"
             .session
             .steps
             .iter()
-            .any(|step| step.label.starts_with("Plan: file.read via")));
+            .any(|step| step.label == "Plan: Understand project status"));
+        assert!(state
+            .session
+            .steps
+            .iter()
+            .any(|step| step.detail.contains("runtime evidence: file.read via")));
         assert!(state
             .session
             .steps
@@ -5890,10 +5951,13 @@ reasoning = "low"
         assert!(agents_response.body.contains("skills=2"));
         assert!(agents_response.plan.plan_id.starts_with("runtime-plan_"));
         assert_eq!(agents_response.plan.source, "runtime-planner:Deterministic");
-        assert!(agents_response.plan.steps[0]
-            .label
-            .starts_with("file.read via"));
-        assert!(agents_response.plan.steps[0].detail.contains("target=File"));
+        assert_eq!(
+            agents_response.plan.steps[0].label,
+            "Understand agent configuration"
+        );
+        assert!(agents_response.plan.steps[1]
+            .detail
+            .contains("runtime evidence: file.read via"));
         assert!(agents_response
             .plan
             .blocked_authority
@@ -5911,9 +5975,10 @@ reasoning = "low"
             context_percent: 88,
         });
         assert!(verification.body.contains("focus=verification readiness"));
-        assert!(verification.plan.steps[0]
-            .label
-            .starts_with("file.read via"));
+        assert_eq!(
+            verification.plan.steps[0].label,
+            "Understand verification readiness"
+        );
         assert!(verification.body.contains("P0 remains required"));
     }
 
@@ -6236,8 +6301,10 @@ reasoning = "low"
 
         assert_eq!(code, 0);
         assert!(text.contains("runtime-planner:Deterministic"));
-        assert!(text.contains("Plan: file.read via"));
-        assert!(text.contains("Await P1/P0 adapter"));
+        assert!(text.contains("Plan: Understand workspace"));
+        assert!(text.contains("inspection"));
+        assert!(text.contains("Plan: Read workspace context"));
+        assert!(text.contains("selected: Await P1/P0"));
         assert!(text.contains("read-only backend response prepared"));
     }
 

@@ -533,6 +533,10 @@ using the shell/IDE read-only profile, maps those planner steps into Task
 Tracking, and falls back to the local plan only if the runtime planner is
 unavailable. This adapter does not call execution, ticket, proof, or ledger
 paths.
+Runtime planner steps are now presented as owner-facing agent workflow steps
+such as understanding the task, reading workspace context, and drafting a
+read-only answer, while each step detail keeps the original planner capability,
+target, risk, and rationale as evidence.
 Task Tracking now prioritizes the active turn before older turns, so the latest
 backend plan steps stay visible after a response completes. The right pane shows
 the backend plan id, local plan steps, and final P1/P0-adapter wait state before

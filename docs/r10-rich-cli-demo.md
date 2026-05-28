@@ -65,6 +65,8 @@ The default entry opens the resident workbench. Use `q` to quit.
 - The default backend asks `moxi-runtime` for read-only planner steps before
   falling back to local planning, but it never issues tickets, executes,
   verifies proofs, or commits ledger events.
+- Runtime planner steps render as owner-facing agent workflow steps while their
+  details keep the original capability/target/risk evidence.
 - Task Tracking shows the active turn first, keeping the latest backend plan
   visible before older session turns.
 - Read-only workspace facts are collected locally: cwd, Git status, Cargo state,

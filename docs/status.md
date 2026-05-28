@@ -512,10 +512,16 @@ tools, skills, and the session snapshot path so the first-run experience feels
 like a guarded agent console rather than a generic dashboard.
 The R10 TUI test suite now hardens the end-to-end demo path: onboarding through
 Boot -> Trust -> Agent Core -> Workspace, task submission, streaming completion,
-read-only analysis, snapshot save/resume, and quit are covered as one flow. A
-separate high-risk approval test verifies that `/approve` for a risky task only
-creates a local planning turn and does not mark the workspace trusted or grant
-execution authority.
+read-only backend analysis, snapshot save/resume, and quit are covered as one
+flow. A separate high-risk approval test verifies that `/approve` for a risky
+task only creates a local planning turn and does not mark the workspace trusted
+or grant execution authority.
+The TUI response path now has a first `TuiAgentBackend` seam. The default
+`ReadOnlyWorkspaceBackend` generates workspace-aware responses from cwd, Git,
+Cargo, docs/config, trust, active agents, skills, tools, and context meter
+facts, while preserving the P2 shell boundary. It is intentionally local and
+non-authorizing, but gives later P1/P0 or model-gateway adapters a stable place
+to plug in without rewriting the chat, streaming, or task-tracking UI.
 The local demo runbook is now documented in `docs/r10-rich-cli-demo.md`, with a
 PowerShell helper script at `scripts/demo-r10-rich-cli.ps1`. The script supports
 `interactive`, `boot`, `core`, `flow`, and `status` modes so the Rich CLI can be

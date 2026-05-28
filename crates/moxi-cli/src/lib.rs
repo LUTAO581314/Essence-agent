@@ -544,6 +544,10 @@ impl TuiAgentSession {
     fn advance_loading(&mut self) {
         let workspace = self.workspace.clone();
         let trust = self.trust.status;
+        let agents = self.agents.clone();
+        let skills = self.skills.clone();
+        let tools = self.tools.clone();
+        let context_percent = self.context_snapshot().percent;
         let Some(message) = self
             .messages
             .iter_mut()
@@ -556,17 +560,28 @@ impl TuiAgentSession {
         let turn = self.turn_count;
         if self.loading_tick >= 3 {
             let task = message.task.as_deref().unwrap_or("<unknown task>");
-            message.body = read_only_project_analysis(turn, task, &workspace, trust);
-            message.metadata.status = "state: complete".to_owned();
+            let response = ReadOnlyWorkspaceBackend.respond(TuiBackendRequest {
+                turn,
+                task,
+                workspace: &workspace,
+                trust,
+                agents: &agents,
+                skills: &skills,
+                tools: &tools,
+                context_percent,
+            });
+            message.agent = response.agent;
+            message.role = response.role;
+            message.body = response.body;
+            message.metadata = response.metadata;
             message.state = TuiMessageState::Complete;
             if let Some(step) = self.steps.get_mut(self.active_step_index) {
                 step.state = TuiStepState::Done;
-                step.detail =
-                    "read-only response prepared; no execution authority was used".to_owned();
+                step.detail = response.completed_step_detail;
             }
             if let Some(next_step) = self.steps.get_mut(self.active_step_index.saturating_add(1)) {
                 next_step.state = TuiStepState::Active;
-                next_step.detail = "waiting for a real backend adapter or owner command".to_owned();
+                next_step.detail = response.next_step_detail;
                 self.active_step_index = self.active_step_index.saturating_add(1);
             }
         } else {
@@ -652,21 +667,96 @@ struct TuiSessionSnapshot {
     turn_count: usize,
 }
 
-fn read_only_project_analysis(
+struct TuiBackendRequest<'a> {
     turn: usize,
-    task: &str,
-    workspace: &WorkspaceFacts,
+    task: &'a str,
+    workspace: &'a WorkspaceFacts,
     trust: TuiTrustStatus,
-) -> String {
-    let focus = read_only_task_focus(task);
+    agents: &'a [TuiAgentProfile],
+    skills: &'a [String],
+    tools: &'a [String],
+    context_percent: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TuiBackendResponse {
+    agent: String,
+    role: String,
+    body: String,
+    metadata: TuiMessageMeta,
+    completed_step_detail: String,
+    next_step_detail: String,
+}
+
+trait TuiAgentBackend {
+    fn respond(&self, request: TuiBackendRequest<'_>) -> TuiBackendResponse;
+}
+
+struct ReadOnlyWorkspaceBackend;
+
+impl TuiAgentBackend for ReadOnlyWorkspaceBackend {
+    fn respond(&self, request: TuiBackendRequest<'_>) -> TuiBackendResponse {
+        let agent = request
+            .agents
+            .iter()
+            .find(|agent| agent.name == "moxi-agent")
+            .or_else(|| request.agents.first());
+        let agent_name = agent
+            .map(|agent| agent.name.clone())
+            .unwrap_or_else(|| "moxi-agent".to_owned());
+        let role = agent
+            .map(|agent| agent.role.clone())
+            .unwrap_or_else(|| "orchestrator".to_owned());
+        let model = agent
+            .map(|agent| agent.model.as_str())
+            .unwrap_or("session-local");
+        let reasoning = agent
+            .map(|agent| agent.reasoning.as_str())
+            .unwrap_or("medium");
+        let mut response_tools = vec![
+            "workspace.probe".to_owned(),
+            "context.trace".to_owned(),
+            "risk.boundary".to_owned(),
+        ];
+        if request.tools.iter().any(|tool| tool == "git.status") {
+            response_tools.push("git.status".to_owned());
+        }
+
+        TuiBackendResponse {
+            agent: agent_name,
+            role,
+            body: read_only_project_analysis(request),
+            metadata: TuiMessageMeta::from_tools(
+                model,
+                reasoning,
+                response_tools,
+                "state: complete | backend: read-only workspace",
+            ),
+            completed_step_detail:
+                "read-only backend response prepared; no execution authority was used".to_owned(),
+            next_step_detail: "waiting for a real P1/P0 backend adapter or owner command"
+                .to_owned(),
+        }
+    }
+}
+
+fn read_only_project_analysis(request: TuiBackendRequest<'_>) -> String {
+    let focus = read_only_task_focus(request.task);
+    let agent_count = request.agents.len();
+    let skill_count = request.skills.len();
     format!(
-        "Turn {turn} read-only analysis for \"{task}\": focus={focus}; workspace={} ; git={} ; cargo={} ; docs={} ; config={} ; trust={}. Next safe step: inspect context or ask for a concrete plan. P0 remains required for writes, shell execution, Git/GitHub, tickets, proofs, or ledger commits.",
-        workspace.short_path,
-        workspace.git_state,
-        workspace.cargo_state,
-        workspace.docs_state,
-        workspace.config_state,
-        trust.label(),
+        "Turn {} read-only backend analysis for \"{}\": focus={focus}; workspace={} ; git={} ; cargo={} ; docs={} ; config={} ; trust={} ; context={}%; agents={} ; skills={}. Next safe step: inspect context or ask for a concrete plan. P0 remains required for writes, shell execution, Git/GitHub, tickets, proofs, or ledger commits.",
+        request.turn,
+        request.task,
+        request.workspace.short_path,
+        request.workspace.git_state,
+        request.workspace.cargo_state,
+        request.workspace.docs_state,
+        request.workspace.config_state,
+        request.trust.label(),
+        request.context_percent,
+        agent_count,
+        skill_count,
     )
 }
 
@@ -1103,6 +1193,15 @@ impl TuiMessageMeta {
             model: model.to_owned(),
             reasoning: reasoning.to_owned(),
             tools: tools.iter().map(|tool| (*tool).to_owned()).collect(),
+            status: status.to_owned(),
+        }
+    }
+
+    fn from_tools(model: &str, reasoning: &str, tools: Vec<String>, status: &str) -> Self {
+        Self {
+            model: model.to_owned(),
+            reasoning: reasoning.to_owned(),
+            tools,
             status: status.to_owned(),
         }
     }
@@ -5282,7 +5381,7 @@ mod tests {
         assert!(snapshot
             .messages
             .iter()
-            .any(|message| message.body.contains("read-only analysis")));
+            .any(|message| message.body.contains("read-only backend analysis")));
         assert!(snapshot
             .steps
             .iter()
@@ -5511,16 +5610,27 @@ reasoning = "low"
             .unwrap();
         assert!(completed_reply
             .body
-            .contains("read-only analysis for \"inspect project status\""));
+            .contains("read-only backend analysis for \"inspect project status\""));
         assert!(completed_reply.body.contains("focus=project status"));
+        assert!(completed_reply.body.contains("context="));
+        assert!(completed_reply.body.contains("agents="));
         assert!(completed_reply.body.contains("workspace="));
         assert!(completed_reply.body.contains("git="));
         assert!(completed_reply.body.contains("cargo="));
         assert!(completed_reply.body.contains("P0 remains required"));
+        assert_eq!(
+            completed_reply.metadata.status,
+            "state: complete | backend: read-only workspace"
+        );
+        assert!(completed_reply
+            .metadata
+            .tools
+            .iter()
+            .any(|tool| tool == "workspace.probe"));
     }
 
     #[test]
-    fn tui_read_only_analysis_focus_tracks_task_text() {
+    fn tui_read_only_backend_tracks_focus_and_metadata() {
         let workspace = WorkspaceFacts {
             cwd: "C:\\demo".to_owned(),
             short_path: "demo".to_owned(),
@@ -5533,25 +5643,53 @@ reasoning = "low"
             docs_state: "present".to_owned(),
             trust: "pending".to_owned(),
         };
+        let agents = vec![TuiAgentProfile {
+            name: "moxi-agent".to_owned(),
+            role: "orchestrator".to_owned(),
+            model: "backend-local".to_owned(),
+            reasoning: "high".to_owned(),
+        }];
+        let skills = vec!["tui.design".to_owned(), "risk.review".to_owned()];
+        let tools = vec!["repo.inspect".to_owned(), "git.status".to_owned()];
 
-        let agents = read_only_project_analysis(
-            2,
-            "summarize active agents and skills",
-            &workspace,
-            TuiTrustStatus::KnownReadOnly,
-        );
-        assert!(agents.contains("focus=agent configuration"));
-        assert!(agents.contains("config=present"));
-        assert!(agents.contains("trust=known-read-only"));
+        let agents_response = ReadOnlyWorkspaceBackend.respond(TuiBackendRequest {
+            turn: 2,
+            task: "summarize active agents and skills",
+            workspace: &workspace,
+            trust: TuiTrustStatus::KnownReadOnly,
+            agents: &agents,
+            skills: &skills,
+            tools: &tools,
+            context_percent: 88,
+        });
+        assert_eq!(agents_response.agent, "moxi-agent");
+        assert_eq!(agents_response.role, "orchestrator");
+        assert_eq!(agents_response.metadata.model, "backend-local");
+        assert_eq!(agents_response.metadata.reasoning, "high");
+        assert!(agents_response
+            .metadata
+            .tools
+            .iter()
+            .any(|tool| tool == "git.status"));
+        assert!(agents_response.body.contains("focus=agent configuration"));
+        assert!(agents_response.body.contains("config=present"));
+        assert!(agents_response.body.contains("trust=known-read-only"));
+        assert!(agents_response.body.contains("context=88%"));
+        assert!(agents_response.body.contains("agents=1"));
+        assert!(agents_response.body.contains("skills=2"));
 
-        let verification = read_only_project_analysis(
-            3,
-            "check cargo tests",
-            &workspace,
-            TuiTrustStatus::KnownReadOnly,
-        );
-        assert!(verification.contains("focus=verification readiness"));
-        assert!(verification.contains("P0 remains required"));
+        let verification = ReadOnlyWorkspaceBackend.respond(TuiBackendRequest {
+            turn: 3,
+            task: "check cargo tests",
+            workspace: &workspace,
+            trust: TuiTrustStatus::KnownReadOnly,
+            agents: &agents,
+            skills: &skills,
+            tools: &tools,
+            context_percent: 88,
+        });
+        assert!(verification.body.contains("focus=verification readiness"));
+        assert!(verification.body.contains("P0 remains required"));
     }
 
     #[test]
@@ -5686,7 +5824,7 @@ reasoning = "low"
             .session
             .messages
             .iter()
-            .any(|message| message.body.contains("read-only analysis")));
+            .any(|message| message.body.contains("read-only backend analysis")));
         assert_eq!(
             state.session.steps[state.session.active_step_index].label,
             "Await backend adapter"

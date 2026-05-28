@@ -3,8 +3,8 @@
 This guide is the local demo runbook for the `moxi-agent` Rich CLI/TUI. The
 demo is intentionally a P2 shell experience: it can render workspace facts,
 collect user intent, show risk prompts, persist a local TUI snapshot, and
-display read-only analysis. It cannot authorize, execute, issue tickets, verify
-proofs, push to GitHub, or commit ledger events.
+display read-only backend analysis. It cannot authorize, execute, issue
+tickets, verify proofs, push to GitHub, or commit ledger events.
 
 ## Quick Start
 
@@ -57,6 +57,8 @@ The default entry opens the resident workbench. Use `q` to quit.
 ## Safe Boundary Talk Track
 
 - The TUI is a shell, not the trusted execution core.
+- The default TUI backend is local and read-only; it prepares analysis text from
+  workspace facts but does not execute tools.
 - Read-only workspace facts are collected locally: cwd, Git status, Cargo state,
   docs/config presence, active agents, messages, and task steps.
 - Risk prompts are local intent capture only.
@@ -86,4 +88,3 @@ cargo run -p moxi-cli --bin moxi --locked -- tui --width 120 --height 32 --keys 
 cargo run -p moxi-cli --bin moxi --locked -- tui --width 132 --height 34 --keys "core,q"
 cargo run -p moxi-cli --bin moxi --locked -- tui --width 132 --height 38 --keys "boot,enter,enter,enter,type:i,type:n,type:s,type:p,type:e,type:c,type:t,enter,r,r,r,type:/,type:c,type:o,type:n,enter,type:/,type:s,type:a,type:v,type:e,enter,type:/,type:r,type:e,type:s,type:u,type:m,type:e,enter,q"
 ```
-

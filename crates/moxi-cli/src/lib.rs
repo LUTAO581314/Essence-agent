@@ -575,15 +575,12 @@ impl TuiAgentSession {
             message.body = response.body;
             message.metadata = response.metadata;
             message.state = TuiMessageState::Complete;
+            let plan = response.plan;
             if let Some(step) = self.steps.get_mut(self.active_step_index) {
                 step.state = TuiStepState::Done;
                 step.detail = response.completed_step_detail;
             }
-            if let Some(next_step) = self.steps.get_mut(self.active_step_index.saturating_add(1)) {
-                next_step.state = TuiStepState::Active;
-                next_step.detail = response.next_step_detail;
-                self.active_step_index = self.active_step_index.saturating_add(1);
-            }
+            self.append_backend_plan_steps(turn, plan, response.next_step_detail);
         } else {
             let frame = loading_frame(self.loading_tick);
             message.body = format!(
@@ -591,6 +588,37 @@ impl TuiAgentSession {
             );
             message.metadata.status = format!("stream tick {}", self.loading_tick);
         }
+    }
+
+    fn append_backend_plan_steps(
+        &mut self,
+        turn: usize,
+        plan: TuiBackendPlan,
+        next_step_detail: String,
+    ) {
+        if let Some(existing) = self.steps.get_mut(self.active_step_index.saturating_add(1)) {
+            existing.state = TuiStepState::Done;
+            existing.label = format!("Backend plan {}", plan.plan_id);
+            existing.detail = format!(
+                "{} produced {} local steps; blocked authority: {}",
+                plan.source,
+                plan.steps.len(),
+                plan.blocked_authority.join(",")
+            );
+        }
+        for plan_step in plan.steps {
+            self.steps.push(TuiStep::done(
+                turn,
+                &format!("Plan: {}", plan_step.label),
+                &plan_step.detail,
+            ));
+        }
+        self.steps.push(TuiStep::active(
+            turn,
+            "Await P1/P0 adapter",
+            &next_step_detail,
+        ));
+        self.active_step_index = self.steps.len().saturating_sub(1);
     }
 
     fn is_streaming(&self) -> bool {
@@ -4077,35 +4105,39 @@ fn tui_task_tracker(
     }
     lines.push(Line::from(""));
 
-    let mut current_turn = None;
-    for (index, step) in state.session.steps.iter().enumerate() {
-        if current_turn != Some(step.turn) {
-            if current_turn.is_some() {
-                lines.push(Line::from(""));
-            }
-            current_turn = Some(step.turn);
-            lines.push(Line::from(vec![Span::styled(
-                format!("Turn {}", step.turn),
-                style_warning(),
-            )]));
+    for (turn_index, turn) in visible_task_tracking_turns(state).iter().enumerate() {
+        if turn_index > 0 {
+            lines.push(Line::from(""));
         }
-        let is_active = index == state.session.active_step_index;
-        let is_selected = index == selected_step_index;
-        lines.push(Line::from(vec![
-            Span::styled(
-                tui_step_marker(step.state, is_active, is_selected),
-                tui_step_style(step.state, is_active, is_selected),
-            ),
-            Span::raw(" "),
-            Span::styled(
-                step.label.clone(),
-                tui_step_style(step.state, is_active, is_selected),
-            ),
-        ]));
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(step.detail.clone(), style_dim()),
-        ]));
+        lines.push(Line::from(vec![Span::styled(
+            format!("Turn {turn}"),
+            style_warning(),
+        )]));
+        for (index, step) in state
+            .session
+            .steps
+            .iter()
+            .enumerate()
+            .filter(|(_, step)| step.turn == *turn)
+        {
+            let is_active = index == state.session.active_step_index;
+            let is_selected = index == selected_step_index;
+            lines.push(Line::from(vec![
+                Span::styled(
+                    tui_step_marker(step.state, is_active, is_selected),
+                    tui_step_style(step.state, is_active, is_selected),
+                ),
+                Span::raw(" "),
+                Span::styled(
+                    step.label.clone(),
+                    tui_step_style(step.state, is_active, is_selected),
+                ),
+            ]));
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(step.detail.clone(), style_dim()),
+            ]));
+        }
     }
 
     lines.push(Line::from(""));
@@ -4147,6 +4179,24 @@ fn tui_task_tracker(
             BorderType::Rounded,
         ))
         .wrap(Wrap { trim: true })
+}
+
+fn visible_task_tracking_turns(state: &TuiState) -> Vec<usize> {
+    let mut turns = Vec::new();
+    if let Some(active_turn) = state
+        .session
+        .steps
+        .get(state.session.active_step_index)
+        .map(|step| step.turn)
+    {
+        turns.push(active_turn);
+    }
+    for step in &state.session.steps {
+        if !turns.contains(&step.turn) {
+            turns.push(step.turn);
+        }
+    }
+    turns
 }
 
 fn message_state_marker(state: TuiMessageState) -> &'static str {
@@ -5476,7 +5526,11 @@ mod tests {
         assert!(snapshot
             .steps
             .iter()
-            .any(|step| step.label == "Await backend adapter"));
+            .any(|step| step.label == "Plan: Summarize project state"));
+        assert!(snapshot
+            .steps
+            .iter()
+            .any(|step| step.label == "Await P1/P0 adapter"));
     }
 
     #[test]
@@ -5686,7 +5740,7 @@ reasoning = "low"
         assert!(state.command_status.contains("complete"));
         assert_eq!(
             state.session.steps[state.session.active_step_index].label,
-            "Await backend adapter"
+            "Await P1/P0 adapter"
         );
         assert_eq!(
             state.session.steps[state.session.active_step_index].state,
@@ -5726,6 +5780,21 @@ reasoning = "low"
             .tools
             .iter()
             .any(|tool| tool == "workspace.probe"));
+        assert!(state
+            .session
+            .steps
+            .iter()
+            .any(|step| step.label == "Backend plan tui-readonly-turn-2"));
+        assert!(state
+            .session
+            .steps
+            .iter()
+            .any(|step| step.label == "Plan: Summarize project state"));
+        assert!(state
+            .session
+            .steps
+            .iter()
+            .any(|step| step.detail.contains("blocked authority")));
     }
 
     #[test]
@@ -5941,7 +6010,7 @@ reasoning = "low"
             .any(|message| message.body.contains("read-only backend analysis")));
         assert_eq!(
             state.session.steps[state.session.active_step_index].label,
-            "Await backend adapter"
+            "Await P1/P0 adapter"
         );
 
         state.command_input = "/save".to_owned();
@@ -6101,6 +6170,33 @@ reasoning = "low"
         assert!(text.contains("detail:"));
         assert!(text.contains("Capture user task"));
         assert!(text.contains("Prepare read-only plan"));
+    }
+
+    #[test]
+    fn tui_completed_backend_plan_renders_in_task_tracking() {
+        let mut output = Vec::new();
+
+        let code = run(
+            [
+                "moxi-cli",
+                "tui",
+                "--width",
+                "132",
+                "--height",
+                "38",
+                "--keys",
+                "type:i,type:n,type:s,type:p,type:e,type:c,type:t,enter,r,r,r,q",
+            ],
+            &mut output,
+        )
+        .unwrap();
+        let text = String::from_utf8(output).unwrap();
+
+        assert_eq!(code, 0);
+        assert!(text.contains("Backend plan tui-readonly-turn-2"));
+        assert!(text.contains("Plan: Inspect workspace context"));
+        assert!(text.contains("Plan: Wait for P0-capable adapter"));
+        assert!(text.contains("read-only backend response prepared"));
     }
 
     #[test]

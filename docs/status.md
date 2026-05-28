@@ -528,6 +528,10 @@ authority categories. The conversation body and Task Tracking detail render
 that artifact, making the TUI feel more like an agent workbench while still
 stopping all write, shell, Git/GitHub, ticket, proof, and ledger authority at
 the P2 boundary.
+Task Tracking now prioritizes the active turn before older turns, so the latest
+backend plan steps stay visible after a response completes. The right pane shows
+the backend plan id, local plan steps, and final P1/P0-adapter wait state before
+falling back to older session turns and runtime projection facts.
 The local demo runbook is now documented in `docs/r10-rich-cli-demo.md`, with a
 PowerShell helper script at `scripts/demo-r10-rich-cli.ps1`. The script supports
 `interactive`, `boot`, `core`, `flow`, and `status` modes so the Rich CLI can be

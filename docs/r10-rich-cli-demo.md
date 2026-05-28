@@ -62,6 +62,8 @@ The default entry opens the resident workbench. Use `q` to quit.
 - Backend output includes a local plan id, suggested plan steps, and blocked
   authority categories so the task tracker can explain what would require a
   real P1/P0 adapter.
+- Task Tracking shows the active turn first, keeping the latest backend plan
+  visible before older session turns.
 - Read-only workspace facts are collected locally: cwd, Git status, Cargo state,
   docs/config presence, active agents, messages, and task steps.
 - Risk prompts are local intent capture only.

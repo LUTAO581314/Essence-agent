@@ -146,6 +146,7 @@ struct StatusOptions {
     profile_id: String,
     graph_id: Option<String>,
     input_path: Option<String>,
+    allow_demo_input: bool,
     input_mode: StatusInputMode,
     format: OutputFormat,
     render_limit: Option<usize>,
@@ -505,6 +506,8 @@ where
 {
     let text = if let Some(path) = options.input_path {
         fs::read_to_string(path)?
+    } else if options.allow_demo_input {
+        demo_query_snapshot_json()
     } else {
         let mut reader = reader.ok_or(CliError::MissingRequired("--input or stdin"))?;
         let mut text = String::new();
@@ -525,6 +528,134 @@ fn ensure_graph_matches(expected: Option<String>, actual: Option<&str>) -> CliRe
         }
     }
     Ok(())
+}
+
+fn demo_query_snapshot_json() -> String {
+    serde_json::json!({
+        "graph": {
+            "graph_id": "demo_graph",
+            "goal": "preview MOXI shell experience",
+            "path": "task_path",
+            "task_count": 4,
+            "completed_count": 1,
+            "running_count": 1,
+            "blocked_count": 2,
+            "awaiting_approval_count": 1,
+            "failed_count": 0,
+            "is_complete": false
+        },
+        "planner": null,
+        "tasks": [
+            {
+                "task_id": "demo_intake",
+                "skill_id": null,
+                "capability_id": "shell.admit",
+                "target": {
+                    "resource_type": "file",
+                    "resource_ref": "workspace://current"
+                },
+                "state": "completed",
+                "last_stage": "completed",
+                "progress": 1.0,
+                "message": "request normalized into a read-only shell projection",
+                "idempotency_key": null,
+                "retry_safe": true,
+                "blocker": null,
+                "updated_at": "2026-05-28T01:30:00Z"
+            },
+            {
+                "task_id": "demo_plan",
+                "skill_id": "skill.runtime.plan",
+                "capability_id": "runtime.plan",
+                "target": {
+                    "resource_type": "file",
+                    "resource_ref": "docs/status.md"
+                },
+                "state": "running",
+                "last_stage": "executing",
+                "progress": 0.62,
+                "message": "rendering current graph, tasks, blockers, and boundary",
+                "idempotency_key": "demo.plan.readonly",
+                "retry_safe": true,
+                "blocker": null,
+                "updated_at": "2026-05-28T01:30:03Z"
+            },
+            {
+                "task_id": "demo_approval",
+                "skill_id": "skill.p0.review",
+                "capability_id": "github.write",
+                "target": {
+                    "resource_type": "network",
+                    "resource_ref": "github://origin/v0.2.0"
+                },
+                "state": "awaiting_approval",
+                "last_stage": "awaiting_approval",
+                "progress": 0.2,
+                "message": "approval is display-only here; P0 owns the real decision",
+                "idempotency_key": null,
+                "retry_safe": null,
+                "blocker": "awaiting_approval",
+                "updated_at": "2026-05-28T01:30:05Z"
+            },
+            {
+                "task_id": "demo_boundary",
+                "skill_id": "skill.boundary.check",
+                "capability_id": "ledger.commit",
+                "target": {
+                    "resource_type": "workflow",
+                    "resource_ref": "p0://ledger"
+                },
+                "state": "planned",
+                "last_stage": "planned",
+                "progress": 0.0,
+                "message": "blocked in shell: no ticket, execute, verify, or ledger authority",
+                "idempotency_key": null,
+                "retry_safe": null,
+                "blocker": "dependency_incomplete",
+                "updated_at": "2026-05-28T01:30:07Z"
+            }
+        ],
+        "attempts": [],
+        "adoption_probes": [],
+        "events": [{
+            "event_id": "demo_event_1",
+            "graph_id": "demo_graph",
+            "run_id": "demo_run",
+            "task_id": "demo_plan",
+            "stage": "executing",
+            "message": "preview dashboard is using built-in demo data",
+            "progress": 0.62,
+            "timestamp": "2026-05-28T01:30:03Z"
+        }],
+        "resume_plan": {
+            "graph_id": "demo_graph",
+            "completed_task_ids": ["demo_intake"],
+            "ready_task_ids": [],
+            "blocked_task_ids": ["demo_boundary"],
+            "running_task_ids": ["demo_plan"],
+            "awaiting_approval_task_ids": ["demo_approval"],
+            "failed_task_ids": [],
+            "blockers": {
+                "demo_approval": "awaiting_approval",
+                "demo_boundary": "dependency_incomplete"
+            },
+            "adoption_recommendations": {},
+            "running_task_policy": "require_inspection",
+            "is_complete": false
+        },
+        "event_cursor": 1,
+        "policy_profile": {
+            "profile_id": "shell.cli.fast",
+            "allowed_capabilities": ["file.read"],
+            "allow_fast_path": true,
+            "allow_task_path": false,
+            "allow_trusted_execution_path": false,
+            "allow_skills": false,
+            "allow_running_task_retry": false,
+            "max_tasks_per_graph": 4
+        }
+    })
+    .to_string()
 }
 
 fn run_repl<R, W>(mut reader: R, mut writer: W) -> CliResult<i32>
@@ -828,6 +959,7 @@ fn parse_status_with_defaults(
         profile_id: profile_id.unwrap_or_else(|| default_status_profile(surface).to_owned()),
         graph_id,
         input_path,
+        allow_demo_input: false,
         input_mode: input_mode.unwrap_or(StatusInputMode::EventFeed),
         format,
         render_limit,
@@ -904,7 +1036,11 @@ fn parse_tui(args: &[String]) -> CliResult<TuiOptions> {
 
     let mut status = parse_status_with_defaults(&status_args, OutputFormat::Panel)?;
     if status.input_path.is_none() {
-        return Err(CliError::MissingRequired("--input"));
+        status.allow_demo_input = true;
+        status.input_mode = StatusInputMode::QuerySnapshot;
+        if status.graph_id.is_none() {
+            status.graph_id = Some("demo_graph".into());
+        }
     }
     status.format = OutputFormat::Panel;
 
@@ -2601,10 +2737,36 @@ mod tests {
     }
 
     #[test]
-    fn tui_requires_snapshot_input_path() {
+    fn tui_without_input_renders_builtin_demo_dashboard() {
         let mut output = Vec::new();
 
-        let error = run(["moxi-cli", "tui", "--query"], &mut output).unwrap_err();
+        let code = run(
+            [
+                "moxi-cli", "tui", "--width", "112", "--height", "30", "--keys", "g,q",
+            ],
+            &mut output,
+        )
+        .unwrap();
+        let text = String::from_utf8(output).unwrap();
+
+        assert_eq!(code, 0);
+        assert!(text.contains("MOXI R10 TUI"));
+        assert!(text.contains("graph=demo_graph"));
+        assert!(text.contains("preview MOXI shell experience"));
+        assert!(text.contains("demo_graph t=4 d=1 r=1 w=1 b=2 f=0"));
+        assert!(text.contains("demo_approval [AwaitingApproval] github.write 20%"));
+        assert!(text.contains("display-only"));
+        assert!(text.contains("mode: read-only projection shell"));
+        assert!(text.contains("allowed: admit, manifest, status, watch, tui, boundary, repl"));
+        assert!(text.contains("no ticket, execute, verify, or ledger authority"));
+        assert!(text.contains("active=Graph selected_task=0 filter=<none> quit=true"));
+    }
+
+    #[test]
+    fn watch_still_requires_snapshot_input_path() {
+        let mut output = Vec::new();
+
+        let error = run(["moxi-cli", "watch", "--query"], &mut output).unwrap_err();
 
         assert!(matches!(error, CliError::MissingRequired("--input")));
         assert!(output.is_empty());

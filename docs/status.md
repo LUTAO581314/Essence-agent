@@ -391,7 +391,9 @@ including readable `--text` output and a static ASCII `--panel` preview.
 `watch` repeats that same rendering from an explicit snapshot file for bounded
 ticks, so it is a preview loop rather than live runtime control. `tui` renders
 a Ratatui snapshot dashboard with overview, graph summary, tasks,
-approvals/blockers, task detail, boundary, and key-hint panes. Its `--keys`
+approvals/blockers, task detail, boundary, and key-hint panes. When no
+`--input` is supplied, `tui` renders a built-in read-only demo projection so
+users can preview the shell without preparing JSON first. Its `--keys`
 replay model covers `tab`,
 `o`, `g`, `t`, `a`, `b`, `?`, `j`, `k`, `/filter`, `r`, and `q`, allowing pane
 cycling/focus, task selection, filtering, refresh count, and quit state to be

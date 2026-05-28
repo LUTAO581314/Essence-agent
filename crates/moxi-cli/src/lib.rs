@@ -9,9 +9,9 @@ use moxi_shells::{adapter_manifest, ShellController, ShellRequestDraft};
 use ratatui::{
     backend::{CrosstermBackend, TestBackend},
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Paragraph, Wrap},
     Terminal,
 };
 use std::{
@@ -169,9 +169,14 @@ struct TuiOptions {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TuiState {
+    screen: TuiScreen,
     active_pane: TuiPane,
     filter: Option<String>,
+    command_input: String,
+    command_status: String,
     selected_task_index: usize,
+    follow_active_step: bool,
+    show_command_palette: bool,
     refresh_count: usize,
     should_quit: bool,
 }
@@ -179,13 +184,26 @@ struct TuiState {
 impl Default for TuiState {
     fn default() -> Self {
         Self {
+            screen: TuiScreen::Workspace,
             active_pane: TuiPane::Overview,
             filter: None,
+            command_input: String::new(),
+            command_status: "ready: ? shortcuts · / command menu".into(),
             selected_task_index: 0,
+            follow_active_step: true,
+            show_command_palette: false,
             refresh_count: 0,
             should_quit: false,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TuiScreen {
+    Boot,
+    Trust,
+    Core,
+    Workspace,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -226,11 +244,16 @@ impl TuiPane {
 enum TuiKey {
     Tab,
     Focus(TuiPane),
+    Screen(TuiScreen),
     MoveTaskDown,
     MoveTaskUp,
     Refresh,
     Quit,
     Filter(String),
+    ToggleCommandPalette,
+    InputChar(char),
+    Backspace,
+    SubmitCommand,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -246,7 +269,7 @@ where
     W: Write,
 {
     let args = normalize_args(args);
-    run_command(&args, &mut writer)
+    run_command_with_default_interactive(&args, None::<&[u8]>, &mut writer, false)
 }
 
 pub fn run_with_io<I, S, R, W>(args: I, reader: R, mut writer: W) -> CliResult<i32>
@@ -260,28 +283,35 @@ where
     if args.first().is_some_and(|command| command == "repl") {
         run_repl(reader, writer)
     } else {
-        run_command_with_optional_reader(&args, Some(reader), &mut writer)
+        run_command_with_default_interactive(&args, Some(reader), &mut writer, true)
     }
 }
 
 fn run_command(args: &[String], writer: &mut impl Write) -> CliResult<i32> {
-    run_command_with_optional_reader(args, None::<&[u8]>, writer)
+    run_command_with_default_interactive(args, None::<&[u8]>, writer, false)
 }
 
-fn run_command_with_optional_reader<R>(
+fn run_command_with_default_interactive<R>(
     args: &[String],
     reader: Option<R>,
     writer: &mut impl Write,
+    default_interactive: bool,
 ) -> CliResult<i32>
 where
     R: BufRead,
 {
     let Some((command, rest)) = args.split_first() else {
-        return run_tui(parse_tui(&[])?, writer).map(|()| 0);
+        let mut options = parse_tui(&[])?;
+        options.interactive = default_interactive;
+        return run_tui(options, writer).map(|()| 0);
     };
 
     if command.starts_with('-') && !matches!(command.as_str(), "-h" | "--help") {
-        return run_tui(parse_tui(args)?, writer).map(|()| 0);
+        let mut options = parse_tui(args)?;
+        if default_interactive && options.keys.is_empty() {
+            options.interactive = true;
+        }
+        return run_tui(options, writer).map(|()| 0);
     }
 
     match command.as_str() {
@@ -436,6 +466,20 @@ fn run_tui_interactive_inner(
 ) -> CliResult<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
+    for screen in [TuiScreen::Boot, TuiScreen::Trust, TuiScreen::Core] {
+        state.screen = screen;
+        terminal.draw(|frame| {
+            let area = frame.area();
+            render_tui_snapshot(frame, area, projection, state);
+        })?;
+        thread::sleep(Duration::from_millis(match screen {
+            TuiScreen::Boot => 720,
+            TuiScreen::Trust => 520,
+            TuiScreen::Core => 760,
+            TuiScreen::Workspace => 0,
+        }));
+    }
+    state.screen = TuiScreen::Workspace;
     loop {
         terminal.draw(|frame| {
             let area = frame.area();
@@ -461,6 +505,8 @@ fn run_tui_interactive_inner(
 fn tui_key_from_event(event: KeyEvent) -> Option<TuiKey> {
     match event.code {
         KeyCode::Tab => Some(TuiKey::Tab),
+        KeyCode::Enter => Some(TuiKey::SubmitCommand),
+        KeyCode::Backspace => Some(TuiKey::Backspace),
         KeyCode::Down => Some(TuiKey::MoveTaskDown),
         KeyCode::Up => Some(TuiKey::MoveTaskUp),
         KeyCode::Char('?') => Some(TuiKey::Focus(TuiPane::Keys)),
@@ -469,10 +515,16 @@ fn tui_key_from_event(event: KeyEvent) -> Option<TuiKey> {
         KeyCode::Char('t') | KeyCode::Char('T') => Some(TuiKey::Focus(TuiPane::Tasks)),
         KeyCode::Char('a') | KeyCode::Char('A') => Some(TuiKey::Focus(TuiPane::Approvals)),
         KeyCode::Char('b') | KeyCode::Char('B') => Some(TuiKey::Focus(TuiPane::Boundary)),
+        KeyCode::Char('1') => Some(TuiKey::Screen(TuiScreen::Boot)),
+        KeyCode::Char('2') => Some(TuiKey::Screen(TuiScreen::Trust)),
+        KeyCode::Char('3') => Some(TuiKey::Screen(TuiScreen::Core)),
+        KeyCode::Char('4') => Some(TuiKey::Screen(TuiScreen::Workspace)),
+        KeyCode::Char('f') | KeyCode::Char('F') => Some(TuiKey::Focus(TuiPane::Tasks)),
         KeyCode::Char('j') | KeyCode::Char('J') => Some(TuiKey::MoveTaskDown),
         KeyCode::Char('k') | KeyCode::Char('K') => Some(TuiKey::MoveTaskUp),
         KeyCode::Char('r') | KeyCode::Char('R') => Some(TuiKey::Refresh),
         KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => Some(TuiKey::Quit),
+        KeyCode::Char(value) => Some(TuiKey::InputChar(value)),
         _ => None,
     }
 }
@@ -481,12 +533,15 @@ fn apply_tui_key(state: &mut TuiState, key: &TuiKey) {
     match key {
         TuiKey::Tab => state.active_pane = state.active_pane.next(),
         TuiKey::Focus(pane) => state.active_pane = *pane,
+        TuiKey::Screen(screen) => state.screen = *screen,
         TuiKey::MoveTaskDown => {
             state.active_pane = TuiPane::Tasks;
+            state.follow_active_step = false;
             state.selected_task_index = state.selected_task_index.saturating_add(1);
         }
         TuiKey::MoveTaskUp => {
             state.active_pane = TuiPane::Tasks;
+            state.follow_active_step = false;
             state.selected_task_index = state.selected_task_index.saturating_sub(1);
         }
         TuiKey::Refresh => state.refresh_count += 1,
@@ -498,6 +553,108 @@ fn apply_tui_key(state: &mut TuiState, key: &TuiKey) {
                 Some(value.to_owned())
             };
             state.selected_task_index = 0;
+        }
+        TuiKey::ToggleCommandPalette => {
+            state.show_command_palette = !state.show_command_palette;
+            if state.show_command_palette {
+                state.command_status = "command menu open".into();
+            } else {
+                state.command_status = "ready: ? shortcuts · / command menu".into();
+            }
+        }
+        TuiKey::InputChar(value) => {
+            state.command_input.push(*value);
+            state.active_pane = TuiPane::Keys;
+            state.show_command_palette = *value == '/';
+        }
+        TuiKey::Backspace => {
+            state.command_input.pop();
+            state.active_pane = TuiPane::Keys;
+        }
+        TuiKey::SubmitCommand => submit_tui_command(state),
+    }
+}
+
+fn submit_tui_command(state: &mut TuiState) {
+    let command = state.command_input.trim().to_owned();
+    state.command_input.clear();
+    state.show_command_palette = false;
+    match normalize_token(command.trim_start_matches('/')).as_str() {
+        "" => {
+            state.command_status = "ready: ? shortcuts · / command menu".into();
+        }
+        "help" | "keys" => {
+            state.active_pane = TuiPane::Keys;
+            state.show_command_palette = true;
+            state.command_status = "command menu open".into();
+        }
+        "status" => {
+            state.active_pane = TuiPane::Overview;
+            state.command_status = "showing runtime projection status".into();
+        }
+        "tasks" => {
+            state.active_pane = TuiPane::Tasks;
+            state.screen = TuiScreen::Workspace;
+            state.command_status = "showing task tracking".into();
+        }
+        "agents" | "core" => {
+            state.screen = TuiScreen::Core;
+            state.command_status = "showing Agent Core information".into();
+        }
+        "skills" => {
+            state.screen = TuiScreen::Core;
+            state.command_status = "showing loaded tools and skills".into();
+        }
+        "trust" => {
+            state.screen = TuiScreen::Trust;
+            state.command_status = "workspace trust review".into();
+        }
+        "approve" | "y" => {
+            state.active_pane = TuiPane::Approvals;
+            state.command_status = "approval intent captured; P0 still authorizes".into();
+        }
+        "deny" | "n" => {
+            state.active_pane = TuiPane::Approvals;
+            state.command_status = "denied; risky action remains blocked".into();
+        }
+        "details" => {
+            state.active_pane = TuiPane::Tasks;
+            state.command_status = "selected step detail is visible in task tracking".into();
+        }
+        "follow" => {
+            state.active_pane = TuiPane::Tasks;
+            state.follow_active_step = true;
+            state.command_status = "task tracking follows active step".into();
+        }
+        "boundary" => {
+            state.active_pane = TuiPane::Boundary;
+            state.command_status = "showing shell authority boundary".into();
+        }
+        "demo" => {
+            state.active_pane = TuiPane::Graph;
+            state.filter = None;
+            state.selected_task_index = 0;
+            state.command_status = "demo projection restored".into();
+        }
+        "clear" => {
+            state.filter = None;
+            state.command_status = "filter cleared".into();
+        }
+        "quit" | "exit" => state.should_quit = true,
+        value if value.starts_with("filter_") => {
+            let filter = value.trim_start_matches("filter_").replace('_', " ");
+            state.filter = if filter.is_empty() {
+                None
+            } else {
+                Some(filter)
+            };
+            state.selected_task_index = 0;
+            state.active_pane = TuiPane::Tasks;
+            state.command_status = "filter applied; projection remains read-only".into();
+        }
+        _ => {
+            state.command_status =
+                "blocked: safe shell only; open / command menu for supported actions".into();
         }
     }
 }
@@ -667,7 +824,7 @@ where
 {
     writeln!(
         writer,
-        "moxi-cli repl: submit/projection shell only. Type help or exit."
+        "moxi-cli repl: submit/guarded rich-cli only. Type help or exit."
     )?;
 
     let mut line = String::new();
@@ -1155,12 +1312,22 @@ fn parse_tui_key(value: &str) -> CliResult<TuiKey> {
         "t" | "tasks" => Ok(TuiKey::Focus(TuiPane::Tasks)),
         "a" | "approvals" | "blockers" => Ok(TuiKey::Focus(TuiPane::Approvals)),
         "b" | "boundary" => Ok(TuiKey::Focus(TuiPane::Boundary)),
-        "?" | "help" | "keys" => Ok(TuiKey::Focus(TuiPane::Keys)),
+        "?" | "help" | "keys" | "menu" => Ok(TuiKey::ToggleCommandPalette),
+        "boot" | "logo" | "1" => Ok(TuiKey::Screen(TuiScreen::Boot)),
+        "trust" | "risk" | "2" => Ok(TuiKey::Screen(TuiScreen::Trust)),
+        "core" | "agents" | "3" => Ok(TuiKey::Screen(TuiScreen::Core)),
+        "workspace" | "chat" | "4" => Ok(TuiKey::Screen(TuiScreen::Workspace)),
         "j" | "down" => Ok(TuiKey::MoveTaskDown),
         "k" | "up" => Ok(TuiKey::MoveTaskUp),
         "r" | "refresh" => Ok(TuiKey::Refresh),
+        "enter" | "submit" => Ok(TuiKey::SubmitCommand),
+        "backspace" | "bs" => Ok(TuiKey::Backspace),
         "q" | "quit" => Ok(TuiKey::Quit),
         _ if trimmed.starts_with('/') => Ok(TuiKey::Filter(trimmed[1..].to_owned())),
+        _ if trimmed.starts_with("type:") => {
+            let value = trimmed.trim_start_matches("type:");
+            Ok(TuiKey::InputChar(value.chars().next().unwrap_or(' ')))
+        }
         _ => Err(CliError::InvalidTuiKey(trimmed.to_owned())),
     }
 }
@@ -1521,299 +1688,736 @@ fn render_tui_snapshot(
     projection: &moxi_shells::ShellProjection,
     state: &TuiState,
 ) {
+    match state.screen {
+        TuiScreen::Boot => render_tui_boot(frame, area, projection),
+        TuiScreen::Trust => render_tui_trust(frame, area, projection),
+        TuiScreen::Core => render_tui_core(frame, area, projection),
+        TuiScreen::Workspace => render_tui_workspace(frame, area, projection, state),
+    }
+}
+
+fn render_tui_workspace(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    projection: &moxi_shells::ShellProjection,
+    state: &TuiState,
+) {
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
+            Constraint::Length(5),
             Constraint::Min(12),
-            Constraint::Length(3),
+            Constraint::Length(4),
+            Constraint::Length(1),
         ])
         .split(area);
-    let body = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(34), Constraint::Percentage(66)])
-        .split(vertical[1]);
-    let left = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage(34),
-            Constraint::Percentage(28),
-            Constraint::Percentage(38),
-        ])
-        .split(body[0]);
-    let right = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage(50),
-            Constraint::Percentage(32),
-            Constraint::Percentage(18),
-        ])
-        .split(body[1]);
 
     frame.render_widget(tui_header(projection, state), vertical[0]);
-    frame.render_widget(tui_overview(projection, state), left[0]);
-    frame.render_widget(tui_graph_summary(projection, state), left[1]);
-    frame.render_widget(tui_blockers(projection, state), left[2]);
-    frame.render_widget(tui_tasks(projection, state), right[0]);
-    frame.render_widget(tui_task_detail(projection, state), right[1]);
-    frame.render_widget(tui_boundary(state), right[2]);
-    frame.render_widget(tui_footer(state), vertical[2]);
+    let body = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
+        .split(vertical[1]);
+    frame.render_widget(tui_chat_stream(projection, state), body[0]);
+    frame.render_widget(tui_task_tracker(projection, state), body[1]);
+    frame.render_widget(tui_input_box(state), vertical[2]);
+    frame.render_widget(tui_status_bar(projection, state), vertical[3]);
+    if state.show_command_palette {
+        render_command_palette(frame, area);
+    }
+}
+
+fn render_tui_boot(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    projection: &moxi_shells::ShellProjection,
+) {
+    let lines = vec![
+        Line::from(""),
+        Line::from(vec![Span::styled(
+            "        M O X I - A G E N T",
+            style_gradient_1(),
+        )]),
+        Line::from(vec![Span::styled(
+            "        ===================",
+            style_gradient_2(),
+        )]),
+        Line::from(vec![Span::styled(
+            "        SILVER CORE ONLINE",
+            style_gradient_3(),
+        )]),
+        Line::from(vec![Span::styled(
+            "        GUARDED RICH CLI",
+            style_gradient_2(),
+        )]),
+        Line::from(vec![Span::styled(
+            "        ===================",
+            style_gradient_1(),
+        )]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("        moxi-agent", style_brand()),
+            Span::styled(
+                "  Silver Core | guarded agent operating system",
+                style_dim(),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  > ", style_focus()),
+            Span::styled("Initializing Silver Core", style_value()),
+            Span::raw("  "),
+            progress_bar(0.72, 28),
+        ]),
+        Line::from(vec![Span::styled(
+            "  + Loading Agent Core",
+            style_success(),
+        )]),
+        Line::from(vec![Span::styled(
+            "  + Loading runtime adapters",
+            style_success(),
+        )]),
+        Line::from(vec![Span::styled(
+            format!(
+                "  > Reading workspace context: {}",
+                workspace_display_path()
+            ),
+            style_value(),
+        )]),
+        Line::from(vec![Span::styled(
+            "  - Checking trust boundary",
+            style_dim(),
+        )]),
+        Line::from(vec![Span::styled(
+            "  - Opening Rich CLI control panel",
+            style_dim(),
+        )]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  core ", style_label()),
+            Span::styled("P0 protected", style_success()),
+            Span::styled("    shell ", style_label()),
+            Span::styled("P2 rich-cli", style_focus()),
+            Span::styled("    graph ", style_label()),
+            Span::styled(
+                projection
+                    .graph_id
+                    .as_deref()
+                    .unwrap_or("demo_graph")
+                    .to_owned(),
+                style_value(),
+            ),
+        ]),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(tui_panel_block(
+                "moxi-agent",
+                Color::Yellow,
+                BorderType::Double,
+            ))
+            .wrap(Wrap { trim: true }),
+        centered_rect(area, 88, 22),
+    );
+}
+
+fn render_tui_trust(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    projection: &moxi_shells::ShellProjection,
+) {
+    let lines = vec![
+        Line::from(vec![Span::styled(
+            "moxi-agent will enter this workspace:",
+            style_label(),
+        )]),
+        Line::from(vec![Span::styled(workspace_display_path(), style_value())]),
+        Line::from(""),
+        Line::from(vec![Span::styled("Current safety mode", style_warning())]),
+        Line::from(vec![Span::styled(
+            "* Read-only inspection: allowed",
+            style_success(),
+        )]),
+        Line::from(vec![Span::styled(
+            "o File writes: require owner confirmation",
+            style_dim(),
+        )]),
+        Line::from(vec![Span::styled(
+            "o Shell commands: require owner confirmation",
+            style_dim(),
+        )]),
+        Line::from(vec![Span::styled(
+            "o Git commit / GitHub push: require owner confirmation",
+            style_dim(),
+        )]),
+        Line::from(""),
+        Line::from(vec![Span::styled("Risk note", style_warning())]),
+        Line::from(vec![Span::styled(
+            "The rich CLI shell cannot authorize or execute by itself.",
+            style_value(),
+        )]),
+        Line::from(vec![Span::styled(
+            "High-risk actions must go through the P0 guarded path.",
+            style_value(),
+        )]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Enter", style_focus()),
+            Span::raw(" read-only     "),
+            Span::styled("/trust", style_focus()),
+            Span::raw(" trust workspace     "),
+            Span::styled("/deny", style_danger()),
+            Span::raw(" exit"),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("profile ", style_label()),
+            Span::styled(projection.profile_id.clone(), style_value()),
+        ]),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(tui_panel_block(
+                "Workspace Trust",
+                Color::Yellow,
+                BorderType::Rounded,
+            ))
+            .wrap(Wrap { trim: true }),
+        centered_rect(area, 84, 21),
+    );
+}
+
+fn render_tui_core(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    projection: &moxi_shells::ShellProjection,
+) {
+    let body = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(32), Constraint::Percentage(68)])
+        .split(centered_rect(area, 104, 28));
+    let logo = vec![
+        Line::from(vec![Span::styled("        [ MOXI ]", style_gradient_1())]),
+        Line::from(vec![Span::styled("        [AGENT ]", style_gradient_2())]),
+        Line::from(vec![Span::styled("        [ CORE ]", style_gradient_3())]),
+        Line::from(vec![Span::styled("        [ P0   ]", style_gradient_2())]),
+        Line::from(vec![Span::styled("        [ P2   ]", style_gradient_1())]),
+        Line::from(""),
+        Line::from(vec![Span::styled("moxi-agent", style_brand())]),
+        Line::from(vec![Span::styled("Silver Core", style_success())]),
+        Line::from(vec![Span::styled(
+            "Session: 20260528_r10_demo",
+            style_dim(),
+        )]),
+    ];
+    frame.render_widget(
+        Paragraph::new(logo)
+            .block(tui_panel_block(
+                "Identity",
+                Color::Magenta,
+                BorderType::Rounded,
+            ))
+            .wrap(Wrap { trim: true }),
+        body[0],
+    );
+
+    let lines = vec![
+        Line::from(vec![
+            Span::styled("moxi-agent v0.1.0", style_brand()),
+            Span::styled(" | Silver Core | guarded rich-cli", style_dim()),
+        ]),
+        Line::from(vec![
+            Span::styled("cwd: ", style_label()),
+            Span::styled(workspace_display_path(), style_value()),
+        ]),
+        Line::from(vec![
+            Span::styled("config: ", style_label()),
+            Span::styled(".moxi\\agents.toml", style_value()),
+            Span::styled(" | graph=", style_label()),
+            Span::styled(
+                projection
+                    .graph_id
+                    .as_deref()
+                    .unwrap_or("demo_graph")
+                    .to_owned(),
+                style_value(),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(vec![Span::styled("Agent Runtime", style_warning())]),
+        Line::from("orchestrator: adaptive"),
+        Line::from("trust: pending | mode: read-only"),
+        Line::from("approval: required for write / shell / git"),
+        Line::from(""),
+        Line::from(vec![Span::styled("Loaded Agents", style_warning())]),
+        Line::from("moxi-agent: orchestrator, planning, task routing"),
+        Line::from("ui-agent: rich-cli, terminal-design, ratatui"),
+        Line::from("guard-agent: trust-boundary, approval, risk-review"),
+        Line::from(""),
+        Line::from(vec![Span::styled("Available Tools", style_warning())]),
+        Line::from("file.read | repo.inspect | git.status | test.run"),
+        Line::from("shell.preview | context.trace | command.palette"),
+        Line::from(""),
+        Line::from(vec![Span::styled("Available Skills", style_warning())]),
+        Line::from("tui.design | risk.review | docs.prepare | github.prepare"),
+        Line::from(""),
+        Line::from(vec![Span::styled(
+            "Press 4 to open workspace",
+            style_focus(),
+        )]),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(tui_panel_block(
+                "moxi-agent core",
+                Color::Yellow,
+                BorderType::Rounded,
+            ))
+            .wrap(Wrap { trim: true }),
+        body[1],
+    );
+}
+
+fn render_command_palette(frame: &mut ratatui::Frame<'_>, area: Rect) {
+    let area = centered_rect(area, 48, 11);
+    let lines = vec![
+        Line::from("/status    current runtime status"),
+        Line::from("/tasks     open task tracking"),
+        Line::from("/agents    inspect Agent Core"),
+        Line::from("/skills    inspect loaded skills"),
+        Line::from("/approve   confirm current risk intent"),
+        Line::from("/deny      reject current risk"),
+        Line::from("/trust     open workspace trust gate"),
+        Line::from("/help      show this menu"),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(tui_panel_block(
+                "Commands",
+                Color::Yellow,
+                BorderType::Rounded,
+            ))
+            .wrap(Wrap { trim: true }),
+        area,
+    );
+}
+
+fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    Rect {
+        x,
+        y,
+        width,
+        height,
+    }
+}
+
+fn workspace_display_path() -> String {
+    env::current_dir()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| "C:\\MOXI-Essence-agent\\MOXI-Essence-agent".to_owned())
 }
 
 fn tui_header(projection: &moxi_shells::ShellProjection, state: &TuiState) -> Paragraph<'static> {
-    Paragraph::new(Line::from(vec![
-        Span::styled(
-            "MOXI R10 TUI",
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  "),
-        Span::raw(format!(
-            "surface={:?} profile={} graph={} cursor={} pane={} refresh={}",
-            projection.surface,
-            projection.profile_id,
-            projection.graph_id.as_deref().unwrap_or("<none>"),
-            projection.event_cursor,
-            state.active_pane.label(),
-            state.refresh_count
-        )),
-    ]))
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title("Snapshot Shell"),
-    )
+    Paragraph::new(vec![
+        Line::from(vec![
+            Span::styled("moxi-agent", style_brand()),
+            Span::raw("                                                  "),
+            badge("guarded", Color::Yellow),
+            Span::raw(" "),
+            badge("read-only", Color::Green),
+        ]),
+        Line::from(vec![
+            Span::styled("cwd: ", style_label()),
+            Span::styled(workspace_display_path(), style_value()),
+        ]),
+        Line::from(vec![
+            Span::styled("config: ", style_label()),
+            Span::styled(".moxi\\agents.toml", style_value()),
+            Span::styled(" | core: ", style_label()),
+            Span::styled("Silver Core", style_success()),
+            Span::styled(" | trust: ", style_label()),
+            Span::styled("pending", style_warning()),
+            Span::styled(" | graph: ", style_label()),
+            Span::styled(
+                projection
+                    .graph_id
+                    .as_deref()
+                    .unwrap_or("<none>")
+                    .to_owned(),
+                style_value(),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("screen: ", style_label()),
+            Span::styled(format!("{:?}", state.screen), style_dim()),
+            Span::styled(" | pane=", style_label()),
+            Span::styled(state.active_pane.label(), style_dim()),
+            Span::styled(" | refresh: ", style_label()),
+            Span::styled(state.refresh_count.to_string(), style_dim()),
+        ]),
+    ])
+    .block(tui_panel_block("", Color::DarkGray, BorderType::Plain))
+    .style(style_value())
 }
 
-fn tui_overview(projection: &moxi_shells::ShellProjection, state: &TuiState) -> Paragraph<'static> {
-    let lines = vec![
-        Line::from(format!(
-            "filter: {}",
-            state.filter.as_deref().unwrap_or("<none>")
-        )),
-        Line::from(format!(
-            "goal: {}",
-            projection.graph_goal.as_deref().unwrap_or("<none>")
-        )),
-        Line::from(format!(
-            "stage: {}",
-            projection
-                .latest_stage
-                .map(|stage| format!("{stage:?}"))
-                .unwrap_or_else(|| "<none>".to_owned())
-        )),
-        Line::from(format!("progress: {}", percent(projection.latest_progress))),
-        Line::from(format!(
-            "task: {}",
-            projection.current_task_id.as_deref().unwrap_or("<none>")
-        )),
-        Line::from(format!("complete: {}", projection.is_complete)),
-        Line::from(format!(
-            "message: {}",
-            projection.latest_message.as_deref().unwrap_or("<none>")
-        )),
-    ];
-    Paragraph::new(lines)
-        .block(tui_block("Overview", TuiPane::Overview, state.active_pane))
-        .wrap(Wrap { trim: true })
-}
-
-fn tui_graph_summary(
+fn tui_chat_stream(
     projection: &moxi_shells::ShellProjection,
     state: &TuiState,
 ) -> Paragraph<'static> {
-    let lines = if projection.graphs.is_empty() {
-        vec![Line::from("graph: <none>")]
-    } else {
-        projection
-            .graphs
-            .iter()
-            .map(|graph| {
-                Line::from(format!(
-                    "{} t={} d={} r={} w={} b={} f={}",
-                    graph.graph_id,
-                    graph.task_count,
-                    graph.completed_count,
-                    graph.running_count,
-                    graph.awaiting_approval_count,
-                    graph.blocked_count,
-                    graph.failed_count
-                ))
-            })
-            .collect::<Vec<_>>()
-    };
-    Paragraph::new(lines)
-        .block(tui_block(
-            "Graph Summary",
-            TuiPane::Graph,
-            state.active_pane,
-        ))
-        .wrap(Wrap { trim: true })
-}
-
-fn tui_blockers(projection: &moxi_shells::ShellProjection, state: &TuiState) -> Paragraph<'static> {
-    let mut lines = Vec::new();
+    let selected = selected_task(projection, state);
     let awaiting_approval = projection
         .blockers
         .iter()
         .filter(|blocker| blocker.blocker == ResumeBlocker::AwaitingApproval)
         .count();
-    lines.push(Line::from(format!(
-        "approvals: awaiting={} display-only",
-        awaiting_approval
-    )));
-    lines.push(Line::from("action: unavailable in shell"));
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("* moxi-agent ", style_brand()),
+            Span::styled("[orchestrator]", style_dim()),
+        ]),
+        Line::from(vec![Span::styled(
+            "I will inspect the workspace first, then prepare a safe plan.",
+            style_value(),
+        )]),
+        Line::from(vec![Span::styled(
+            "model: gpt-5.5 | reasoning: high | tools: planner",
+            style_dim(),
+        )]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("* ui-agent ", style_focus()),
+            Span::styled("[rich-cli]", style_dim()),
+        ]),
+        Line::from(vec![Span::styled(
+            "The CLI should feel like a safe agent control panel, not a dashboard.",
+            style_value(),
+        )]),
+        Line::from(vec![Span::styled(
+            "model: code-ui | reasoning: high | tools: ratatui",
+            style_dim(),
+        )]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("> guard-agent ", style_warning()),
+            Span::styled("is checking workspace risk...", style_value()),
+        ]),
+        Line::from(vec![Span::styled(
+            "model: guard | reasoning: medium",
+            style_dim(),
+        )]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Status ", style_label()),
+            badge(format!("{} tasks", projection.tasks.len()), Color::Blue),
+            Span::raw(" "),
+            badge(format!("{} approvals", awaiting_approval), Color::Yellow),
+            Span::raw(" "),
+            Span::styled(
+                format!("progress {}", percent(projection.latest_progress)),
+                progress_style(projection.latest_progress),
+            ),
+            Span::raw(" "),
+            progress_bar(projection.latest_progress, 16),
+        ]),
+        Line::from(vec![
+            Span::styled("Goal ", style_label()),
+            Span::styled(
+                projection
+                    .graph_goal
+                    .as_deref()
+                    .unwrap_or("preview MOXI shell experience")
+                    .to_owned(),
+                style_value(),
+            ),
+        ]),
+    ];
 
-    lines.extend(
-        projection
-            .blockers
-            .iter()
-            .filter(|blocker| {
-                matches_filter(
-                    state.filter.as_deref(),
-                    &[&blocker.task_ref, &format!("{:?}", blocker.blocker)],
-                )
-            })
-            .map(|blocker| Line::from(format!("{} -> {:?}", blocker.task_ref, blocker.blocker))),
-    );
+    if let Some(task) = selected {
+        lines.extend([
+            Line::from(vec![
+                Span::styled("Selected ", style_label()),
+                Span::styled(task.task_id.clone(), style_value()),
+                Span::raw(" "),
+                status_badge(&task.state),
+                Span::raw(" "),
+                Span::styled(task.capability_id.clone(), style_accent()),
+                Span::raw(" "),
+                Span::styled(percent(task.progress), progress_style(task.progress)),
+            ]),
+            Line::from(vec![
+                Span::styled("Message ", style_label()),
+                Span::styled(
+                    task.message.as_deref().unwrap_or("<none>").to_owned(),
+                    style_value(),
+                ),
+            ]),
+        ]);
+        if let Some(blocker) = &task.blocker {
+            lines.push(Line::from(vec![
+                Span::styled("Blocker ", style_label()),
+                Span::styled(format!("{blocker:?}"), blocker_style(blocker)),
+            ]));
+        }
+    }
 
-    let lines = if lines.is_empty() {
-        vec![Line::from("approval hints: none")]
-    } else {
-        lines
-    };
-    let lines = if projection.blockers.is_empty() {
-        vec![
-            Line::from("approvals: none"),
-            Line::from("action: unavailable in shell"),
-            Line::from("blockers: none"),
-        ]
-    } else if lines.len() == 2 {
-        vec![
-            lines[0].clone(),
-            lines[1].clone(),
-            Line::from("no blockers match filter"),
-        ]
-    } else {
-        lines
-    };
     Paragraph::new(lines)
-        .block(tui_block(
-            "Approvals / Blockers",
-            TuiPane::Approvals,
-            state.active_pane,
+        .block(tui_panel_block(
+            "Conversation",
+            Color::Cyan,
+            BorderType::Rounded,
         ))
         .wrap(Wrap { trim: true })
 }
 
-fn tui_tasks(projection: &moxi_shells::ShellProjection, state: &TuiState) -> Paragraph<'static> {
-    let lines = if projection.tasks.is_empty() {
-        vec![Line::from("no task rows in this projection")]
-    } else {
-        let tasks = filtered_tasks(projection, state);
-        let selected = selected_index(state.selected_task_index, tasks.len());
-        tasks
-            .iter()
-            .enumerate()
-            .map(|(index, task)| {
-                let cursor = if Some(index) == selected { ">" } else { " " };
-                Line::from(format!(
-                    "{cursor} {} [{}] {} {} blocker={} msg={}",
-                    task.task_id,
-                    task.state,
-                    task.capability_id,
-                    percent(task.progress),
-                    task.blocker
-                        .as_ref()
-                        .map(|blocker| format!("{blocker:?}"))
-                        .unwrap_or_else(|| "none".to_owned()),
-                    task.message.as_deref().unwrap_or("<none>")
-                ))
-            })
-            .collect::<Vec<_>>()
-    };
-    let lines = if lines.is_empty() {
-        vec![Line::from("no tasks match filter")]
-    } else {
-        lines
-    };
-    Paragraph::new(lines)
-        .block(tui_block("Tasks", TuiPane::Tasks, state.active_pane))
-        .wrap(Wrap { trim: true })
-}
-
-fn tui_task_detail(
-    projection: &moxi_shells::ShellProjection,
-    state: &TuiState,
-) -> Paragraph<'static> {
-    let lines = if let Some(task) = selected_task(projection, state) {
-        vec![
-            Line::from(format!("task: {}", task.task_id)),
-            Line::from(format!(
-                "state={} stage={} progress={}",
-                task.state,
-                task.last_stage
-                    .map(|stage| format!("{stage:?}"))
-                    .unwrap_or_else(|| "<none>".to_owned()),
-                percent(task.progress)
-            )),
-            Line::from(format!(
-                "capability={} skill={}",
-                task.capability_id,
-                task.skill_id.as_deref().unwrap_or("<none>")
-            )),
-            Line::from(format!(
-                "blocker={}",
-                task.blocker
-                    .as_ref()
-                    .map(|blocker| format!("{blocker:?}"))
-                    .unwrap_or_else(|| "none".to_owned())
-            )),
-            Line::from(format!(
-                "message: {}",
-                task.message.as_deref().unwrap_or("<none>")
-            )),
-            Line::from("detail: projection-only; no execution authority"),
-        ]
-    } else if state.filter.is_some() {
-        vec![Line::from("no selected task matches filter")]
-    } else {
-        vec![Line::from("no selected task")]
-    };
-    Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title("Task Detail"))
-        .wrap(Wrap { trim: true })
-}
-
-fn tui_boundary(state: &TuiState) -> Paragraph<'static> {
-    Paragraph::new(vec![
-        Line::from("mode: read-only projection shell"),
-        Line::from("allowed: admit, manifest, status, watch, tui, boundary, repl"),
-        Line::from("forbidden: execute, approve, ticket, verify, commit, ledger"),
-        Line::from("P0 owns authorization, tickets, execution, verification, ledger"),
-    ])
-    .block(tui_block("Boundary", TuiPane::Boundary, state.active_pane))
+fn tui_input_box(state: &TuiState) -> Paragraph<'static> {
+    Paragraph::new(Line::from(vec![
+        Span::styled("> ", style_focus()),
+        Span::styled(
+            if state.command_input.is_empty() {
+                "Ask moxi-agent to inspect the current project".to_owned()
+            } else {
+                state.command_input.clone()
+            },
+            if state.command_input.is_empty() {
+                style_dim()
+            } else {
+                style_value()
+            },
+        ),
+    ]))
+    .block(tui_panel_block(
+        "Input Task",
+        Color::Yellow,
+        BorderType::Double,
+    ))
     .wrap(Wrap { trim: true })
 }
 
-fn tui_footer(state: &TuiState) -> Paragraph<'static> {
-    Paragraph::new(format!(
-        "active={} selected_task={} filter={} quit={} | Tab cycle | o/g/t/a/b/? focus | j/k task | /filter | r refresh snapshot | q exit | no execute/approve/ticket/verify/ledger",
-        state.active_pane.label(),
-        state.selected_task_index,
-        state.filter.as_deref().unwrap_or("<none>"),
-        state.should_quit
-    ))
-        .block(tui_block("Keys", TuiPane::Keys, state.active_pane))
+fn tui_status_bar(
+    projection: &moxi_shells::ShellProjection,
+    state: &TuiState,
+) -> Paragraph<'static> {
+    Paragraph::new(Line::from(vec![
+        Span::raw(format!(
+            "graph={} pane={} active={} selected_task={} filter={} refresh={} quit={} | ",
+            projection.graph_id.as_deref().unwrap_or("<none>"),
+            state.active_pane.label(),
+            state.active_pane.label(),
+            state.selected_task_index,
+            state.filter.as_deref().unwrap_or("<none>"),
+            state.refresh_count,
+            state.should_quit
+        )),
+        Span::styled("? shortcuts", style_dim()),
+        Span::styled(" | ", style_label()),
+        Span::styled("/ command menu", style_dim()),
+        Span::styled(" | ", style_label()),
+        Span::styled(state.command_status.clone(), style_value()),
+        Span::raw("      "),
+        Span::styled("context ", style_label()),
+        progress_bar(0.72, 10),
+        Span::styled("72%", style_focus()),
+        Span::styled(" | profile ", style_label()),
+        Span::styled(projection.profile_id.clone(), style_dim()),
+    ]))
+}
+
+fn tui_task_tracker(
+    projection: &moxi_shells::ShellProjection,
+    state: &TuiState,
+) -> Paragraph<'static> {
+    let tasks = filtered_tasks(projection, state);
+    let selected = selected_index(state.selected_task_index, tasks.len());
+    let mut lines = vec![
+        Line::from(vec![Span::styled("Turn 1", style_warning())]),
+        Line::from(vec![Span::styled("* Detect workspace", style_success())]),
+        Line::from(vec![Span::styled("* Load Agent Core", style_success())]),
+        Line::from(vec![Span::styled("> Check risk", style_focus())]),
+        Line::from(vec![Span::styled("o Wait for owner", style_dim())]),
+        Line::from(""),
+        Line::from(vec![Span::styled("Turn 2", style_warning())]),
+    ];
+
+    if tasks.is_empty() {
+        lines.push(Line::from(vec![Span::styled(
+            "o No runtime tasks in projection",
+            style_dim(),
+        )]));
+    } else {
+        for (index, task) in tasks.iter().enumerate() {
+            let marker = if Some(index) == selected {
+                "> "
+            } else if task.progress >= 1.0 {
+                "* "
+            } else {
+                "o "
+            };
+            let style = if Some(index) == selected {
+                style_focus()
+            } else if task.progress >= 1.0 {
+                style_success()
+            } else {
+                style_dim()
+            };
+            lines.push(Line::from(vec![
+                Span::styled(marker, style),
+                Span::styled(task.task_id.clone(), style_value()),
+            ]));
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(task.state.clone(), style_dim()),
+                Span::raw(" | "),
+                Span::styled(percent(task.progress), progress_style(task.progress)),
+            ]));
+        }
+    }
+
+    Paragraph::new(lines)
+        .block(tui_panel_block(
+            "Task Tracking",
+            Color::Magenta,
+            BorderType::Rounded,
+        ))
         .wrap(Wrap { trim: true })
 }
 
-fn tui_block(title: &'static str, pane: TuiPane, active: TuiPane) -> Block<'static> {
-    let title = if pane == active {
-        format!("* {title}")
+fn tui_panel_block<T>(title: T, border_color: Color, border_type: BorderType) -> Block<'static>
+where
+    T: Into<String>,
+{
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(border_type)
+        .border_style(Style::default().fg(border_color))
+        .title(Span::styled(
+            title.into(),
+            Style::default()
+                .fg(border_color)
+                .add_modifier(Modifier::BOLD),
+        ))
+}
+
+fn style_brand() -> Style {
+    Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD)
+}
+
+fn style_gradient_1() -> Style {
+    Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD)
+}
+
+fn style_gradient_2() -> Style {
+    Style::default()
+        .fg(Color::LightYellow)
+        .add_modifier(Modifier::BOLD)
+}
+
+fn style_gradient_3() -> Style {
+    Style::default()
+        .fg(Color::LightMagenta)
+        .add_modifier(Modifier::BOLD)
+}
+
+fn style_label() -> Style {
+    Style::default().fg(Color::Gray)
+}
+
+fn style_dim() -> Style {
+    Style::default().fg(Color::DarkGray)
+}
+
+fn style_value() -> Style {
+    Style::default().fg(Color::White)
+}
+
+fn style_accent() -> Style {
+    Style::default()
+        .fg(Color::Magenta)
+        .add_modifier(Modifier::BOLD)
+}
+
+fn style_focus() -> Style {
+    Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD)
+}
+
+fn style_success() -> Style {
+    Style::default()
+        .fg(Color::Green)
+        .add_modifier(Modifier::BOLD)
+}
+
+fn style_warning() -> Style {
+    Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD)
+}
+
+fn style_danger() -> Style {
+    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+}
+
+fn progress_style(progress: f32) -> Style {
+    if progress >= 1.0 {
+        style_success()
+    } else if progress > 0.0 {
+        style_focus()
     } else {
-        title.to_owned()
+        style_warning()
+    }
+}
+
+fn blocker_style(blocker: &ResumeBlocker) -> Style {
+    match blocker {
+        ResumeBlocker::AwaitingApproval => style_warning(),
+        ResumeBlocker::DependencyIncomplete => style_danger(),
+        ResumeBlocker::RunningCheckpoint => style_accent(),
+        ResumeBlocker::NonIdempotentRunningCheckpoint => style_accent(),
+        ResumeBlocker::Failed => style_danger(),
+        ResumeBlocker::AlreadyFinished => style_success(),
+    }
+}
+
+fn status_badge(status: &str) -> Span<'static> {
+    let color = match status {
+        "Completed" => Color::Green,
+        "Running" => Color::Cyan,
+        "AwaitingApproval" => Color::Yellow,
+        "Failed" => Color::Red,
+        "Planned" => Color::Magenta,
+        _ => Color::Blue,
     };
-    Block::default().borders(Borders::ALL).title(title)
+    badge(status.to_owned(), color)
+}
+
+fn badge<T>(text: T, color: Color) -> Span<'static>
+where
+    T: Into<String>,
+{
+    Span::styled(
+        format!(" {} ", text.into()),
+        Style::default()
+            .fg(Color::Black)
+            .bg(color)
+            .add_modifier(Modifier::BOLD),
+    )
+}
+
+fn progress_bar(progress: f32, width: usize) -> Span<'static> {
+    let clamped = progress.clamp(0.0, 1.0);
+    let filled = (clamped * width as f32).round() as usize;
+    let mut bar = String::from("[");
+    bar.push_str(&"#".repeat(filled));
+    bar.push_str(&"-".repeat(width.saturating_sub(filled)));
+    bar.push(']');
+    Span::styled(bar, progress_style(clamped))
 }
 
 fn selected_index(index: usize, len: usize) -> Option<usize> {
@@ -1943,7 +2547,7 @@ fn percent(value: f32) -> String {
 }
 
 fn help_text() -> &'static str {
-    "moxi\n\nDefault:\n  moxi\n    Opens the read-only TUI demo/onboarding dashboard.\n\nCommands:\n  admit --goal <text> [--tenant <id>] [--user <id>] [--workspace <path>] [--capability <id>] [--risk low|medium|high|critical]\n  manifest [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human]\n  boundary [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--text]\n  status [--feed|--query] [--input <snapshot.json>] [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--text|--panel] [--limit <n>]\n  watch [--feed|--query] --input <snapshot.json> [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--text|--panel] [--limit <n>] [--ticks <n>] [--interval-ms <n>]\n  tui [--feed|--query] [--input <snapshot.json>] [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--width <n>] [--height <n>] [--keys tab,o,g,t,a,b,?,j,k,/filter,r,q] [--interactive] [--poll-ms <n>]\n  repl\n\nBoundary: this CLI submits requests and renders shell contracts only; it can watch snapshot files and render a read-only TUI preview, but it cannot execute, authorize, issue tickets, verify, or commit ledger events."
+    "moxi\n\nDefault:\n  moxi\n    Opens the branded full-screen read-only TUI demo/onboarding dashboard.\n\nCommands:\n  admit --goal <text> [--tenant <id>] [--user <id>] [--workspace <path>] [--capability <id>] [--risk low|medium|high|critical]\n  manifest [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human]\n  boundary [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--text]\n  status [--feed|--query] [--input <snapshot.json>] [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--text|--panel] [--limit <n>]\n  watch [--feed|--query] --input <snapshot.json> [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--text|--panel] [--limit <n>] [--ticks <n>] [--interval-ms <n>]\n  tui [--feed|--query] [--input <snapshot.json>] [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--width <n>] [--height <n>] [--keys tab,o,g,t,a,b,?,j,k,/filter,r,q] [--interactive] [--poll-ms <n>]\n  repl\n\nTUI commands: /help, /status, /boundary, /demo, /filter <text>, /clear, /quit.\n\nBoundary: this CLI submits requests and renders shell contracts only; it can watch snapshot files and render a read-only TUI preview, but it cannot execute, authorize, issue tickets, verify, or commit ledger events."
 }
 
 #[cfg(test)]
@@ -2722,20 +3326,14 @@ mod tests {
         let text = String::from_utf8(output).unwrap();
 
         assert_eq!(code, 0);
-        assert!(text.contains("MOXI R10 TUI"));
-        assert!(text.contains("Overview"));
-        assert!(text.contains("Graph Summary"));
-        assert!(text.contains("Approvals / Blockers"));
-        assert!(text.contains("Tasks"));
-        assert!(text.contains("Boundary"));
+        assert!(text.contains("moxi-agent"));
+        assert!(text.contains("The CLI should feel like a safe agent control panel"));
+        assert!(text.contains("Input Task"));
         assert!(text.contains("graph=graph_detail"));
-        assert!(text.contains("graph_detail t=1 d=0 r=0 w=1 b=1"));
-        assert!(text.contains("f=0"));
-        assert!(text.contains("approvals: awaiting=1"));
-        assert!(text.contains("display-only"));
-        assert!(text.contains("action: unavailable in shell"));
-        assert!(text.contains("task_1 [AwaitingApproval] file.read 50%"));
-        assert!(text.contains("mode: read-only projection shell"));
+        assert!(text.contains("1 tasks"));
+        assert!(text.contains("1 approvals"));
+        assert!(text.contains("task_1"));
+        assert!(text.contains("Task Tracking"));
     }
 
     #[test]
@@ -2752,16 +3350,42 @@ mod tests {
         let text = String::from_utf8(output).unwrap();
 
         assert_eq!(code, 0);
-        assert!(text.contains("MOXI R10 TUI"));
+        assert!(text.contains("moxi-agent"));
         assert!(text.contains("graph=demo_graph"));
         assert!(text.contains("preview MOXI shell experience"));
-        assert!(text.contains("demo_graph t=4 d=1 r=1 w=1 b=2 f=0"));
-        assert!(text.contains("demo_approval [AwaitingApproval] github.write 20%"));
-        assert!(text.contains("display-only"));
-        assert!(text.contains("mode: read-only projection shell"));
-        assert!(text.contains("allowed: admit, manifest, status, watch, tui, boundary, repl"));
-        assert!(text.contains("no ticket, execute, verify, or ledger authority"));
-        assert!(text.contains("active=Graph selected_task=0 filter=<none> quit=true"));
+        assert!(text.contains("The CLI should feel like a safe agent control panel"));
+        assert!(text.contains("4 tasks"));
+        assert!(text.contains("1 approvals"));
+        assert!(text.contains("Input Task"));
+        assert!(text.contains("active=Graph selected_task=0 filter=<none>"));
+        assert!(text.contains("quit=true"));
+    }
+
+    #[test]
+    fn tui_command_bar_accepts_safe_builtin_commands_only() {
+        let mut output = Vec::new();
+
+        let code = run(
+            [
+                "moxi-cli",
+                "tui",
+                "--width",
+                "120",
+                "--height",
+                "30",
+                "--keys",
+                "type:/,type:b,type:o,type:u,type:n,type:d,type:a,type:r,type:y,enter,q",
+            ],
+            &mut output,
+        )
+        .unwrap();
+        let text = String::from_utf8(output).unwrap();
+
+        assert_eq!(code, 0);
+        assert!(text.contains("pane=Boundary"));
+        assert!(text.contains("safe plan"));
+        assert!(text.contains("> Ask moxi-agent"));
+        assert!(text.contains("Task Tracking"));
     }
 
     #[test]
@@ -2772,10 +3396,10 @@ mod tests {
         let text = String::from_utf8(output).unwrap();
 
         assert_eq!(code, 0);
-        assert!(text.contains("MOXI R10 TUI"));
+        assert!(text.contains("moxi-agent"));
         assert!(text.contains("graph=demo_graph"));
-        assert!(text.contains("mode: read-only projection shell"));
-        assert!(text.contains("blocked in shell: no ticket"));
+        assert!(text.contains("The CLI should feel like a safe agent control panel"));
+        assert!(text.contains("guarded"));
     }
 
     #[test]
@@ -2790,9 +3414,10 @@ mod tests {
         let text = String::from_utf8(output).unwrap();
 
         assert_eq!(code, 0);
-        assert!(text.contains("MOXI R10 TUI"));
+        assert!(text.contains("moxi-agent"));
         assert!(text.contains("graph=demo_graph"));
-        assert!(text.contains("active=Overview selected_task=0 filter=<none> quit=true"));
+        assert!(text.contains("active=Overview selected_task=0 filter=<none>"));
+        assert!(text.contains("quit=true"));
     }
 
     #[test]
@@ -2803,7 +3428,7 @@ mod tests {
         let text = String::from_utf8(output).unwrap();
 
         assert_eq!(code, 0);
-        assert!(text.contains("MOXI R10 TUI"));
+        assert!(text.contains("moxi-agent"));
         assert!(text.contains("graph=demo_graph"));
     }
 
@@ -2827,7 +3452,9 @@ mod tests {
         assert_eq!(code, 0);
         assert!(text.contains("Default:"));
         assert!(text.contains("moxi"));
-        assert!(text.contains("Opens the read-only TUI demo/onboarding dashboard."));
+        assert!(
+            text.contains("Opens the branded full-screen read-only TUI demo/onboarding dashboard.")
+        );
         assert!(text.contains("tui [--feed|--query] [--input <snapshot.json>]"));
     }
 
@@ -2891,16 +3518,12 @@ mod tests {
         assert_eq!(code, 0);
         assert!(text.contains("pane=Tasks"));
         assert!(text.contains("refresh=1"));
-        assert!(text.contains("filter: task_2"));
-        assert!(text.contains("active=Tasks selected_task=0 filter=task_2 quit=true"));
-        assert!(text.contains("task_2 [Planned] file.read 20%"));
-        assert!(text.contains("graph_many t=3 d=0 r=1 w=1 b=2 f=0"));
-        assert!(text.contains("task: task_2"));
-        assert!(text.contains("state=Planned stage=Planned progress=20%"));
-        assert!(text.contains("blocker=DependencyIncomplete"));
-        assert!(text.contains("detail: projection-only; no execution authority"));
-        assert!(!text.contains("task_1 [AwaitingApproval]"));
-        assert!(text.contains("task_2 -> DependencyIncomplete"));
+        assert!(text.contains("filter=task_2"));
+        assert!(text.contains("active=Tasks selected_task=0 filter=task_2"));
+        assert!(text.contains("quit=true"));
+        assert!(text.contains("task_2"));
+        assert!(text.contains("file.read"));
+        assert!(text.contains("DependencyIncomplete"));
     }
 
     #[test]
@@ -2934,11 +3557,9 @@ mod tests {
         let text = String::from_utf8(output).unwrap();
 
         assert_eq!(code, 0);
-        assert!(text.contains("pane=Keys"));
-        assert!(text.contains("active=Keys selected_task=0 filter=<none> quit=true"));
-        assert!(text.contains("o/g/t/a/b/? focus"));
-        assert!(text.contains("/filter"));
-        assert!(text.contains("mode: read-only projection shell"));
+        assert!(text.contains("Commands"));
+        assert!(text.contains("/status"));
+        assert!(text.contains("Ask moxi-agent"));
     }
 
     #[test]
@@ -2973,10 +3594,10 @@ mod tests {
 
         assert_eq!(code, 0);
         assert!(text.contains("pane=Graph"));
-        assert!(text.contains("active=Graph selected_task=0 filter=<none> quit=true"));
-        assert!(text.contains("* Graph Summary"));
-        assert!(text.contains("graph_detail t=1 d=0 r=0 w=1 b=1 f=0"));
-        assert!(text.contains("mode: read-only projection shell"));
+        assert!(text.contains("active=Graph selected_task=0 filter=<none>"));
+        assert!(text.contains("quit=true"));
+        assert!(text.contains("graph=graph_detail"));
+        assert!(text.contains("The CLI should feel like a safe agent control panel"));
     }
 
     #[test]
@@ -3012,14 +3633,9 @@ mod tests {
         assert_eq!(code, 0);
         assert!(text.contains("pane=Tasks"));
         assert!(text.contains("active=Tasks selected_task=1"));
-        assert!(text.contains("> task_2 [Planned] file.read 20%"));
-        assert!(text.contains("task: task_2"));
-        assert!(text.contains("state=Planned stage=Planned progress=20%"));
-        assert!(text.contains("capability=file.read skill=skill.file.read"));
-        assert!(text.contains("blocker=DependencyIncomplete"));
-        assert!(text.contains("message: task_2 message"));
-        assert!(text.contains("detail: projection-only; no execution authority"));
-        assert!(text.contains("mode: read-only projection shell"));
+        assert!(text.contains("task_2"));
+        assert!(text.contains("file.read"));
+        assert!(text.contains("Task Tracking"));
     }
 
     #[test]
@@ -3077,7 +3693,7 @@ mod tests {
 
         assert_eq!(code, 0);
         assert!(text.contains("quit=true"));
-        assert!(text.contains("MOXI R10 TUI"));
+        assert!(text.contains("moxi-agent"));
     }
 
     #[test]
@@ -3155,8 +3771,14 @@ mod tests {
             tui_key_from_event(KeyEvent::from(KeyCode::Char('q'))),
             Some(TuiKey::Quit)
         );
-        assert_eq!(tui_key_from_event(KeyEvent::from(KeyCode::Enter)), None);
-        assert_eq!(tui_key_from_event(KeyEvent::from(KeyCode::Char('x'))), None);
+        assert_eq!(
+            tui_key_from_event(KeyEvent::from(KeyCode::Enter)),
+            Some(TuiKey::SubmitCommand)
+        );
+        assert_eq!(
+            tui_key_from_event(KeyEvent::from(KeyCode::Char('x'))),
+            Some(TuiKey::InputChar('x'))
+        );
     }
 
     #[test]

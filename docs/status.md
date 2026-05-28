@@ -411,6 +411,21 @@ JSON projection output remains complete. `boundary` renders the
 no-execution/no-authority contract. It does not include a full runtime-control
 TUI, MCP server, SDK, HTTP
 transport, desktop UI, web UI, mobile approval app, or digital-human shell yet.
+The next R10 UX reference and implementation plan is captured in
+`docs/r10-tui-ux-reference-plan.md`: make `moxi` a full-screen display-first
+TUI with responsive panes, bottom command input, help/command discovery, and
+snapshot-backed verification while keeping all execution authority in P0. The
+current TUI renderer now has a first branded visual pass with a MOXI wordmark,
+colorized badges, semantic task/blocker styles, and progress bars while
+preserving text fallbacks for deterministic tests and plain terminals. Plain
+`moxi` now enters the branded full-screen read-only TUI by default in real CLI
+use, while deterministic `--keys` runs still render snapshot frames for tests.
+The footer is now a command pane with safe display-only commands: `/help`,
+`/status`, `/boundary`, `/demo`, `/filter <text>`, `/clear`, and `/quit`.
+After visual review against Claude-style agent CLIs, the TUI has shifted from a
+large dashboard grid to a chat-first surface: the main area is an AI
+conversation/status stream, and graph/task/approval/boundary facts are reduced
+to inline summaries so they do not cover the input-centered agent experience.
 
 P0 coverage in current code:
 

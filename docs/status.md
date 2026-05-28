@@ -266,37 +266,80 @@ auth, external secret-manager/KMS/HSM, cryptographic verifier, hardened sandbox,
 secret injection, rotation, tenant policy, executor trust-root, and compliance
 audit-export evidence before credentialed or executable production enablement.
 Production adapter evidence is now verified into tenant-bound
-`ProductionAdapterVerificationDecision` records, production auth evidence is
+`ProductionAdapterVerificationDecision` records. Adapter evidence now carries
+an explicit runtime mode and production readiness accepts only
+`ExternalVerified`; `LocalMock`, `TestStub`, and `ExternalConfigured` evidence
+fail closed before any production P0 path can be marked ready. Adapter
+deployment refs, configuration refs, and hashes are also bound into evidence
+refs, verification decision ids, and readiness cross-checks so deployment- or
+config-swapped external adapter evidence is rejected. Provider policy refs are
+bound the same way, so a verified adapter result cannot be reused under a
+different external provider policy. `ProductionAdapterProviderConfigRecord`
+now seals provider/deployment/config/policy refs into a hash-bound record and
+rejects tampered or placeholder provider configs before they can become
+readiness evidence. Adapter evidence and verification decisions now carry the
+sealed provider config record ref/hash, and the provider-config-record
+verification path rejects provider, deployment, adapter config, policy, runtime
+mode, or record-hash swaps before readiness can cite the adapter.
+`ProductionAdapterReadinessContractRecord` now seals the expected runtime mode,
+attestation ref, healthcheck ref, and provider-policy refs for a sealed provider
+config, and adapter evidence/verification decisions bind that contract
+record/hash so contract swaps fail closed before readiness consumption. Strict
+typed-hardening readiness now also requires typed decisions that cite a
+verified adapter decision to retain that adapter decision's sealed
+provider-config and readiness-contract evidence refs, rejecting stripped
+consumer decisions that keep only the adapter decision id.
+Production auth evidence is
 verified into `ProductionAuthDecision` records bound to the configured auth
 provider, issuer/JWKS/token/session policy refs, and verified AuthProvider
 adapter decisions, external secret-manager evidence is verified into
 `ExternalSecretManagerDecision` records bound to credential refs, external
 secret refs, KMS/HSM/access-policy/rotation refs, and verified
-ExternalSecretManager adapter decisions, cryptographic verifier evidence is
+ExternalSecretManager adapter decisions. Production auth and external
+secret-manager verification now also have contract-backed paths that require the
+verified adapter decision to satisfy the sealed provider config record and
+adapter readiness contract record before the typed decision remains verified.
+Cryptographic verifier evidence is
 verified into `CryptographicVerifierDecision` records bound to signature
 decisions, sealed trust-root records and hashes, configured verifier refs,
 verifier policy refs, transparency-log refs, algorithm-suite refs, attestation
-refs, and verified CryptographicVerifier adapter decisions, hardened sandbox
+refs, and verified CryptographicVerifier adapter decisions. Cryptographic
+verifier verification now also has a contract-backed path that requires the
+verified adapter decision to satisfy the sealed provider config record and
+adapter readiness contract record before the typed decision remains verified.
+Hardened sandbox
 evidence is verified into `HardenedSandboxDecision` records bound to the
 configured sandbox profile, isolation policy, filesystem policy, network
 policy, syscall policy, resource policy, attestation refs, and verified
-HardenedSandbox adapter decisions, credential rotation refs are
+HardenedSandbox adapter decisions. Hardened sandbox verification can now also
+require the sealed provider config record and adapter readiness contract record
+before the typed decision remains verified. Credential rotation refs are
 verified into `RotationEnforcementDecision` records that can bind the
 configured rotation policy to verified RotationEnforcement adapter decisions,
 secret injection receipts
 are verified into `SecretInjectionDecision` records bound to allowed
 `SecretUseDecision` values, executor-injected credentials, hardened sandbox
 profiles, verified injection adapter decisions, executor refs, and receipts,
+and rotation enforcement plus secret injection now have contract-backed paths
+that reject swapped provider config records or swapped readiness contract
+records before the typed decision can remain verified,
 trust-root external storage receipts are verified into
 `TrustRootStorageDecision` records, and production readiness requires every
 adapter evidence item and configured credential rotation ref to bind to its
 matching verified decision. Trust-root storage decisions now carry the storage
 evidence ref and production readiness revalidates their ids before consumption.
+Trust-root storage verification can also require the verified
+ExecutorTrustRoots adapter decision to satisfy the sealed provider config
+record and adapter readiness contract record before the typed decision remains
+verified.
 The stricter `ProductionHardeningDecisionSet`
 readiness path now requires verified auth, external secret-manager,
 cryptographic verifier, hardened sandbox, rotation, secret-injection,
 compliance-delivery, and trust-root storage decisions as one typed set, and
 fails closed on any missing, rejected, cross-tenant, or mismatched decision.
+Strict readiness now also rejects trust-root storage decisions that do not cite
+matching verified ExecutorTrustRoots adapter decisions, and applies the same
+adapter-citation requirement to production auth and hardened sandbox decisions.
 P1 execution audit bundles now bind the runtime request, sealed profile record,
 readiness decision, audit export id/hash, optional production readiness ref, redaction profile, and
 evidence refs for review without granting ticket, execution, verification, or
@@ -315,7 +358,10 @@ verified ComplianceAuditExport adapter decision as a tenant-bound
 an external compliance backend. Delivery verification now also revalidates the
 compliance export bundle id/hash and evidence refs before accepting delivery
 receipts, and production readiness revalidates delivery decision ids before
-consuming those decisions.
+consuming those decisions. Compliance export delivery verification can also
+require the verified ComplianceAuditExport adapter decision to satisfy the
+sealed provider config record and adapter readiness contract record before the
+delivery decision remains verified.
 It keeps raw secrets out of model, log, and durable payload paths. It does not
 yet integrate concrete KMS/HSM/secret-manager adapters, perform real
 cryptographic verification, inject credentials into OS sandboxes, or generate
@@ -628,10 +674,13 @@ P0 boundary decisions:
   `P1ExecutionReadinessRequest`, and `P1ExecutionReadinessDecision`,
   `P1ExecutionAuditBundle`, and `ComplianceExportBundle`. It rejects raw
   secret-looking references, requires
-  quorum for high-risk secret use, seals tenant trust roots into hash-bound
+  quorum for high-risk secret use, binds quorum approval ids to request,
+  tenant, tenant-policy minimum approver count, at least two unique approvers, reason, evidence refs, and approval time window, binds break-glass decision ids to tenant policy hash, actor, run, capability, risk, request evidence, approval, audit state, and decision time window, emits typed break-glass audit exports that
+  revalidate decision ids and audit-required evidence, seals tenant trust roots into hash-bound
   records, verifies external trust-root storage evidence against sealed record
   hashes, checks executor signatures against tenant trust-root records, binds
-  signature decisions to tenant ids, exports redacted
+  signature decisions to tenant ids, revalidates signature verification
+  decision ids before crypto verifier or production readiness consumption, exports redacted
   audit records, P1 execution audit bundles, and local compliance export
   bundles, rejects placeholder adapter evidence, verifies adapter evidence into
   tenant-bound decisions, verifies production auth evidence into tenant-bound
@@ -647,10 +696,16 @@ P0 boundary decisions:
   into tenant-bound decisions bound to the configured sandbox profile,
   isolation, filesystem, network, syscall, resource policy, attestation refs,
   and verified HardenedSandbox adapter decisions, verifies credential rotation refs into tenant-bound
-  decisions, verifies secret injection receipts into tenant-bound decisions
+  decisions that bind the production-hardening evidence hash, verifies secret injection receipts into tenant-bound decisions
   bound to allowed secret-use decisions, executor-injected credentials,
   hardened sandbox profiles, verified injection adapter decisions, executor
-  refs, and receipts, verifies compliance export delivery evidence against
+  refs, receipts, and injection evidence refs, rejects tampered secret-use
+  decision ids, credential-scope-swapped context, and future/expired/invalid secret-use decision windows before
+  injection evidence can cite them, revalidates quorum
+  approval ids before high-risk secret-use or break-glass consumption, binds secret-use ids to
+  tenant, run, actor, capability, resource, purpose, risk, credential, decision
+  kind, approval policy/ref, evidence refs, raw-secret
+  visibility/persistence flags, and decision time window, verifies compliance export delivery evidence against
   bundle hashes, sealed tenant policy hashes, optional production readiness
   evidence hashes, and verified ComplianceAuditExport adapter decisions into
   tenant-bound decisions, blocks production readiness until all P0
@@ -659,14 +714,19 @@ P0 boundary decisions:
   and exposes a stricter typed hardening decision-set readiness path that binds
   auth, external secret-manager, cryptographic verifier, sandbox, rotation,
   secret-injection, compliance-delivery, and trust-root storage decisions,
-  revalidates trust-root storage decision ids before production readiness
-  consumption,
+  revalidates trust-root storage, adapter verification, auth, external
+  secret-manager, cryptographic verifier, sandbox, rotation, and
+  secret-injection and signature verification decision ids, revalidates production readiness decision ids
+  whenever a tenant policy pack ref is available, and rejects tampered rotation
+  hardening-evidence refs or tampered secret-injection evidence refs before
+  production readiness consumption,
   seals tenant policy packs with stable hashes, seals P1 execution
   profiles against tenant policy record refs, policy/profile hashes, required
   evidence refs, and production readiness evidence hashes for credential-capable profiles,
   validates readiness decisions before P1 readiness audit export or audit bundle
-  creation so direct-ticket, execute-without-P0, inconsistent ready/blocked, or
-  evidence-stripped decisions fail closed, revalidates audit export ids and
+  creation so direct-ticket, execute-without-P0, inconsistent ready/blocked,
+  mode-mismatched, evidence-stripped, or tampered-id decisions fail closed,
+  revalidates audit export ids and
   hashes before P1 audit bundle creation, revalidates P1 execution audit bundle
   ids/hashes and audit export hash evidence before compliance export bundle creation,
   revalidates compliance export bundle ids/hashes and evidence refs before delivery verification,
@@ -734,7 +794,9 @@ P0 boundary decisions:
   trust-root storage, and external compliance export bundle storage/delivery.
   Hash-bound trust-root records, trust-root storage decisions, adapter evidence,
   rotation enforcement decisions, compliance export delivery decisions, and
-  rotation/compliance requirements are now modeled as fail-closed gates, and
+  rotation/compliance requirements are now modeled as fail-closed gates; rotation
+  decisions now bind the production-hardening evidence hash and secret-injection
+  decisions carry explicit injection evidence refs, and
   local redacted compliance bundles can be assembled, but live external
   infrastructure still needs to be connected.
 - P1 execution readiness beyond the default local read-only profile: production

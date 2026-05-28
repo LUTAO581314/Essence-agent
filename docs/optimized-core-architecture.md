@@ -51,7 +51,9 @@ P0 responsibilities:
 - replay audit facts from persisted policy decisions, approval grants, tickets,
   results, proofs, and events.
 - keep credential use reference-only, bind secret-use decisions to evidence,
-  seal tenant trust roots into hash-bound records, verify executor signature
+  reject tampered secret-use decision ids before injection evidence can cite
+  them, bind secret-use ids to decision kind, approval policy/ref, evidence
+  refs, and raw-secret visibility/persistence flags, seal tenant trust roots into hash-bound records, verify executor signature
   metadata against tenant trust-root records, verify external trust-root storage
   receipts against sealed record hashes, revalidate storage decision ids before
   readiness consumption, and export redacted audit records
@@ -80,8 +82,9 @@ P0 responsibilities:
   sealed profile record, readiness decision, optional production readiness ref,
   readiness evidence hash, audit export id/hash, redaction profile, and evidence refs. Readiness audit
   export and bundle creation reject decisions that claim direct ticketing,
-  execution without P0, inconsistent ready/blocked flags, or missing
-  profile/request evidence refs, and revalidate audit export ids and hashes
+  execution without P0, inconsistent ready/blocked flags, profile-mode
+  mismatches, tampered P1 readiness decision ids, or missing profile/request
+  evidence refs, and revalidate audit export ids and hashes
   before audit bundling. Compliance bundling revalidates P1 execution audit
   bundle ids/hashes and audit export hash evidence before accepting bundles. This makes the P0/P1 execution interlock
   reviewable without turning P0 into a runtime profile database or granting P1
@@ -261,16 +264,49 @@ Before credentialed or executable production actions, the architecture needs:
   reference-only credential use, quorum approvals, trust roots, signature
   verification decisions, hash-bound trust-root records, break-glass decisions,
   redacted audit records, a P1 execution-readiness gate, production adapter
-  evidence, adapter verification decisions, production auth evidence
+  evidence with explicit runtime mode, adapter verification decisions,
+  production auth evidence
   decisions, external secret-manager evidence decisions, rotation enforcement
   decisions that can bind configured rotation policies to verified
-  RotationEnforcement adapter decisions, cryptographic verifier evidence
+  RotationEnforcement adapter decisions and the production-hardening evidence
+  hash, cryptographic verifier evidence
   decisions, hardened sandbox evidence decisions, secret injection evidence
-  decisions, trust-root storage decisions, a typed production hardening
-  decision set that can require all of those verified decisions together, and a fail-closed
+  decisions that carry explicit injection evidence refs, trust-root storage decisions, a typed production hardening
+  decision set that can require all of those verified decisions together,
+  revalidate adapter verification, auth, external secret-manager, cryptographic
+  verifier, hardened sandbox, rotation, secret-injection, and policy-pack-bound
+  production readiness decision ids, and a fail-closed
   production readiness decision, but not live OIDC/SSO,
   KMS/HSM/secret-manager calls, real cryptographic verification, real
   OS/container secret injection, or a real external trust-root storage backend;
+  production readiness accepts only `ExternalVerified` adapter runtime evidence
+  and rejects local mocks, test stubs, or merely configured external adapters;
+  adapter deployment refs, configuration refs, configuration hashes, and
+  provider policy refs are bound into verification decisions and readiness
+  cross-checks so production evidence cannot be reused with a swapped external
+  deployment, provider configuration, or policy;
+  provider configuration can also be sealed as a hash-bound
+  `ProductionAdapterProviderConfigRecord` before later production-readiness
+  paths consume it, and adapter evidence/verification decisions now bind the
+  sealed provider config record ref/hash so provider, deployment, config,
+  policy, or runtime-mode swaps are rejected before readiness can cite them;
+  the expected runtime mode, attestation, healthcheck, and provider-policy refs
+  can also be sealed as a `ProductionAdapterReadinessContractRecord`, and
+  adapter evidence/verification decisions bind its record/hash before readiness
+  can consume the adapter. Production auth and external secret-manager typed
+  verification can require those sealed provider-config and readiness-contract
+  records before their decisions remain verified; cryptographic-verifier and
+  hardened-sandbox typed verification can require the same contract-backed
+  adapter binding before their decisions remain verified; rotation-enforcement
+  and secret-injection typed verification now use the same sealed
+  provider-config/readiness-contract binding before their decisions remain
+  verified; trust-root storage typed verification can require a verified
+  ExecutorTrustRoots adapter decision to satisfy the same sealed
+  provider-config/readiness-contract binding before its decision remains
+  verified, and strict production-hardening readiness rejects trust-root
+  storage, production auth, or hardened sandbox decisions that do not cite
+  matching verified adapter decisions or that strip the cited adapter
+  decision's sealed provider-config/readiness-contract evidence refs;
 - OS-level process sandbox hardening; the readiness gate can require a hardened
   sandbox profile ref and a tenant-bound sandbox decision over isolation,
   filesystem, network, syscall, resource policy, attestation refs, and a
@@ -279,7 +315,8 @@ Before credentialed or executable production actions, the architecture needs:
 - cryptographic executor signature verification against trust roots; current
   verification is a control-plane decision over tenant-bound trust-root records,
   signature decisions, configured verifier refs, verifier policy,
-  transparency-log, algorithm-suite, attestation metadata, verified
+  transparency-log, algorithm-suite, attestation metadata, signature decision
+  id revalidation before crypto verifier or production readiness consumption, verified
   CryptographicVerifier adapter decisions, and evidence refs;
 - compliance-grade redaction and audit export; current audit export records and
   local compliance export bundles carry redaction profile refs and hashes without
@@ -287,7 +324,10 @@ Before credentialed or executable production actions, the architecture needs:
   audit bundling, P1 execution audit bundle ids/hashes and audit export hash
   evidence are revalidated before compliance bundling, compliance export bundle
   ids/hashes and evidence refs are revalidated before delivery verification,
-  delivery decision ids are revalidated before production readiness consumption, and the readiness gate requires compliance export
+  delivery decision ids are revalidated before production readiness consumption,
+  delivery verification can require the ComplianceAuditExport adapter decision
+  to satisfy the sealed provider config record and readiness contract record,
+  and the readiness gate requires compliance export
   evidence before production enablement. Delivery receipts can be verified
   against the bundle hash, sealed tenant policy hash, optional production
   readiness evidence hash, and a verified ComplianceAuditExport adapter
@@ -338,7 +378,7 @@ Before credentialed or executable production actions, the architecture needs:
 13. Build `moxi-vault` as the first P0 production-hardening control plane for
    credential references, secret-use decisions, trust roots, hash-bound
    trust-root records, trust-root storage decisions, signature verification
-   decisions, tenant policy packs, quorum approval, break-glass, audit export
+   decisions, tenant policy packs, evidence-bound quorum approval, break-glass, audit export
    records, tenant policy pack records, P1 execution-readiness profile records,
    P1 execution audit bundles, compliance export bundles, production adapter
    evidence, adapter verification decisions, production auth evidence
@@ -385,7 +425,7 @@ Before credentialed or executable production actions, the architecture needs:
 - No high-risk executor is promoted to production without a tenant trust-root
   verification decision.
 - No break-glass action proceeds without bounded scope, evidence, quorum when
-  required, and audit export coverage.
+  required, typed audit export coverage, and decision-id revalidation.
 - No "5ms" claim covers complete LLM answers or external effects; it only
   covers bounded first-packet ack/deny/route/cache-hit decisions.
 - No hot-path cache hit is served without scope, freshness, risk, and evidence

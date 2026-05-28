@@ -157,7 +157,17 @@ pub enum ProductionAdapterKind {
     HardenedSandbox,
     SecretInjection,
     RotationEnforcement,
+    ExecutorTrustRoots,
     ComplianceAuditExport,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum ProductionAdapterRuntimeMode {
+    LocalMock,
+    TestStub,
+    ExternalConfigured,
+    ExternalVerified,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -208,6 +218,7 @@ pub struct RotationEnforcementDecision {
     pub decision_id: String,
     pub tenant_id: String,
     pub credential_id: String,
+    pub hardening_evidence_ref: String,
     pub rotation_ref: Option<String>,
     pub rotation_policy_ref: Option<String>,
     pub adapter_decision_ref: Option<String>,
@@ -237,7 +248,14 @@ pub struct SecretUseRequest {
 pub struct SecretUseDecision {
     pub decision_id: String,
     pub request_id: String,
+    pub run_id: String,
+    pub tenant_id: String,
+    pub actor_id: String,
+    pub capability_id: String,
+    pub resource_ref: String,
     pub credential_id: String,
+    pub purpose: String,
+    pub risk_level: RiskLevel,
     pub decision: SecretUseDecisionKind,
     pub approval_policy: ApprovalPolicy,
     pub approval_ref: Option<String>,
@@ -248,6 +266,53 @@ pub struct SecretUseDecision {
     pub raw_secret_persisted: bool,
     pub decided_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+struct SecretUseDecisionIdPayload<'a> {
+    request_id: &'a str,
+    run_id: &'a str,
+    tenant_id: &'a str,
+    actor_id: &'a str,
+    capability_id: &'a str,
+    resource_ref: &'a str,
+    credential_id: &'a str,
+    purpose: &'a str,
+    risk_level: &'a RiskLevel,
+    decision: &'a SecretUseDecisionKind,
+    approval_policy: &'a ApprovalPolicy,
+    approval_ref: &'a Option<String>,
+    evidence_refs: &'a [String],
+    raw_secret_visible_to_model: bool,
+    raw_secret_visible_to_logs: bool,
+    raw_secret_persisted: bool,
+    decided_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+}
+
+impl<'a> SecretUseDecisionIdPayload<'a> {
+    fn from_decision(decision: &'a SecretUseDecision) -> Self {
+        Self {
+            request_id: decision.request_id.as_str(),
+            run_id: decision.run_id.as_str(),
+            tenant_id: decision.tenant_id.as_str(),
+            actor_id: decision.actor_id.as_str(),
+            capability_id: decision.capability_id.as_str(),
+            resource_ref: decision.resource_ref.as_str(),
+            credential_id: decision.credential_id.as_str(),
+            purpose: decision.purpose.as_str(),
+            risk_level: &decision.risk_level,
+            decision: &decision.decision,
+            approval_policy: &decision.approval_policy,
+            approval_ref: &decision.approval_ref,
+            evidence_refs: &decision.evidence_refs,
+            raw_secret_visible_to_model: decision.raw_secret_visible_to_model,
+            raw_secret_visible_to_logs: decision.raw_secret_visible_to_logs,
+            raw_secret_persisted: decision.raw_secret_persisted,
+            decided_at: decision.decided_at,
+            expires_at: decision.expires_at,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -273,6 +338,9 @@ pub struct SecretInjectionDecision {
     pub tenant_id: String,
     pub credential_id: String,
     pub secret_use_decision_id: String,
+    pub injection_evidence_ref: String,
+    pub adapter_decision_ref: String,
+    pub injection_receipt_ref: String,
     pub secret_injection_profile_ref: String,
     pub hardened_sandbox_profile_ref: String,
     pub decision: SecretInjectionDecisionKind,
@@ -399,6 +467,71 @@ pub struct TenantPolicyPackRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProductionAdapterProviderConfig {
+    pub config_id: String,
+    pub tenant_id: String,
+    pub kind: ProductionAdapterKind,
+    pub provider_ref: String,
+    pub provider_policy_ref: String,
+    pub adapter_ref: String,
+    pub adapter_version: String,
+    pub adapter_deployment_ref: String,
+    pub adapter_config_ref: String,
+    pub allowed_runtime_mode: ProductionAdapterRuntimeMode,
+    pub evidence_refs: Vec<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProductionAdapterProviderConfigRecord {
+    pub record_id: String,
+    pub tenant_id: String,
+    pub config_id: String,
+    pub kind: ProductionAdapterKind,
+    pub provider_ref: String,
+    pub provider_policy_ref: String,
+    pub adapter_deployment_ref: String,
+    pub config_hash: String,
+    pub config: ProductionAdapterProviderConfig,
+    pub evidence_refs: Vec<String>,
+    pub sealed_by: String,
+    pub sealed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProductionAdapterReadinessContract {
+    pub contract_id: String,
+    pub tenant_id: String,
+    pub kind: ProductionAdapterKind,
+    pub provider_ref: String,
+    pub provider_config_record_ref: String,
+    pub provider_config_hash: String,
+    pub required_runtime_mode: ProductionAdapterRuntimeMode,
+    pub required_attestation_ref: String,
+    pub required_healthcheck_ref: String,
+    pub required_policy_refs: Vec<String>,
+    pub evidence_refs: Vec<String>,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProductionAdapterReadinessContractRecord {
+    pub record_id: String,
+    pub tenant_id: String,
+    pub contract_id: String,
+    pub kind: ProductionAdapterKind,
+    pub provider_ref: String,
+    pub provider_config_record_ref: String,
+    pub provider_config_hash: String,
+    pub contract_hash: String,
+    pub contract: ProductionAdapterReadinessContract,
+    pub evidence_refs: Vec<String>,
+    pub sealed_by: String,
+    pub sealed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct QuorumApproval {
     pub approval_id: String,
     pub request_ref: String,
@@ -406,6 +539,7 @@ pub struct QuorumApproval {
     pub approver_ids: Vec<String>,
     pub required_approvers: u8,
     pub reason: String,
+    pub evidence_refs: Vec<String>,
     pub granted_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
 }
@@ -435,6 +569,67 @@ pub struct BreakGlassDecision {
     pub evidence_refs: Vec<String>,
     pub decided_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+struct BreakGlassDecisionIdPayload<'a> {
+    policy_pack_id: &'a str,
+    policy_tenant_id: &'a str,
+    policy_hash: String,
+    request_id: &'a str,
+    request_tenant_id: &'a str,
+    actor_id: &'a str,
+    actor_roles: &'a [String],
+    run_id: &'a str,
+    reason: &'a str,
+    requested_capabilities: &'a [String],
+    risk_level: &'a RiskLevel,
+    request_evidence_refs: &'a [String],
+    decision: &'a BreakGlassDecisionKind,
+    approval_ref: &'a Option<String>,
+    audit_required: bool,
+    decision_evidence_refs: &'a [String],
+    decided_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+}
+
+impl<'a> BreakGlassDecisionIdPayload<'a> {
+    fn new(
+        policy: &'a TenantPolicyPack,
+        request: &'a BreakGlassRequest,
+        decision: &'a BreakGlassDecisionKind,
+        approval_ref: &'a Option<String>,
+        audit_required: bool,
+        evidence_refs: &'a [String],
+        window: DecisionWindow,
+    ) -> Self {
+        Self {
+            policy_pack_id: policy.pack_id.as_str(),
+            policy_tenant_id: policy.tenant_id.as_str(),
+            policy_hash: stable_id("tenant_policy_hash", policy),
+            request_id: request.request_id.as_str(),
+            request_tenant_id: request.tenant_id.as_str(),
+            actor_id: request.actor_id.as_str(),
+            actor_roles: &request.actor_roles,
+            run_id: request.run_id.as_str(),
+            reason: request.reason.as_str(),
+            requested_capabilities: &request.requested_capabilities,
+            risk_level: &request.risk_level,
+            request_evidence_refs: &request.evidence_refs,
+            decision,
+            approval_ref,
+            audit_required,
+            decision_evidence_refs: evidence_refs,
+            decided_at: window.decided_at,
+            expires_at: window.expires_at,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DecisionWindow {
+    decided_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -528,9 +723,18 @@ pub struct ProductionAdapterEvidence {
     pub evidence_id: String,
     pub tenant_id: String,
     pub kind: ProductionAdapterKind,
+    pub runtime_mode: ProductionAdapterRuntimeMode,
+    pub provider_config_record_ref: String,
+    pub provider_config_hash: String,
+    pub readiness_contract_ref: String,
+    pub readiness_contract_hash: String,
     pub adapter_ref: String,
     pub adapter_version: String,
+    pub adapter_deployment_ref: String,
+    pub adapter_config_ref: String,
+    pub adapter_config_hash: String,
     pub provider_ref: String,
+    pub provider_policy_ref: String,
     pub attestation_ref: String,
     pub healthcheck_ref: String,
     pub sandbox_profile_ref: Option<String>,
@@ -544,8 +748,17 @@ pub struct ProductionAdapterVerificationDecision {
     pub tenant_id: String,
     pub evidence_id: String,
     pub kind: ProductionAdapterKind,
+    pub runtime_mode: ProductionAdapterRuntimeMode,
+    pub provider_config_record_ref: String,
+    pub provider_config_hash: String,
+    pub readiness_contract_ref: String,
+    pub readiness_contract_hash: String,
     pub adapter_ref: String,
+    pub adapter_deployment_ref: String,
+    pub adapter_config_ref: String,
+    pub adapter_config_hash: String,
     pub provider_ref: String,
+    pub provider_policy_ref: String,
     pub decision: ProductionAdapterVerificationKind,
     pub reasons: Vec<String>,
     pub evidence_refs: Vec<String>,
@@ -573,6 +786,7 @@ pub struct ProductionAuthEvidence {
 pub struct ProductionAuthDecision {
     pub decision_id: String,
     pub tenant_id: String,
+    pub auth_evidence_ref: String,
     pub auth_provider_ref: String,
     pub decision: ProductionAuthDecisionKind,
     pub reasons: Vec<String>,
@@ -603,6 +817,7 @@ pub struct ExternalSecretManagerDecision {
     pub decision_id: String,
     pub tenant_id: String,
     pub credential_id: String,
+    pub secret_manager_evidence_ref: String,
     pub external_secret_ref: String,
     pub secret_manager_ref: String,
     pub decision: ExternalSecretManagerDecisionKind,
@@ -635,6 +850,7 @@ pub struct CryptographicVerifierDecision {
     pub tenant_id: String,
     pub signature_decision_ref: String,
     pub trust_root_record_ref: String,
+    pub crypto_evidence_ref: String,
     pub cryptographic_verifier_ref: String,
     pub decision: CryptographicVerifierDecisionKind,
     pub reasons: Vec<String>,
@@ -663,6 +879,7 @@ pub struct HardenedSandboxEvidence {
 pub struct HardenedSandboxDecision {
     pub decision_id: String,
     pub tenant_id: String,
+    pub sandbox_evidence_ref: String,
     pub hardened_sandbox_profile_ref: String,
     pub decision: HardenedSandboxDecisionKind,
     pub reasons: Vec<String>,
@@ -862,7 +1079,7 @@ impl VaultController {
         } else if approval_required(credential, request.risk_level) {
             match approval {
                 Some(grant) => {
-                    validate_quorum(grant, &request.request_id, &request.tenant_id)?;
+                    validate_quorum(grant, &request.request_id, &request.tenant_id, 2)?;
                     reasons.push("quorum approval satisfies secret use policy".into());
                     SecretUseDecisionKind::Allowed
                 }
@@ -889,18 +1106,22 @@ impl VaultController {
             } else {
                 ApprovalPolicy::None
             };
+        let decided_at = Utc::now();
+        let expires_at = credential
+            .expires_at
+            .unwrap_or_else(|| decided_at + chrono::Duration::minutes(15));
 
-        Ok(SecretUseDecision {
-            decision_id: stable_id(
-                "secret_use_decision",
-                &(
-                    request.request_id.as_str(),
-                    credential.credential_id.as_str(),
-                    &approval_ref,
-                ),
-            ),
+        let mut secret_use_decision = SecretUseDecision {
+            decision_id: String::new(),
             request_id: request.request_id.clone(),
+            run_id: request.run_id.clone(),
+            tenant_id: request.tenant_id.clone(),
+            actor_id: request.actor_id.clone(),
+            capability_id: request.capability_id.clone(),
+            resource_ref: request.resource_ref.clone(),
             credential_id: credential.credential_id.clone(),
+            purpose: request.purpose.clone(),
+            risk_level: request.risk_level,
             decision,
             approval_policy,
             approval_ref,
@@ -909,11 +1130,11 @@ impl VaultController {
             raw_secret_visible_to_model: false,
             raw_secret_visible_to_logs: false,
             raw_secret_persisted: false,
-            decided_at: Utc::now(),
-            expires_at: credential
-                .expires_at
-                .unwrap_or_else(|| Utc::now() + chrono::Duration::minutes(15)),
-        })
+            decided_at,
+            expires_at,
+        };
+        secret_use_decision.decision_id = expected_secret_use_decision_id(&secret_use_decision);
+        Ok(secret_use_decision)
     }
 
     pub fn verify_executor_signature(
@@ -966,7 +1187,15 @@ impl VaultController {
         SignatureVerificationDecision {
             decision_id: stable_id(
                 "signature_verification",
-                &(signature.signature_id.as_str(), &trust_root_ref, &decision),
+                &(
+                    signature.signature_id.as_str(),
+                    signature.tenant_id.as_str(),
+                    signature.executor_ref.as_str(),
+                    &decision,
+                    &trust_root_ref,
+                    can_issue_high_risk_ticket,
+                    &evidence_refs,
+                ),
             ),
             signature_id: signature.signature_id.clone(),
             tenant_id: signature.tenant_id.clone(),
@@ -1124,6 +1353,44 @@ impl VaultController {
         }
     }
 
+    pub fn verify_trust_root_storage_with_readiness_contract(
+        record: &TrustRootRecord,
+        evidence: &TrustRootStorageEvidence,
+        adapter_decision: &ProductionAdapterVerificationDecision,
+        config_record: &ProductionAdapterProviderConfigRecord,
+        contract_record: &ProductionAdapterReadinessContractRecord,
+    ) -> TrustRootStorageDecision {
+        let mut decision = Self::verify_trust_root_storage(record, evidence);
+        decision
+            .evidence_refs
+            .push(adapter_decision.decision_id.clone());
+        decision
+            .evidence_refs
+            .extend(adapter_decision.evidence_refs.clone());
+        decision.evidence_refs.sort();
+        decision.evidence_refs.dedup();
+
+        if adapter_decision_satisfies_readiness_contract(
+            adapter_decision,
+            config_record,
+            contract_record,
+            ProductionAdapterKind::ExecutorTrustRoots,
+            &evidence.storage_provider_ref,
+        )
+        .is_err()
+        {
+            decision.decision = TrustRootStorageDecisionKind::Rejected;
+            decision.reasons.push(
+                "trust-root storage evidence is not backed by the sealed adapter readiness contract"
+                    .into(),
+            );
+            decision.reasons.sort();
+            decision.reasons.dedup();
+        }
+        decision.decision_id = expected_trust_root_storage_decision_id(&decision);
+        decision
+    }
+
     pub fn verify_executor_signature_with_trust_root_records(
         signature: &ExecutorSignature,
         trust_root_records: &[TrustRootRecord],
@@ -1180,7 +1447,12 @@ impl VaultController {
         } else if policy.high_risk_requires_quorum || request.risk_level >= RiskLevel::High {
             match approval {
                 Some(grant) => {
-                    validate_quorum(grant, &request.request_id, &request.tenant_id)?;
+                    validate_quorum(
+                        grant,
+                        &request.request_id,
+                        &request.tenant_id,
+                        policy.quorum_approvers,
+                    )?;
                     reasons.push("quorum approval satisfies break-glass policy".into());
                     BreakGlassDecisionKind::Allowed
                 }
@@ -1201,25 +1473,53 @@ impl VaultController {
         }
         evidence_refs.sort();
         evidence_refs.dedup();
+        let decided_at = Utc::now();
+        let expires_at = decided_at + chrono::Duration::minutes(10);
 
         Ok(BreakGlassDecision {
-            decision_id: stable_id(
-                "break_glass_decision",
-                &(
-                    request.request_id.as_str(),
-                    policy.pack_id.as_str(),
-                    &approval_ref,
-                ),
-            ),
+            decision_id: expected_break_glass_decision_id(BreakGlassDecisionIdPayload::new(
+                policy,
+                request,
+                &decision,
+                &approval_ref,
+                true,
+                &evidence_refs,
+                DecisionWindow {
+                    decided_at,
+                    expires_at,
+                },
+            )),
             request_id: request.request_id.clone(),
             decision,
             approval_ref,
             audit_required: true,
             reasons,
             evidence_refs,
-            decided_at: Utc::now(),
-            expires_at: Utc::now() + chrono::Duration::minutes(10),
+            decided_at,
+            expires_at,
         })
+    }
+
+    pub fn audit_break_glass_decision(
+        policy: &TenantPolicyPack,
+        request: &BreakGlassRequest,
+        decision: &BreakGlassDecision,
+        redaction_profile_ref: impl Into<String>,
+        generated_by: impl Into<String>,
+    ) -> Result<AuditExportRecord, VaultError> {
+        validate_break_glass_decision_for_request(policy, request, decision)?;
+        Self::audit_export_record(
+            policy.tenant_id.clone(),
+            request.run_id.clone(),
+            AuditExportRecordKind::BreakGlass,
+            redaction_profile_ref,
+            vec![
+                policy.pack_id.clone(),
+                request.request_id.clone(),
+                decision.decision_id.clone(),
+            ],
+            generated_by,
+        )
     }
 
     pub fn audit_export_record(
@@ -1319,6 +1619,211 @@ impl VaultController {
         Ok(record.policy.clone())
     }
 
+    pub fn seal_production_adapter_provider_config(
+        config: ProductionAdapterProviderConfig,
+        evidence_refs: Vec<String>,
+        sealed_by: impl Into<String>,
+    ) -> Result<ProductionAdapterProviderConfigRecord, VaultError> {
+        validate_provider_config(&config)?;
+        if evidence_refs.is_empty() {
+            return Err(VaultError::MissingEvidence);
+        }
+        let config_hash = stable_id("production_adapter_provider_config_hash", &config);
+        let mut combined_evidence = evidence_refs;
+        combined_evidence.extend([
+            config.config_id.clone(),
+            config.provider_ref.clone(),
+            config.provider_policy_ref.clone(),
+            config.adapter_deployment_ref.clone(),
+            config.adapter_config_ref.clone(),
+        ]);
+        combined_evidence.extend(config.evidence_refs.clone());
+        combined_evidence.sort();
+        combined_evidence.dedup();
+
+        Ok(ProductionAdapterProviderConfigRecord {
+            record_id: stable_id(
+                "production_adapter_provider_config_record",
+                &(
+                    config.tenant_id.as_str(),
+                    config.config_id.as_str(),
+                    &config.kind,
+                    config.provider_ref.as_str(),
+                    config.provider_policy_ref.as_str(),
+                    config.adapter_deployment_ref.as_str(),
+                    config_hash.as_str(),
+                    &combined_evidence,
+                ),
+            ),
+            tenant_id: config.tenant_id.clone(),
+            config_id: config.config_id.clone(),
+            kind: config.kind,
+            provider_ref: config.provider_ref.clone(),
+            provider_policy_ref: config.provider_policy_ref.clone(),
+            adapter_deployment_ref: config.adapter_deployment_ref.clone(),
+            config_hash,
+            config,
+            evidence_refs: combined_evidence,
+            sealed_by: sealed_by.into(),
+            sealed_at: Utc::now(),
+        })
+    }
+
+    pub fn load_production_adapter_provider_config(
+        record: &ProductionAdapterProviderConfigRecord,
+    ) -> Result<ProductionAdapterProviderConfig, VaultError> {
+        validate_provider_config(&record.config)?;
+        if record.evidence_refs.is_empty() {
+            return Err(VaultError::MissingEvidence);
+        }
+        if record.tenant_id != record.config.tenant_id
+            || record.config_id != record.config.config_id
+            || record.kind != record.config.kind
+            || record.provider_ref != record.config.provider_ref
+            || record.provider_policy_ref != record.config.provider_policy_ref
+            || record.adapter_deployment_ref != record.config.adapter_deployment_ref
+        {
+            return Err(VaultError::TenantMismatch);
+        }
+        let expected_hash = stable_id("production_adapter_provider_config_hash", &record.config);
+        if record.config_hash != expected_hash {
+            return Err(VaultError::MissingEvidence);
+        }
+        if !refs_contain_all(&record.evidence_refs, &record.config.evidence_refs)
+            || !record.evidence_refs.contains(&record.config.config_id)
+            || !record.evidence_refs.contains(&record.config.provider_ref)
+            || !record
+                .evidence_refs
+                .contains(&record.config.provider_policy_ref)
+            || !record
+                .evidence_refs
+                .contains(&record.config.adapter_deployment_ref)
+            || !record
+                .evidence_refs
+                .contains(&record.config.adapter_config_ref)
+        {
+            return Err(VaultError::MissingEvidence);
+        }
+
+        Ok(record.config.clone())
+    }
+
+    pub fn seal_production_adapter_readiness_contract(
+        contract: ProductionAdapterReadinessContract,
+        config_record: &ProductionAdapterProviderConfigRecord,
+        evidence_refs: Vec<String>,
+        sealed_by: impl Into<String>,
+    ) -> Result<ProductionAdapterReadinessContractRecord, VaultError> {
+        validate_adapter_readiness_contract(&contract)?;
+        Self::load_production_adapter_provider_config(config_record)?;
+        if evidence_refs.is_empty() {
+            return Err(VaultError::MissingEvidence);
+        }
+        if contract.tenant_id != config_record.tenant_id
+            || contract.kind != config_record.kind
+            || contract.provider_ref != config_record.provider_ref
+            || contract.provider_config_record_ref != config_record.record_id
+            || contract.provider_config_hash != config_record.config_hash
+        {
+            return Err(VaultError::TenantMismatch);
+        }
+
+        let contract_hash = stable_id("production_adapter_readiness_contract_hash", &contract);
+        let mut combined_evidence = evidence_refs;
+        combined_evidence.extend([
+            contract.contract_id.clone(),
+            contract.provider_ref.clone(),
+            contract.provider_config_record_ref.clone(),
+            contract.provider_config_hash.clone(),
+            contract.required_attestation_ref.clone(),
+            contract.required_healthcheck_ref.clone(),
+        ]);
+        combined_evidence.extend(contract.required_policy_refs.clone());
+        combined_evidence.extend(contract.evidence_refs.clone());
+        combined_evidence.sort();
+        combined_evidence.dedup();
+
+        Ok(ProductionAdapterReadinessContractRecord {
+            record_id: stable_id(
+                "production_adapter_readiness_contract_record",
+                &(
+                    contract.tenant_id.as_str(),
+                    contract.contract_id.as_str(),
+                    &contract.kind,
+                    contract.provider_ref.as_str(),
+                    contract.provider_config_record_ref.as_str(),
+                    contract.provider_config_hash.as_str(),
+                    contract_hash.as_str(),
+                    &combined_evidence,
+                ),
+            ),
+            tenant_id: contract.tenant_id.clone(),
+            contract_id: contract.contract_id.clone(),
+            kind: contract.kind,
+            provider_ref: contract.provider_ref.clone(),
+            provider_config_record_ref: contract.provider_config_record_ref.clone(),
+            provider_config_hash: contract.provider_config_hash.clone(),
+            contract_hash,
+            contract,
+            evidence_refs: combined_evidence,
+            sealed_by: sealed_by.into(),
+            sealed_at: Utc::now(),
+        })
+    }
+
+    pub fn load_production_adapter_readiness_contract(
+        record: &ProductionAdapterReadinessContractRecord,
+        config_record: &ProductionAdapterProviderConfigRecord,
+    ) -> Result<ProductionAdapterReadinessContract, VaultError> {
+        validate_adapter_readiness_contract(&record.contract)?;
+        Self::load_production_adapter_provider_config(config_record)?;
+        if record.evidence_refs.is_empty() {
+            return Err(VaultError::MissingEvidence);
+        }
+        if record.tenant_id != record.contract.tenant_id
+            || record.contract_id != record.contract.contract_id
+            || record.kind != record.contract.kind
+            || record.provider_ref != record.contract.provider_ref
+            || record.provider_config_record_ref != record.contract.provider_config_record_ref
+            || record.provider_config_hash != record.contract.provider_config_hash
+            || record.tenant_id != config_record.tenant_id
+            || record.kind != config_record.kind
+            || record.provider_ref != config_record.provider_ref
+            || record.provider_config_record_ref != config_record.record_id
+            || record.provider_config_hash != config_record.config_hash
+        {
+            return Err(VaultError::TenantMismatch);
+        }
+        let expected_hash = stable_id(
+            "production_adapter_readiness_contract_hash",
+            &record.contract,
+        );
+        if record.contract_hash != expected_hash {
+            return Err(VaultError::MissingEvidence);
+        }
+        if !refs_contain_all(&record.evidence_refs, &record.contract.evidence_refs)
+            || !refs_contain_all(&record.evidence_refs, &record.contract.required_policy_refs)
+            || !record.evidence_refs.contains(&record.contract.contract_id)
+            || !record.evidence_refs.contains(&record.contract.provider_ref)
+            || !record
+                .evidence_refs
+                .contains(&record.contract.provider_config_record_ref)
+            || !record
+                .evidence_refs
+                .contains(&record.contract.provider_config_hash)
+            || !record
+                .evidence_refs
+                .contains(&record.contract.required_attestation_ref)
+            || !record
+                .evidence_refs
+                .contains(&record.contract.required_healthcheck_ref)
+        {
+            return Err(VaultError::MissingEvidence);
+        }
+
+        Ok(record.contract.clone())
+    }
+
     pub fn seal_p1_execution_readiness_profile(
         policy: &TenantPolicyPack,
         profile: P1ExecutionReadinessProfile,
@@ -1374,7 +1879,11 @@ impl VaultController {
             if production_required {
                 let production_readiness =
                     production_readiness.ok_or(VaultError::MissingEvidence)?;
-                validate_ready_production_readiness(production_readiness, &policy.tenant_id)?;
+                validate_ready_production_readiness(
+                    production_readiness,
+                    &policy.tenant_id,
+                    &policy.pack_id,
+                )?;
                 (
                     Some(production_readiness.decision_id.clone()),
                     Some(production_readiness_evidence_hash(production_readiness)),
@@ -1393,6 +1902,7 @@ impl VaultController {
             validate_production_readiness_ref_for_profile_record(
                 production_readiness,
                 &policy.tenant_id,
+                &policy.pack_id,
                 production_required,
                 production_readiness_ref.as_deref(),
                 production_readiness_evidence_hash_ref.as_deref(),
@@ -1697,7 +2207,11 @@ impl VaultController {
             return Err(VaultError::MissingEvidence);
         }
         if let Some(production_readiness) = production_readiness {
-            validate_ready_production_readiness(production_readiness, &policy.tenant_id)?;
+            validate_ready_production_readiness(
+                production_readiness,
+                &policy.tenant_id,
+                &policy.pack_id,
+            )?;
         }
         let expected_production_readiness_ref =
             production_readiness.map(|decision| decision.decision_id.clone());
@@ -1837,6 +2351,39 @@ impl VaultController {
         adapter_decision: &ProductionAdapterVerificationDecision,
     ) -> ComplianceExportDeliveryDecision {
         Self::verify_compliance_export_delivery_inner(bundle, evidence, Some(adapter_decision))
+    }
+
+    pub fn verify_compliance_export_delivery_with_readiness_contract(
+        bundle: &ComplianceExportBundle,
+        evidence: &ComplianceExportDeliveryEvidence,
+        adapter_decision: &ProductionAdapterVerificationDecision,
+        config_record: &ProductionAdapterProviderConfigRecord,
+        contract_record: &ProductionAdapterReadinessContractRecord,
+    ) -> ComplianceExportDeliveryDecision {
+        let mut decision = Self::verify_compliance_export_delivery_with_adapter_decision(
+            bundle,
+            evidence,
+            adapter_decision,
+        );
+        if adapter_decision_satisfies_readiness_contract(
+            adapter_decision,
+            config_record,
+            contract_record,
+            ProductionAdapterKind::ComplianceAuditExport,
+            &evidence.storage_provider_ref,
+        )
+        .is_err()
+        {
+            decision.decision = ComplianceExportDeliveryDecisionKind::Rejected;
+            decision.reasons.push(
+                "compliance export delivery evidence is not backed by the sealed adapter readiness contract"
+                    .into(),
+            );
+            decision.reasons.sort();
+            decision.reasons.dedup();
+            decision.decision_id = expected_compliance_export_delivery_decision_id(&decision);
+        }
+        decision
     }
 
     fn verify_compliance_export_delivery_inner(
@@ -2005,6 +2552,33 @@ impl VaultController {
         if evidence.adapter_version.trim().is_empty() {
             reasons.push("adapter version is empty".into());
         }
+        if evidence.adapter_deployment_ref.trim().is_empty() {
+            reasons.push("adapter deployment reference is empty".into());
+        }
+        if evidence.adapter_config_ref.trim().is_empty() {
+            reasons.push("adapter configuration reference is empty".into());
+        }
+        if evidence.adapter_config_hash.trim().is_empty() {
+            reasons.push("adapter configuration hash is empty".into());
+        }
+        if evidence.provider_policy_ref.trim().is_empty() {
+            reasons.push("provider policy reference is empty".into());
+        }
+        if evidence.runtime_mode != ProductionAdapterRuntimeMode::ExternalVerified {
+            reasons.push("adapter evidence must come from an external verified runtime".into());
+        }
+        if evidence.provider_config_record_ref.trim().is_empty() {
+            reasons.push("provider config record reference is empty".into());
+        }
+        if evidence.provider_config_hash.trim().is_empty() {
+            reasons.push("provider config hash is empty".into());
+        }
+        if evidence.readiness_contract_ref.trim().is_empty() {
+            reasons.push("readiness contract reference is empty".into());
+        }
+        if evidence.readiness_contract_hash.trim().is_empty() {
+            reasons.push("readiness contract hash is empty".into());
+        }
         reasons.sort();
         reasons.dedup();
 
@@ -2016,6 +2590,14 @@ impl VaultController {
         };
         let mut evidence_refs = vec![
             evidence.evidence_id.clone(),
+            evidence.provider_config_record_ref.clone(),
+            evidence.provider_config_hash.clone(),
+            evidence.readiness_contract_ref.clone(),
+            evidence.readiness_contract_hash.clone(),
+            evidence.adapter_deployment_ref.clone(),
+            evidence.adapter_config_ref.clone(),
+            evidence.adapter_config_hash.clone(),
+            evidence.provider_policy_ref.clone(),
             evidence.attestation_ref.clone(),
             evidence.healthcheck_ref.clone(),
         ];
@@ -2031,8 +2613,17 @@ impl VaultController {
                 &(
                     evidence.evidence_id.as_str(),
                     &evidence.kind,
+                    &evidence.runtime_mode,
+                    evidence.provider_config_record_ref.as_str(),
+                    evidence.provider_config_hash.as_str(),
+                    evidence.readiness_contract_ref.as_str(),
+                    evidence.readiness_contract_hash.as_str(),
                     evidence.adapter_ref.as_str(),
+                    evidence.adapter_deployment_ref.as_str(),
+                    evidence.adapter_config_ref.as_str(),
+                    evidence.adapter_config_hash.as_str(),
                     evidence.provider_ref.as_str(),
+                    evidence.provider_policy_ref.as_str(),
                     &decision,
                     &evidence_refs,
                 ),
@@ -2040,14 +2631,91 @@ impl VaultController {
             tenant_id: evidence.tenant_id.clone(),
             evidence_id: evidence.evidence_id.clone(),
             kind: evidence.kind,
+            runtime_mode: evidence.runtime_mode,
+            provider_config_record_ref: evidence.provider_config_record_ref.clone(),
+            provider_config_hash: evidence.provider_config_hash.clone(),
+            readiness_contract_ref: evidence.readiness_contract_ref.clone(),
+            readiness_contract_hash: evidence.readiness_contract_hash.clone(),
             adapter_ref: evidence.adapter_ref.clone(),
+            adapter_deployment_ref: evidence.adapter_deployment_ref.clone(),
+            adapter_config_ref: evidence.adapter_config_ref.clone(),
+            adapter_config_hash: evidence.adapter_config_hash.clone(),
             provider_ref: evidence.provider_ref.clone(),
+            provider_policy_ref: evidence.provider_policy_ref.clone(),
             decision,
             reasons,
             evidence_refs,
             verified_at: Utc::now(),
             expires_at: evidence.expires_at,
         }
+    }
+
+    pub fn verify_production_adapter_evidence_with_provider_config_record(
+        evidence: &ProductionAdapterEvidence,
+        config_record: &ProductionAdapterProviderConfigRecord,
+    ) -> ProductionAdapterVerificationDecision {
+        let mut decision = Self::verify_production_adapter_evidence(evidence);
+        let config_loaded = Self::load_production_adapter_provider_config(config_record);
+        if config_loaded.is_err()
+            || config_record.tenant_id != evidence.tenant_id
+            || config_record.kind != evidence.kind
+            || config_record.record_id != evidence.provider_config_record_ref
+            || config_record.config_hash != evidence.provider_config_hash
+            || config_record.provider_ref != evidence.provider_ref
+            || config_record.provider_policy_ref != evidence.provider_policy_ref
+            || config_record.config.adapter_ref != evidence.adapter_ref
+            || config_record.config.adapter_version != evidence.adapter_version
+            || config_record.adapter_deployment_ref != evidence.adapter_deployment_ref
+            || config_record.config.adapter_config_ref != evidence.adapter_config_ref
+            || config_record.config.allowed_runtime_mode != evidence.runtime_mode
+        {
+            decision.decision = ProductionAdapterVerificationKind::Rejected;
+            decision
+                .reasons
+                .push("adapter evidence does not match sealed provider config record".into());
+            decision.reasons.sort();
+            decision.reasons.dedup();
+            decision.decision_id = expected_adapter_verification_decision_id(&decision);
+        }
+        decision
+    }
+
+    pub fn verify_production_adapter_evidence_with_readiness_contract(
+        evidence: &ProductionAdapterEvidence,
+        config_record: &ProductionAdapterProviderConfigRecord,
+        contract_record: &ProductionAdapterReadinessContractRecord,
+    ) -> ProductionAdapterVerificationDecision {
+        let mut decision = Self::verify_production_adapter_evidence_with_provider_config_record(
+            evidence,
+            config_record,
+        );
+        let contract_loaded =
+            Self::load_production_adapter_readiness_contract(contract_record, config_record);
+        if contract_loaded.is_err()
+            || contract_record.tenant_id != evidence.tenant_id
+            || contract_record.kind != evidence.kind
+            || contract_record.record_id != evidence.readiness_contract_ref
+            || contract_record.contract_hash != evidence.readiness_contract_hash
+            || contract_record.provider_ref != evidence.provider_ref
+            || contract_record.provider_config_record_ref != evidence.provider_config_record_ref
+            || contract_record.provider_config_hash != evidence.provider_config_hash
+            || contract_record.contract.required_runtime_mode != evidence.runtime_mode
+            || contract_record.contract.required_attestation_ref != evidence.attestation_ref
+            || contract_record.contract.required_healthcheck_ref != evidence.healthcheck_ref
+            || !contract_record
+                .contract
+                .required_policy_refs
+                .contains(&evidence.provider_policy_ref)
+        {
+            decision.decision = ProductionAdapterVerificationKind::Rejected;
+            decision
+                .reasons
+                .push("adapter evidence does not match sealed readiness contract record".into());
+            decision.reasons.sort();
+            decision.reasons.dedup();
+            decision.decision_id = expected_adapter_verification_decision_id(&decision);
+        }
+        decision
     }
 
     pub fn verify_production_auth(
@@ -2143,6 +2811,7 @@ impl VaultController {
                 ),
             ),
             tenant_id: hardening.tenant_id.clone(),
+            auth_evidence_ref: evidence.evidence_id.clone(),
             auth_provider_ref: evidence.auth_provider_ref.clone(),
             decision,
             reasons,
@@ -2150,6 +2819,35 @@ impl VaultController {
             verified_at: Utc::now(),
             expires_at: evidence.expires_at,
         }
+    }
+
+    pub fn verify_production_auth_with_readiness_contract(
+        hardening: &ProductionHardeningEvidence,
+        adapter_decision: &ProductionAdapterVerificationDecision,
+        evidence: &ProductionAuthEvidence,
+        config_record: &ProductionAdapterProviderConfigRecord,
+        contract_record: &ProductionAdapterReadinessContractRecord,
+    ) -> ProductionAuthDecision {
+        let mut decision = Self::verify_production_auth(hardening, adapter_decision, evidence);
+        if adapter_decision_satisfies_readiness_contract(
+            adapter_decision,
+            config_record,
+            contract_record,
+            ProductionAdapterKind::AuthProvider,
+            &evidence.auth_provider_ref,
+        )
+        .is_err()
+        {
+            decision.decision = ProductionAuthDecisionKind::Rejected;
+            decision.reasons.push(
+                "production auth evidence is not backed by the sealed adapter readiness contract"
+                    .into(),
+            );
+            decision.reasons.sort();
+            decision.reasons.dedup();
+            decision.decision_id = expected_production_auth_decision_id(&decision);
+        }
+        decision
     }
 
     pub fn verify_external_secret_manager(
@@ -2281,6 +2979,7 @@ impl VaultController {
             ),
             tenant_id: credential.tenant_id.clone(),
             credential_id: credential.credential_id.clone(),
+            secret_manager_evidence_ref: evidence.evidence_id.clone(),
             external_secret_ref: credential.external_secret_ref.clone(),
             secret_manager_ref: evidence.secret_manager_ref.clone(),
             decision,
@@ -2289,6 +2988,37 @@ impl VaultController {
             verified_at: Utc::now(),
             expires_at: evidence.expires_at,
         }
+    }
+
+    pub fn verify_external_secret_manager_with_readiness_contract(
+        credential: &CredentialRef,
+        hardening: &ProductionHardeningEvidence,
+        adapter_decision: &ProductionAdapterVerificationDecision,
+        evidence: &ExternalSecretManagerEvidence,
+        config_record: &ProductionAdapterProviderConfigRecord,
+        contract_record: &ProductionAdapterReadinessContractRecord,
+    ) -> ExternalSecretManagerDecision {
+        let mut decision =
+            Self::verify_external_secret_manager(credential, hardening, adapter_decision, evidence);
+        if adapter_decision_satisfies_readiness_contract(
+            adapter_decision,
+            config_record,
+            contract_record,
+            ProductionAdapterKind::ExternalSecretManager,
+            &evidence.secret_manager_ref,
+        )
+        .is_err()
+        {
+            decision.decision = ExternalSecretManagerDecisionKind::Rejected;
+            decision.reasons.push(
+                "external secret-manager evidence is not backed by the sealed adapter readiness contract"
+                    .into(),
+            );
+            decision.reasons.sort();
+            decision.reasons.dedup();
+            decision.decision_id = expected_external_secret_manager_decision_id(&decision);
+        }
+        decision
     }
 
     pub fn verify_cryptographic_verifier(
@@ -2332,6 +3062,9 @@ impl VaultController {
         }
         if Self::load_trust_root(trust_root_record).is_err() {
             reasons.push("trust-root record failed local hash validation".into());
+        }
+        if validate_signature_verification_decision(signature_decision).is_err() {
+            reasons.push("signature decision failed local id validation".into());
         }
         if evidence.signature_decision_ref != signature_decision.decision_id {
             reasons.push("crypto verifier evidence is not bound to the signature decision".into());
@@ -2419,6 +3152,7 @@ impl VaultController {
             tenant_id: hardening.tenant_id.clone(),
             signature_decision_ref: signature_decision.decision_id.clone(),
             trust_root_record_ref: trust_root_record.record_id.clone(),
+            crypto_evidence_ref: evidence.evidence_id.clone(),
             cryptographic_verifier_ref: evidence.cryptographic_verifier_ref.clone(),
             decision,
             reasons,
@@ -2426,6 +3160,43 @@ impl VaultController {
             verified_at: Utc::now(),
             expires_at: evidence.expires_at,
         }
+    }
+
+    pub fn verify_cryptographic_verifier_with_readiness_contract(
+        hardening: &ProductionHardeningEvidence,
+        signature_decision: &SignatureVerificationDecision,
+        trust_root_record: &TrustRootRecord,
+        adapter_decision: &ProductionAdapterVerificationDecision,
+        evidence: &CryptographicVerifierEvidence,
+        config_record: &ProductionAdapterProviderConfigRecord,
+        contract_record: &ProductionAdapterReadinessContractRecord,
+    ) -> CryptographicVerifierDecision {
+        let mut decision = Self::verify_cryptographic_verifier(
+            hardening,
+            signature_decision,
+            trust_root_record,
+            adapter_decision,
+            evidence,
+        );
+        if adapter_decision_satisfies_readiness_contract(
+            adapter_decision,
+            config_record,
+            contract_record,
+            ProductionAdapterKind::CryptographicVerifier,
+            &evidence.cryptographic_verifier_ref,
+        )
+        .is_err()
+        {
+            decision.decision = CryptographicVerifierDecisionKind::Rejected;
+            decision.reasons.push(
+                "cryptographic verifier evidence is not backed by the sealed adapter readiness contract"
+                    .into(),
+            );
+            decision.reasons.sort();
+            decision.reasons.dedup();
+            decision.decision_id = expected_cryptographic_verifier_decision_id(&decision);
+        }
+        decision
     }
 
     pub fn verify_hardened_sandbox(
@@ -2529,6 +3300,7 @@ impl VaultController {
                 ),
             ),
             tenant_id: hardening.tenant_id.clone(),
+            sandbox_evidence_ref: evidence.evidence_id.clone(),
             hardened_sandbox_profile_ref: evidence.hardened_sandbox_profile_ref.clone(),
             decision,
             reasons,
@@ -2536,6 +3308,35 @@ impl VaultController {
             verified_at: Utc::now(),
             expires_at: evidence.expires_at,
         }
+    }
+
+    pub fn verify_hardened_sandbox_with_readiness_contract(
+        hardening: &ProductionHardeningEvidence,
+        adapter_decision: &ProductionAdapterVerificationDecision,
+        evidence: &HardenedSandboxEvidence,
+        config_record: &ProductionAdapterProviderConfigRecord,
+        contract_record: &ProductionAdapterReadinessContractRecord,
+    ) -> HardenedSandboxDecision {
+        let mut decision = Self::verify_hardened_sandbox(hardening, adapter_decision, evidence);
+        if adapter_decision_satisfies_readiness_contract(
+            adapter_decision,
+            config_record,
+            contract_record,
+            ProductionAdapterKind::HardenedSandbox,
+            &evidence.hardened_sandbox_profile_ref,
+        )
+        .is_err()
+        {
+            decision.decision = HardenedSandboxDecisionKind::Rejected;
+            decision.reasons.push(
+                "hardened sandbox evidence is not backed by the sealed adapter readiness contract"
+                    .into(),
+            );
+            decision.reasons.sort();
+            decision.reasons.dedup();
+            decision.decision_id = expected_hardened_sandbox_decision_id(&decision);
+        }
+        decision
     }
 
     pub fn verify_rotation_enforcement(
@@ -2553,13 +3354,60 @@ impl VaultController {
         Self::verify_rotation_enforcement_inner(credential, hardening, Some(adapter_decision))
     }
 
+    pub fn verify_rotation_enforcement_with_readiness_contract(
+        credential: &CredentialRef,
+        hardening: &ProductionHardeningEvidence,
+        adapter_decision: &ProductionAdapterVerificationDecision,
+        config_record: &ProductionAdapterProviderConfigRecord,
+        contract_record: &ProductionAdapterReadinessContractRecord,
+    ) -> RotationEnforcementDecision {
+        let mut decision = Self::verify_rotation_enforcement_with_adapter_decision(
+            credential,
+            hardening,
+            adapter_decision,
+        );
+        let expected_provider_ref = hardening.rotation_policy_ref.as_deref().unwrap_or_default();
+        if adapter_decision_satisfies_readiness_contract(
+            adapter_decision,
+            config_record,
+            contract_record,
+            ProductionAdapterKind::RotationEnforcement,
+            expected_provider_ref,
+        )
+        .is_err()
+        {
+            decision.decision = RotationEnforcementDecisionKind::Rejected;
+            decision.reasons.push(
+                "rotation enforcement decision is not backed by the sealed adapter readiness contract"
+                    .into(),
+            );
+            decision.reasons.sort();
+            decision.reasons.dedup();
+            decision.decision_id = expected_rotation_enforcement_decision_id(
+                decision.tenant_id.as_str(),
+                decision.credential_id.as_str(),
+                decision.hardening_evidence_ref.as_str(),
+                &decision.rotation_ref,
+                &decision.rotation_policy_ref,
+                decision.adapter_decision_ref.as_deref(),
+                &decision.decision,
+                &decision.evidence_refs,
+            );
+        }
+        decision
+    }
+
     fn verify_rotation_enforcement_inner(
         credential: &CredentialRef,
         hardening: &ProductionHardeningEvidence,
         adapter_decision: Option<&ProductionAdapterVerificationDecision>,
     ) -> RotationEnforcementDecision {
         let mut reasons = Vec::new();
-        let mut evidence_refs = vec![credential.credential_id.clone()];
+        let hardening_evidence_hash = production_hardening_evidence_hash(hardening);
+        let mut evidence_refs = vec![
+            credential.credential_id.clone(),
+            hardening_evidence_hash.clone(),
+        ];
 
         let tenant_mismatch = credential.tenant_id != hardening.tenant_id;
         if tenant_mismatch {
@@ -2629,24 +3477,26 @@ impl VaultController {
             RotationEnforcementDecisionKind::Rejected
         };
 
+        let adapter_decision_ref = adapter_decision.map(|decision| decision.decision_id.clone());
+        let decision_id = expected_rotation_enforcement_decision_id(
+            credential.tenant_id.as_str(),
+            credential.credential_id.as_str(),
+            hardening_evidence_hash.as_str(),
+            &credential.rotation_ref,
+            &hardening.rotation_policy_ref,
+            adapter_decision_ref.as_deref(),
+            &decision,
+            &evidence_refs,
+        );
+
         RotationEnforcementDecision {
-            decision_id: stable_id(
-                "rotation_enforcement",
-                &(
-                    credential.tenant_id.as_str(),
-                    credential.credential_id.as_str(),
-                    &credential.rotation_ref,
-                    &hardening.rotation_policy_ref,
-                    &adapter_decision.map(|decision| decision.decision_id.as_str()),
-                    &decision,
-                    &evidence_refs,
-                ),
-            ),
+            decision_id,
             tenant_id: credential.tenant_id.clone(),
             credential_id: credential.credential_id.clone(),
+            hardening_evidence_ref: hardening_evidence_hash,
             rotation_ref: credential.rotation_ref.clone(),
             rotation_policy_ref: hardening.rotation_policy_ref.clone(),
-            adapter_decision_ref: adapter_decision.map(|decision| decision.decision_id.clone()),
+            adapter_decision_ref,
             decision,
             reasons,
             evidence_refs,
@@ -2665,6 +3515,7 @@ impl VaultController {
         evidence: &SecretInjectionEvidence,
     ) -> SecretInjectionDecision {
         let mut reasons = Vec::new();
+        let now = Utc::now();
         let mut evidence_refs = vec![
             credential.credential_id.clone(),
             secret_use.decision_id.clone(),
@@ -2693,9 +3544,33 @@ impl VaultController {
         {
             reasons.push("secret injection evidence is not bound to the credential".into());
         }
+        if secret_use.tenant_id != credential.tenant_id
+            || secret_use.tenant_id != evidence.tenant_id
+            || secret_use.run_id != evidence.run_id
+        {
+            reasons.push("secret-use decision context is not tenant/run bound".into());
+        }
+        if !matches_any(&credential.allowed_capabilities, &secret_use.capability_id)
+            || !matches_any(
+                &credential.allowed_resource_patterns,
+                &secret_use.resource_ref,
+            )
+            || secret_use.risk_level > credential.risk_ceiling
+        {
+            reasons.push("secret-use decision context is outside credential scope".into());
+        }
         if evidence.secret_use_decision_id != secret_use.decision_id {
             reasons
                 .push("secret injection evidence is not bound to the secret-use decision".into());
+        }
+        if secret_use.decision_id != expected_secret_use_decision_id(secret_use) {
+            reasons.push("secret-use decision id does not match its bound request".into());
+        }
+        if secret_use.decided_at > now
+            || secret_use.expires_at <= secret_use.decided_at
+            || secret_use.expires_at <= now
+        {
+            reasons.push("secret-use decision time window is invalid or expired".into());
         }
         if secret_use.decision != SecretUseDecisionKind::Allowed {
             reasons.push("secret-use decision must be allowed before injection".into());
@@ -2780,6 +3655,7 @@ impl VaultController {
                     credential.credential_id.as_str(),
                     secret_use.decision_id.as_str(),
                     evidence.evidence_id.as_str(),
+                    evidence.adapter_decision_ref.as_str(),
                     evidence.injection_receipt_ref.as_str(),
                     &decision,
                     &evidence_refs,
@@ -2788,6 +3664,9 @@ impl VaultController {
             tenant_id: credential.tenant_id.clone(),
             credential_id: credential.credential_id.clone(),
             secret_use_decision_id: secret_use.decision_id.clone(),
+            injection_evidence_ref: evidence.evidence_id.clone(),
+            adapter_decision_ref: evidence.adapter_decision_ref.clone(),
+            injection_receipt_ref: evidence.injection_receipt_ref.clone(),
             secret_injection_profile_ref: evidence.secret_injection_profile_ref.clone(),
             hardened_sandbox_profile_ref: evidence.hardened_sandbox_profile_ref.clone(),
             decision,
@@ -2796,6 +3675,43 @@ impl VaultController {
             verified_at: Utc::now(),
             expires_at: evidence.expires_at,
         }
+    }
+
+    pub fn verify_secret_injection_with_readiness_contract(
+        credential: &CredentialRef,
+        secret_use: &SecretUseDecision,
+        hardening: &ProductionHardeningEvidence,
+        adapter_decision: &ProductionAdapterVerificationDecision,
+        evidence: &SecretInjectionEvidence,
+        config_record: &ProductionAdapterProviderConfigRecord,
+        contract_record: &ProductionAdapterReadinessContractRecord,
+    ) -> SecretInjectionDecision {
+        let mut decision = Self::verify_secret_injection(
+            credential,
+            secret_use,
+            hardening,
+            adapter_decision,
+            evidence,
+        );
+        if adapter_decision_satisfies_readiness_contract(
+            adapter_decision,
+            config_record,
+            contract_record,
+            ProductionAdapterKind::SecretInjection,
+            &evidence.secret_injection_profile_ref,
+        )
+        .is_err()
+        {
+            decision.decision = SecretInjectionDecisionKind::Rejected;
+            decision.reasons.push(
+                "secret injection evidence is not backed by the sealed adapter readiness contract"
+                    .into(),
+            );
+            decision.reasons.sort();
+            decision.reasons.dedup();
+            decision.decision_id = expected_secret_injection_decision_id(&decision);
+        }
+        decision
     }
 
     pub fn evaluate_production_readiness(
@@ -2947,7 +3863,11 @@ impl VaultController {
         decision_set: &ProductionHardeningDecisionSet<'_>,
     ) -> Result<(), VaultError> {
         require_tenant_match_for_hardening_decision_set(policy, decision_set)?;
-        require_verified_production_auth_decision(hardening, decision_set.auth_decision)?;
+        require_verified_production_auth_decision(
+            hardening,
+            adapter_decisions,
+            decision_set.auth_decision,
+        )?;
         require_verified_external_secret_manager_decisions(
             credentials,
             hardening,
@@ -2962,6 +3882,7 @@ impl VaultController {
         )?;
         require_verified_hardened_sandbox_decision(
             hardening,
+            adapter_decisions,
             decision_set.hardened_sandbox_decisions,
         )?;
         for decision in decision_set.rotation_decisions {
@@ -2985,6 +3906,7 @@ impl VaultController {
         )?;
         require_verified_trust_root_storage_decisions(
             signature_decisions,
+            adapter_decisions,
             decision_set.trust_root_storage_decisions,
         )
     }
@@ -3175,7 +4097,11 @@ impl VaultController {
                 for decision in sandbox_decisions {
                     validate_hardened_sandbox_decision(decision)?;
                 }
-                require_verified_hardened_sandbox_decision(hardening, sandbox_decisions)?;
+                require_verified_hardened_sandbox_decision(
+                    hardening,
+                    adapter_decisions,
+                    sandbox_decisions,
+                )?;
             }
         } else if let Some(sandbox_decisions) = sandbox_decisions {
             for decision in sandbox_decisions {
@@ -3198,6 +4124,13 @@ impl VaultController {
         {
             missing_gates.push(ProductionReadinessGate::CryptographicVerifier);
             reasons.push("no verified executor signature can issue high-risk tickets".into());
+        }
+        if signature_decisions
+            .iter()
+            .any(|decision| validate_signature_verification_decision(decision).is_err())
+        {
+            missing_gates.push(ProductionReadinessGate::ExecutorTrustRoots);
+            reasons.push("executor signature verification decision id validation failed".into());
         }
 
         missing_gates.sort();
@@ -3388,6 +4321,226 @@ fn p1_profile_requires_production_readiness(profile: &P1ExecutionReadinessProfil
     profile.mode == P1ExecutionMode::Production || profile.allow_credential_use
 }
 
+fn production_hardening_evidence_hash(evidence: &ProductionHardeningEvidence) -> String {
+    stable_id(
+        "production_hardening_evidence_hash",
+        &(
+            evidence.tenant_id.as_str(),
+            &evidence.auth_provider_ref,
+            &evidence.secret_manager_ref,
+            &evidence.cryptographic_verifier_ref,
+            &evidence.hardened_sandbox_profile_ref,
+            &evidence.secret_injection_profile_ref,
+            &evidence.rotation_policy_ref,
+            &evidence.compliance_export_profile_ref,
+            &evidence.evidence_refs,
+        ),
+    )
+}
+
+fn expected_secret_use_decision_id(decision: &SecretUseDecision) -> String {
+    stable_id(
+        "secret_use_decision",
+        &SecretUseDecisionIdPayload::from_decision(decision),
+    )
+}
+
+fn expected_quorum_approval_id(approval: &QuorumApproval) -> String {
+    let mut approvers = approval.approver_ids.clone();
+    approvers.sort();
+    approvers.dedup();
+    stable_id(
+        "quorum_approval",
+        &(
+            approval.request_ref.as_str(),
+            approval.tenant_id.as_str(),
+            &approvers,
+            approval.required_approvers,
+            approval.reason.as_str(),
+            &approval.evidence_refs,
+            approval.granted_at,
+            approval.expires_at,
+        ),
+    )
+}
+
+fn expected_break_glass_decision_id(payload: BreakGlassDecisionIdPayload<'_>) -> String {
+    stable_id("break_glass_decision", &payload)
+}
+
+fn expected_signature_verification_decision_id(decision: &SignatureVerificationDecision) -> String {
+    stable_id(
+        "signature_verification",
+        &(
+            decision.signature_id.as_str(),
+            decision.tenant_id.as_str(),
+            decision.executor_ref.as_str(),
+            &decision.decision,
+            &decision.trust_root_ref,
+            decision.can_issue_high_risk_ticket,
+            &decision.evidence_refs,
+        ),
+    )
+}
+
+fn expected_adapter_verification_decision_id(
+    decision: &ProductionAdapterVerificationDecision,
+) -> String {
+    stable_id(
+        "production_adapter_verification",
+        &(
+            decision.evidence_id.as_str(),
+            &decision.kind,
+            &decision.runtime_mode,
+            decision.provider_config_record_ref.as_str(),
+            decision.provider_config_hash.as_str(),
+            decision.readiness_contract_ref.as_str(),
+            decision.readiness_contract_hash.as_str(),
+            decision.adapter_ref.as_str(),
+            decision.adapter_deployment_ref.as_str(),
+            decision.adapter_config_ref.as_str(),
+            decision.adapter_config_hash.as_str(),
+            decision.provider_ref.as_str(),
+            decision.provider_policy_ref.as_str(),
+            &decision.decision,
+            &decision.evidence_refs,
+        ),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn expected_rotation_enforcement_decision_id(
+    tenant_id: &str,
+    credential_id: &str,
+    hardening_evidence_ref: &str,
+    rotation_ref: &Option<String>,
+    rotation_policy_ref: &Option<String>,
+    adapter_decision_ref: Option<&str>,
+    decision: &RotationEnforcementDecisionKind,
+    evidence_refs: &[String],
+) -> String {
+    stable_id(
+        "rotation_enforcement",
+        &(
+            tenant_id,
+            credential_id,
+            hardening_evidence_ref,
+            rotation_ref,
+            rotation_policy_ref,
+            &adapter_decision_ref,
+            decision,
+            evidence_refs,
+        ),
+    )
+}
+
+fn expected_secret_injection_decision_id(decision: &SecretInjectionDecision) -> String {
+    stable_id(
+        "secret_injection",
+        &(
+            decision.tenant_id.as_str(),
+            decision.credential_id.as_str(),
+            decision.secret_use_decision_id.as_str(),
+            decision.injection_evidence_ref.as_str(),
+            decision.adapter_decision_ref.as_str(),
+            decision.injection_receipt_ref.as_str(),
+            &decision.decision,
+            &decision.evidence_refs,
+        ),
+    )
+}
+
+fn expected_compliance_export_delivery_decision_id(
+    decision: &ComplianceExportDeliveryDecision,
+) -> String {
+    stable_id(
+        "compliance_export_delivery",
+        &(
+            decision.tenant_id.as_str(),
+            decision.bundle_id.as_str(),
+            decision.bundle_hash.as_str(),
+            decision.tenant_policy_hash.as_str(),
+            &decision.production_readiness_evidence_hash,
+            decision.delivery_evidence_ref.as_str(),
+            decision.delivery_ref.as_str(),
+            &decision.adapter_decision_ref,
+            &decision.decision,
+            &decision.evidence_refs,
+        ),
+    )
+}
+
+fn expected_trust_root_storage_decision_id(decision: &TrustRootStorageDecision) -> String {
+    stable_id(
+        "trust_root_storage",
+        &(
+            decision.tenant_id.as_str(),
+            decision.record_id.as_str(),
+            decision.trust_root_hash.as_str(),
+            decision.storage_evidence_ref.as_str(),
+            decision.storage_provider_ref.as_str(),
+            &decision.decision,
+            &decision.evidence_refs,
+        ),
+    )
+}
+
+fn expected_production_auth_decision_id(decision: &ProductionAuthDecision) -> String {
+    stable_id(
+        "production_auth",
+        &(
+            decision.tenant_id.as_str(),
+            decision.auth_provider_ref.as_str(),
+            decision.auth_evidence_ref.as_str(),
+            &decision.decision,
+            &decision.evidence_refs,
+        ),
+    )
+}
+
+fn expected_external_secret_manager_decision_id(
+    decision: &ExternalSecretManagerDecision,
+) -> String {
+    stable_id(
+        "external_secret_manager",
+        &(
+            decision.tenant_id.as_str(),
+            decision.credential_id.as_str(),
+            decision.external_secret_ref.as_str(),
+            decision.secret_manager_ref.as_str(),
+            &decision.decision,
+            &decision.evidence_refs,
+        ),
+    )
+}
+
+fn expected_cryptographic_verifier_decision_id(decision: &CryptographicVerifierDecision) -> String {
+    stable_id(
+        "cryptographic_verifier",
+        &(
+            decision.tenant_id.as_str(),
+            decision.signature_decision_ref.as_str(),
+            decision.trust_root_record_ref.as_str(),
+            decision.cryptographic_verifier_ref.as_str(),
+            &decision.decision,
+            &decision.evidence_refs,
+        ),
+    )
+}
+
+fn expected_hardened_sandbox_decision_id(decision: &HardenedSandboxDecision) -> String {
+    stable_id(
+        "hardened_sandbox",
+        &(
+            decision.tenant_id.as_str(),
+            decision.hardened_sandbox_profile_ref.as_str(),
+            decision.sandbox_evidence_ref.as_str(),
+            &decision.decision,
+            &decision.evidence_refs,
+        ),
+    )
+}
+
 fn production_readiness_evidence_hash(decision: &ProductionReadinessDecision) -> String {
     stable_id(
         "production_readiness_evidence_hash",
@@ -3400,9 +4553,41 @@ fn production_readiness_evidence_hash(decision: &ProductionReadinessDecision) ->
     )
 }
 
+fn expected_production_readiness_decision_id(
+    policy_pack_id: &str,
+    decision: &ProductionReadinessDecision,
+) -> String {
+    stable_id(
+        "production_readiness",
+        &(
+            policy_pack_id,
+            &decision.decision,
+            &decision.missing_gates,
+            &decision.evidence_refs,
+        ),
+    )
+}
+
+fn expected_p1_execution_readiness_decision_id(
+    profile_id: &str,
+    decision: &P1ExecutionReadinessDecision,
+) -> String {
+    stable_id(
+        "p1_execution_readiness",
+        &(
+            profile_id,
+            decision.request_id.as_str(),
+            &decision.decision,
+            &decision.blocked_gates,
+            &decision.evidence_refs,
+        ),
+    )
+}
+
 fn validate_ready_production_readiness(
     decision: &ProductionReadinessDecision,
     tenant_id: &str,
+    policy_pack_id: &str,
 ) -> Result<(), VaultError> {
     if decision.tenant_id != tenant_id {
         return Err(VaultError::TenantMismatch);
@@ -3410,6 +4595,8 @@ fn validate_ready_production_readiness(
     if decision.decision != ProductionReadinessDecisionKind::Ready
         || !decision.missing_gates.is_empty()
         || decision.evidence_refs.is_empty()
+        || decision.decision_id
+            != expected_production_readiness_decision_id(policy_pack_id, decision)
     {
         return Err(VaultError::MissingEvidence);
     }
@@ -3420,6 +4607,7 @@ fn validate_ready_production_readiness(
 fn validate_production_readiness_ref_for_profile_record(
     decision: &ProductionReadinessDecision,
     tenant_id: &str,
+    policy_pack_id: &str,
     production_required: bool,
     expected_ref: Option<&str>,
     expected_evidence_hash: Option<&str>,
@@ -3427,7 +4615,7 @@ fn validate_production_readiness_ref_for_profile_record(
     if !production_required {
         return Err(VaultError::MissingEvidence);
     }
-    validate_ready_production_readiness(decision, tenant_id)?;
+    validate_ready_production_readiness(decision, tenant_id, policy_pack_id)?;
     if expected_ref != Some(decision.decision_id.as_str())
         || expected_evidence_hash != Some(production_readiness_evidence_hash(decision).as_str())
     {
@@ -3452,6 +4640,7 @@ fn validate_production_readiness_for_loaded_profile_record(
     validate_production_readiness_ref_for_profile_record(
         production_readiness,
         &record.tenant_id,
+        &record.tenant_policy_pack_ref,
         true,
         record.production_readiness_ref.as_deref(),
         record.production_readiness_evidence_hash.as_deref(),
@@ -3462,6 +4651,47 @@ fn refs_contain_all(refs: &[String], required_refs: &[String]) -> bool {
     required_refs
         .iter()
         .all(|required_ref| refs.contains(required_ref))
+}
+
+fn validate_break_glass_decision_for_request(
+    policy: &TenantPolicyPack,
+    request: &BreakGlassRequest,
+    decision: &BreakGlassDecision,
+) -> Result<(), VaultError> {
+    let now = Utc::now();
+    if policy.tenant_id != request.tenant_id {
+        return Err(VaultError::TenantMismatch);
+    }
+    if decision.request_id != request.request_id
+        || !decision.audit_required
+        || decision.evidence_refs.is_empty()
+        || !refs_contain_all(&decision.evidence_refs, &request.evidence_refs)
+        || decision.decision_id
+            != expected_break_glass_decision_id(BreakGlassDecisionIdPayload::new(
+                policy,
+                request,
+                &decision.decision,
+                &decision.approval_ref,
+                decision.audit_required,
+                &decision.evidence_refs,
+                DecisionWindow {
+                    decided_at: decision.decided_at,
+                    expires_at: decision.expires_at,
+                },
+            ))
+        || decision.decided_at > now
+        || decision.expires_at <= decision.decided_at
+        || decision.expires_at <= now
+        || (decision.decision == BreakGlassDecisionKind::Allowed
+            && decision.approval_ref.is_none()
+            && (policy.high_risk_requires_quorum || request.risk_level >= RiskLevel::High))
+        || (decision.decision == BreakGlassDecisionKind::RequiresApproval
+            && decision.approval_ref.is_some())
+    {
+        return Err(VaultError::MissingEvidence);
+    }
+
+    Ok(())
 }
 
 fn validate_audit_export_record(record: &AuditExportRecord) -> Result<(), VaultError> {
@@ -3483,6 +4713,21 @@ fn validate_audit_export_record(record: &AuditExportRecord) -> Result<(), VaultE
         &(record.scope_ref.as_str(), &record.event_refs),
     );
     if record.export_hash != expected_export_hash || record.export_id != expected_export_id {
+        return Err(VaultError::MissingEvidence);
+    }
+
+    Ok(())
+}
+
+fn validate_signature_verification_decision(
+    decision: &SignatureVerificationDecision,
+) -> Result<(), VaultError> {
+    if decision.evidence_refs.is_empty()
+        || decision.decision_id != expected_signature_verification_decision_id(decision)
+        || (decision.decision != SignatureVerificationKind::Verified
+            && decision.can_issue_high_risk_ticket)
+        || (decision.can_issue_high_risk_ticket && decision.trust_root_ref.is_none())
+    {
         return Err(VaultError::MissingEvidence);
     }
 
@@ -3624,6 +4869,12 @@ fn validate_p1_execution_readiness_decision_for_record(
             &decision.evidence_refs,
             &profile_record.profile.evidence_refs,
         )
+        || decision.mode != profile_record.profile.mode
+        || decision.decision_id
+            != expected_p1_execution_readiness_decision_id(
+                &profile_record.profile.profile_id,
+                decision,
+            )
         || decision.can_issue_ticket_directly
         || decision.can_execute_without_p0
         || decision.can_enter_p0_execution_chain
@@ -3641,6 +4892,13 @@ fn validate_p1_execution_readiness_decision_for_record(
         {
             return Err(VaultError::MissingEvidence);
         }
+    }
+    if profile_record
+        .production_readiness_ref
+        .as_ref()
+        .is_some_and(|readiness_ref| !decision.evidence_refs.contains(readiness_ref))
+    {
+        return Err(VaultError::MissingEvidence);
     }
 
     Ok(())
@@ -3667,6 +4925,95 @@ fn validate_trust_root(trust_root: &TrustRoot) -> Result<(), VaultError> {
         ]
         .iter()
         .any(|value| is_placeholder_ref(value))
+    {
+        return Err(VaultError::MissingEvidence);
+    }
+
+    Ok(())
+}
+
+fn validate_provider_config(config: &ProductionAdapterProviderConfig) -> Result<(), VaultError> {
+    if config.evidence_refs.is_empty()
+        || config.allowed_runtime_mode != ProductionAdapterRuntimeMode::ExternalVerified
+        || [
+            config.config_id.as_str(),
+            config.tenant_id.as_str(),
+            config.provider_ref.as_str(),
+            config.provider_policy_ref.as_str(),
+            config.adapter_ref.as_str(),
+            config.adapter_version.as_str(),
+            config.adapter_deployment_ref.as_str(),
+            config.adapter_config_ref.as_str(),
+        ]
+        .iter()
+        .any(|value| is_placeholder_ref(value))
+    {
+        return Err(VaultError::MissingEvidence);
+    }
+
+    Ok(())
+}
+
+fn validate_adapter_readiness_contract(
+    contract: &ProductionAdapterReadinessContract,
+) -> Result<(), VaultError> {
+    if contract.evidence_refs.is_empty()
+        || contract.required_policy_refs.is_empty()
+        || contract.required_runtime_mode != ProductionAdapterRuntimeMode::ExternalVerified
+        || contract.created_at >= contract.expires_at
+        || contract.expires_at <= Utc::now()
+        || [
+            contract.contract_id.as_str(),
+            contract.tenant_id.as_str(),
+            contract.provider_ref.as_str(),
+            contract.provider_config_record_ref.as_str(),
+            contract.provider_config_hash.as_str(),
+            contract.required_attestation_ref.as_str(),
+            contract.required_healthcheck_ref.as_str(),
+        ]
+        .iter()
+        .any(|value| is_placeholder_ref(value))
+        || contract
+            .required_policy_refs
+            .iter()
+            .any(|value| is_placeholder_ref(value))
+    {
+        return Err(VaultError::MissingEvidence);
+    }
+
+    Ok(())
+}
+
+fn adapter_decision_satisfies_readiness_contract(
+    adapter_decision: &ProductionAdapterVerificationDecision,
+    config_record: &ProductionAdapterProviderConfigRecord,
+    contract_record: &ProductionAdapterReadinessContractRecord,
+    expected_kind: ProductionAdapterKind,
+    expected_provider_ref: &str,
+) -> Result<(), VaultError> {
+    validate_adapter_decision(adapter_decision)?;
+    VaultController::load_production_adapter_readiness_contract(contract_record, config_record)?;
+    if adapter_decision.kind != expected_kind
+        || adapter_decision.provider_ref != expected_provider_ref
+        || adapter_decision.provider_ref != config_record.provider_ref
+        || adapter_decision.provider_config_record_ref != config_record.record_id
+        || adapter_decision.provider_config_hash != config_record.config_hash
+        || adapter_decision.readiness_contract_ref != contract_record.record_id
+        || adapter_decision.readiness_contract_hash != contract_record.contract_hash
+        || contract_record.kind != expected_kind
+        || contract_record.provider_ref != expected_provider_ref
+        || !adapter_decision
+            .evidence_refs
+            .contains(&config_record.record_id)
+        || !adapter_decision
+            .evidence_refs
+            .contains(&config_record.config_hash)
+        || !adapter_decision
+            .evidence_refs
+            .contains(&contract_record.record_id)
+        || !adapter_decision
+            .evidence_refs
+            .contains(&contract_record.contract_hash)
     {
         return Err(VaultError::MissingEvidence);
     }
@@ -3716,10 +5063,21 @@ fn is_placeholder_ref(value: &str) -> bool {
 }
 
 fn validate_adapter_evidence(evidence: &ProductionAdapterEvidence) -> Result<(), VaultError> {
+    if evidence.runtime_mode != ProductionAdapterRuntimeMode::ExternalVerified {
+        return Err(VaultError::MissingEvidence);
+    }
     let required_refs = [
         evidence.adapter_ref.as_str(),
         evidence.adapter_version.as_str(),
+        evidence.provider_config_record_ref.as_str(),
+        evidence.provider_config_hash.as_str(),
+        evidence.readiness_contract_ref.as_str(),
+        evidence.readiness_contract_hash.as_str(),
+        evidence.adapter_deployment_ref.as_str(),
+        evidence.adapter_config_ref.as_str(),
+        evidence.adapter_config_hash.as_str(),
         evidence.provider_ref.as_str(),
+        evidence.provider_policy_ref.as_str(),
         evidence.attestation_ref.as_str(),
         evidence.healthcheck_ref.as_str(),
     ];
@@ -3746,8 +5104,22 @@ fn validate_adapter_decision(
     decision: &ProductionAdapterVerificationDecision,
 ) -> Result<(), VaultError> {
     if decision.decision != ProductionAdapterVerificationKind::Verified
+        || decision.runtime_mode != ProductionAdapterRuntimeMode::ExternalVerified
         || decision.evidence_refs.is_empty()
         || decision.expires_at <= Utc::now()
+        || expected_adapter_verification_decision_id(decision) != decision.decision_id
+        || !decision
+            .evidence_refs
+            .contains(&decision.provider_config_record_ref)
+        || !decision
+            .evidence_refs
+            .contains(&decision.provider_config_hash)
+        || !decision
+            .evidence_refs
+            .contains(&decision.readiness_contract_ref)
+        || !decision
+            .evidence_refs
+            .contains(&decision.readiness_contract_hash)
     {
         return Err(VaultError::MissingEvidence);
     }
@@ -3756,7 +5128,15 @@ fn validate_adapter_decision(
         .iter()
         .any(|value| is_placeholder_ref(value))
         || is_placeholder_ref(&decision.adapter_ref)
+        || is_placeholder_ref(&decision.provider_config_record_ref)
+        || is_placeholder_ref(&decision.provider_config_hash)
+        || is_placeholder_ref(&decision.readiness_contract_ref)
+        || is_placeholder_ref(&decision.readiness_contract_hash)
+        || is_placeholder_ref(&decision.adapter_deployment_ref)
+        || is_placeholder_ref(&decision.adapter_config_ref)
+        || is_placeholder_ref(&decision.adapter_config_hash)
         || is_placeholder_ref(&decision.provider_ref)
+        || is_placeholder_ref(&decision.provider_policy_ref)
     {
         return Err(VaultError::MissingEvidence);
     }
@@ -3770,6 +5150,20 @@ fn validate_rotation_decision(
     if decision.decision != RotationEnforcementDecisionKind::Verified
         || decision.evidence_refs.is_empty()
         || decision.expires_at <= Utc::now()
+        || is_placeholder_ref(&decision.hardening_evidence_ref)
+        || expected_rotation_enforcement_decision_id(
+            decision.tenant_id.as_str(),
+            decision.credential_id.as_str(),
+            decision.hardening_evidence_ref.as_str(),
+            &decision.rotation_ref,
+            &decision.rotation_policy_ref,
+            decision.adapter_decision_ref.as_deref(),
+            &decision.decision,
+            &decision.evidence_refs,
+        ) != decision.decision_id
+        || !decision
+            .evidence_refs
+            .contains(&decision.hardening_evidence_ref)
         || decision
             .rotation_ref
             .as_deref()
@@ -3829,6 +5223,58 @@ fn validate_hardened_sandbox_decision(
     Ok(())
 }
 
+fn validate_secret_injection_decision(
+    decision: &SecretInjectionDecision,
+    adapter_decisions: &[ProductionAdapterVerificationDecision],
+) -> Result<(), VaultError> {
+    if decision.decision != SecretInjectionDecisionKind::Verified
+        || decision.evidence_refs.is_empty()
+        || decision.expires_at <= Utc::now()
+        || is_placeholder_ref(&decision.injection_evidence_ref)
+        || is_placeholder_ref(&decision.adapter_decision_ref)
+        || is_placeholder_ref(&decision.injection_receipt_ref)
+        || is_placeholder_ref(&decision.secret_injection_profile_ref)
+        || is_placeholder_ref(&decision.hardened_sandbox_profile_ref)
+        || expected_secret_injection_decision_id(decision) != decision.decision_id
+        || !decision
+            .evidence_refs
+            .contains(&decision.injection_evidence_ref)
+        || !decision
+            .evidence_refs
+            .contains(&decision.adapter_decision_ref)
+        || !decision
+            .evidence_refs
+            .contains(&decision.injection_receipt_ref)
+        || !decision
+            .evidence_refs
+            .contains(&decision.secret_use_decision_id)
+        || !decision
+            .evidence_refs
+            .contains(&decision.secret_injection_profile_ref)
+        || !decision
+            .evidence_refs
+            .contains(&decision.hardened_sandbox_profile_ref)
+    {
+        return Err(VaultError::MissingEvidence);
+    }
+    if !decision_refs_verified_adapter_kind(
+        &decision.evidence_refs,
+        adapter_decisions,
+        ProductionAdapterKind::SecretInjection,
+        &decision.secret_injection_profile_ref,
+    )? {
+        return Err(VaultError::MissingEvidence);
+    }
+    if decision
+        .evidence_refs
+        .iter()
+        .any(|value| is_placeholder_ref(value))
+    {
+        return Err(VaultError::MissingEvidence);
+    }
+    Ok(())
+}
+
 fn require_tenant_match_for_hardening_decision_set(
     policy: &TenantPolicyPack,
     decision_set: &ProductionHardeningDecisionSet<'_>,
@@ -3874,6 +5320,7 @@ fn require_tenant_match_for_hardening_decision_set(
 
 fn require_verified_production_auth_decision(
     hardening: &ProductionHardeningEvidence,
+    adapter_decisions: &[ProductionAdapterVerificationDecision],
     decision: Option<&ProductionAuthDecision>,
 ) -> Result<(), VaultError> {
     let Some(decision) = decision else {
@@ -3882,8 +5329,17 @@ fn require_verified_production_auth_decision(
     if decision.decision != ProductionAuthDecisionKind::Verified
         || decision.evidence_refs.is_empty()
         || decision.expires_at <= Utc::now()
+        || is_placeholder_ref(&decision.auth_evidence_ref)
+        || expected_production_auth_decision_id(decision) != decision.decision_id
         || hardening.auth_provider_ref.as_ref() != Some(&decision.auth_provider_ref)
+        || !decision.evidence_refs.contains(&decision.auth_evidence_ref)
         || !decision.evidence_refs.contains(&decision.auth_provider_ref)
+        || !decision_refs_verified_adapter_kind(
+            &decision.evidence_refs,
+            adapter_decisions,
+            ProductionAdapterKind::AuthProvider,
+            &decision.auth_provider_ref,
+        )?
         || decision
             .evidence_refs
             .iter()
@@ -3919,8 +5375,13 @@ fn require_verified_external_secret_manager_decisions(
         if decision.decision != ExternalSecretManagerDecisionKind::Verified
             || decision.evidence_refs.is_empty()
             || decision.expires_at <= Utc::now()
+            || is_placeholder_ref(&decision.secret_manager_evidence_ref)
+            || expected_external_secret_manager_decision_id(decision) != decision.decision_id
             || decision.external_secret_ref != credential.external_secret_ref
             || hardening.secret_manager_ref.as_ref() != Some(&decision.secret_manager_ref)
+            || !decision
+                .evidence_refs
+                .contains(&decision.secret_manager_evidence_ref)
             || !decision.evidence_refs.contains(&credential.credential_id)
             || !decision
                 .evidence_refs
@@ -3966,10 +5427,15 @@ fn require_verified_cryptographic_verifier_decisions(
         if decision.decision != CryptographicVerifierDecisionKind::Verified
             || decision.evidence_refs.is_empty()
             || decision.expires_at <= Utc::now()
+            || is_placeholder_ref(&decision.crypto_evidence_ref)
+            || expected_cryptographic_verifier_decision_id(decision) != decision.decision_id
             || hardening.cryptographic_verifier_ref.as_ref()
                 != Some(&decision.cryptographic_verifier_ref)
             || !high_risk_signature_refs.contains(decision.signature_decision_ref.as_str())
             || !seen.insert(decision.signature_decision_ref.as_str())
+            || !decision
+                .evidence_refs
+                .contains(&decision.crypto_evidence_ref)
             || !decision
                 .evidence_refs
                 .contains(&decision.signature_decision_ref)
@@ -4015,27 +5481,12 @@ fn require_verified_secret_injection_decisions(
         let Some(decision) = decisions_by_credential.get(credential.credential_id.as_str()) else {
             return Err(VaultError::MissingEvidence);
         };
-        if decision.decision != SecretInjectionDecisionKind::Verified
-            || decision.evidence_refs.is_empty()
-            || decision.expires_at <= Utc::now()
+        if validate_secret_injection_decision(decision, adapter_decisions).is_err()
             || hardening.secret_injection_profile_ref.as_ref()
                 != Some(&decision.secret_injection_profile_ref)
             || hardening.hardened_sandbox_profile_ref.as_ref()
                 != Some(&decision.hardened_sandbox_profile_ref)
             || !decision.evidence_refs.contains(&credential.credential_id)
-            || !decision
-                .evidence_refs
-                .contains(&decision.secret_use_decision_id)
-            || !decision_refs_verified_adapter_kind(
-                &decision.evidence_refs,
-                adapter_decisions,
-                ProductionAdapterKind::SecretInjection,
-                &decision.secret_injection_profile_ref,
-            )?
-            || decision
-                .evidence_refs
-                .iter()
-                .any(|value| is_placeholder_ref(value))
         {
             return Err(VaultError::MissingEvidence);
         }
@@ -4135,21 +5586,7 @@ fn validate_compliance_export_delivery_decision_record(
         return Err(VaultError::MissingEvidence);
     }
 
-    let expected_decision_id = stable_id(
-        "compliance_export_delivery",
-        &(
-            decision.tenant_id.as_str(),
-            decision.bundle_id.as_str(),
-            decision.bundle_hash.as_str(),
-            decision.tenant_policy_hash.as_str(),
-            &decision.production_readiness_evidence_hash,
-            decision.delivery_evidence_ref.as_str(),
-            decision.delivery_ref.as_str(),
-            &decision.adapter_decision_ref,
-            &decision.decision,
-            &decision.evidence_refs,
-        ),
-    );
+    let expected_decision_id = expected_compliance_export_delivery_decision_id(decision);
     if decision.decision_id != expected_decision_id {
         return Err(VaultError::MissingEvidence);
     }
@@ -4159,6 +5596,7 @@ fn validate_compliance_export_delivery_decision_record(
 
 fn require_verified_trust_root_storage_decisions(
     signature_decisions: &[SignatureVerificationDecision],
+    adapter_decisions: &[ProductionAdapterVerificationDecision],
     decisions: &[TrustRootStorageDecision],
 ) -> Result<(), VaultError> {
     let required_roots = signature_decisions
@@ -4186,6 +5624,12 @@ fn require_verified_trust_root_storage_decisions(
             || !decision
                 .evidence_refs
                 .contains(&decision.storage_provider_ref)
+            || !decision_refs_verified_adapter_kind(
+                &decision.evidence_refs,
+                adapter_decisions,
+                ProductionAdapterKind::ExecutorTrustRoots,
+                &decision.storage_provider_ref,
+            )?
             || decision
                 .evidence_refs
                 .iter()
@@ -4225,18 +5669,7 @@ fn validate_trust_root_storage_decision_record(
         return Err(VaultError::MissingEvidence);
     }
 
-    let expected_decision_id = stable_id(
-        "trust_root_storage",
-        &(
-            decision.tenant_id.as_str(),
-            decision.record_id.as_str(),
-            decision.trust_root_hash.as_str(),
-            decision.storage_evidence_ref.as_str(),
-            decision.storage_provider_ref.as_str(),
-            &decision.decision,
-            &decision.evidence_refs,
-        ),
-    );
+    let expected_decision_id = expected_trust_root_storage_decision_id(decision);
     if decision.decision_id != expected_decision_id {
         return Err(VaultError::MissingEvidence);
     }
@@ -4257,11 +5690,17 @@ fn decision_refs_verified_adapter_kind(
     if matching_decisions.len() > 1 {
         return Err(VaultError::MissingEvidence);
     }
-    Ok(matching_decisions.first().is_some_and(|decision| {
+    let Some(decision) = matching_decisions.first() else {
+        return Ok(false);
+    };
+
+    Ok(
         decision.decision == ProductionAdapterVerificationKind::Verified
             && decision.kind == expected_kind
             && decision.provider_ref == expected_provider_ref
-    }))
+            && expected_adapter_verification_decision_id(decision) == decision.decision_id
+            && refs_contain_all(evidence_refs, &decision.evidence_refs),
+    )
 }
 
 fn extend_readiness_evidence_refs_from_decision_set(
@@ -4332,10 +5771,44 @@ fn require_verified_adapter_decisions(
             return Err(VaultError::MissingEvidence);
         };
         if decision.kind != evidence.kind
+            || decision.runtime_mode != evidence.runtime_mode
+            || decision.provider_config_record_ref != evidence.provider_config_record_ref
+            || decision.provider_config_hash != evidence.provider_config_hash
+            || decision.readiness_contract_ref != evidence.readiness_contract_ref
+            || decision.readiness_contract_hash != evidence.readiness_contract_hash
             || decision.adapter_ref != evidence.adapter_ref
+            || decision.adapter_deployment_ref != evidence.adapter_deployment_ref
+            || decision.adapter_config_ref != evidence.adapter_config_ref
+            || decision.adapter_config_hash != evidence.adapter_config_hash
             || decision.provider_ref != evidence.provider_ref
+            || decision.provider_policy_ref != evidence.provider_policy_ref
             || decision.expires_at != evidence.expires_at
+            || expected_adapter_verification_decision_id(decision) != decision.decision_id
             || !decision.evidence_refs.contains(&evidence.evidence_id)
+            || !decision
+                .evidence_refs
+                .contains(&evidence.provider_config_record_ref)
+            || !decision
+                .evidence_refs
+                .contains(&evidence.provider_config_hash)
+            || !decision
+                .evidence_refs
+                .contains(&evidence.readiness_contract_ref)
+            || !decision
+                .evidence_refs
+                .contains(&evidence.readiness_contract_hash)
+            || !decision
+                .evidence_refs
+                .contains(&evidence.adapter_deployment_ref)
+            || !decision
+                .evidence_refs
+                .contains(&evidence.adapter_config_ref)
+            || !decision
+                .evidence_refs
+                .contains(&evidence.adapter_config_hash)
+            || !decision
+                .evidence_refs
+                .contains(&evidence.provider_policy_ref)
         {
             return Err(VaultError::MissingEvidence);
         }
@@ -4346,6 +5819,7 @@ fn require_verified_adapter_decisions(
 
 fn require_verified_hardened_sandbox_decision(
     hardening: &ProductionHardeningEvidence,
+    adapter_decisions: &[ProductionAdapterVerificationDecision],
     sandbox_decisions: &[HardenedSandboxDecision],
 ) -> Result<(), VaultError> {
     if sandbox_decisions.len() != 1 {
@@ -4357,7 +5831,18 @@ fn require_verified_hardened_sandbox_decision(
     };
     let decision = &sandbox_decisions[0];
     if decision.hardened_sandbox_profile_ref != profile_ref
+        || is_placeholder_ref(&decision.sandbox_evidence_ref)
+        || expected_hardened_sandbox_decision_id(decision) != decision.decision_id
+        || !decision
+            .evidence_refs
+            .contains(&decision.sandbox_evidence_ref)
         || !decision.evidence_refs.contains(&profile_ref.to_string())
+        || !decision_refs_verified_adapter_kind(
+            &decision.evidence_refs,
+            adapter_decisions,
+            ProductionAdapterKind::HardenedSandbox,
+            profile_ref,
+        )?
     {
         return Err(VaultError::MissingEvidence);
     }
@@ -4388,6 +5873,10 @@ fn require_verified_rotation_decisions(
         };
         if decision.rotation_ref != credential.rotation_ref
             || decision.rotation_policy_ref != hardening.rotation_policy_ref
+            || decision.hardening_evidence_ref != production_hardening_evidence_hash(hardening)
+            || !decision
+                .evidence_refs
+                .contains(&decision.hardening_evidence_ref)
             || !decision.evidence_refs.contains(&credential.credential_id)
         {
             return Err(VaultError::MissingEvidence);
@@ -4407,14 +5896,23 @@ fn validate_quorum(
     approval: &QuorumApproval,
     request_ref: &str,
     tenant_id: &str,
+    minimum_required_approvers: u8,
 ) -> Result<(), VaultError> {
     let mut approvers = approval.approver_ids.clone();
     approvers.sort();
     approvers.dedup();
+    let now = Utc::now();
     if approval.request_ref != request_ref
         || approval.tenant_id != tenant_id
+        || approval.approval_id != expected_quorum_approval_id(approval)
+        || approval.evidence_refs.is_empty()
+        || approval.required_approvers < 2
+        || approval.required_approvers < minimum_required_approvers
+        || approvers.len() < 2
         || approvers.len() < usize::from(approval.required_approvers)
-        || approval.expires_at <= Utc::now()
+        || approval.granted_at > now
+        || approval.expires_at <= approval.granted_at
+        || approval.expires_at <= now
     {
         return Err(VaultError::InvalidApproval);
     }
@@ -4440,7 +5938,7 @@ fn stable_id(prefix: &str, value: &impl Serialize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Duration;
+    use chrono::{Duration, TimeZone};
 
     fn credential() -> CredentialRef {
         CredentialRef {
@@ -4461,6 +5959,18 @@ mod tests {
         }
     }
 
+    fn fixed_provider_config_time() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap()
+    }
+
+    fn fixed_contract_time() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 5, 1, 0, 5, 0).unwrap()
+    }
+
+    fn fixed_contract_expires_at() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2099, 1, 1, 0, 0, 0).unwrap()
+    }
+
     fn secret_request(risk_level: RiskLevel) -> SecretUseRequest {
         SecretUseRequest {
             request_id: "secret.req.1".into(),
@@ -4478,16 +5988,19 @@ mod tests {
     }
 
     fn approval(request_ref: &str) -> QuorumApproval {
-        QuorumApproval {
-            approval_id: "approval.1".into(),
+        let mut approval = QuorumApproval {
+            approval_id: String::new(),
             request_ref: request_ref.into(),
             tenant_id: "tenant.a".into(),
             approver_ids: vec!["owner.1".into(), "security.1".into()],
             required_approvers: 2,
             reason: "bounded high-risk secret use".into(),
+            evidence_refs: vec!["approval.ticket.1".into(), "approval.audit.1".into()],
             granted_at: Utc::now(),
             expires_at: Utc::now() + Duration::minutes(5),
-        }
+        };
+        approval.approval_id = expected_quorum_approval_id(&approval);
+        approval
     }
 
     fn trust_root() -> TrustRoot {
@@ -4551,17 +6064,96 @@ mod tests {
         }
     }
 
+    fn provider_config(
+        kind: ProductionAdapterKind,
+        provider_ref: &str,
+    ) -> ProductionAdapterProviderConfig {
+        ProductionAdapterProviderConfig {
+            config_id: format!("provider.config.{kind:?}"),
+            tenant_id: "tenant.a".into(),
+            kind,
+            provider_ref: provider_ref.into(),
+            provider_policy_ref: format!("provider-policy://tenant.a/{kind:?}/prod"),
+            adapter_ref: format!("adapter://tenant.a/{kind:?}"),
+            adapter_version: "2026.05.prod".into(),
+            adapter_deployment_ref: format!("adapter-deployment://tenant.a/{kind:?}/prod-a"),
+            adapter_config_ref: format!("adapter-config://tenant.a/{kind:?}/prod"),
+            allowed_runtime_mode: ProductionAdapterRuntimeMode::ExternalVerified,
+            evidence_refs: vec![format!("provider.config.approval.{kind:?}")],
+            created_at: fixed_provider_config_time(),
+        }
+    }
+
+    fn provider_config_record(
+        kind: ProductionAdapterKind,
+        provider_ref: &str,
+    ) -> ProductionAdapterProviderConfigRecord {
+        VaultController::seal_production_adapter_provider_config(
+            provider_config(kind, provider_ref),
+            vec!["provider.config.review.1".into()],
+            "vault.controller",
+        )
+        .unwrap()
+    }
+
+    fn readiness_contract(
+        config_record: &ProductionAdapterProviderConfigRecord,
+    ) -> ProductionAdapterReadinessContract {
+        ProductionAdapterReadinessContract {
+            contract_id: format!("adapter.readiness.contract.{:?}", config_record.kind),
+            tenant_id: config_record.tenant_id.clone(),
+            kind: config_record.kind,
+            provider_ref: config_record.provider_ref.clone(),
+            provider_config_record_ref: config_record.record_id.clone(),
+            provider_config_hash: config_record.config_hash.clone(),
+            required_runtime_mode: ProductionAdapterRuntimeMode::ExternalVerified,
+            required_attestation_ref: format!("attestation://tenant.a/{:?}", config_record.kind),
+            required_healthcheck_ref: format!("health://tenant.a/{:?}", config_record.kind),
+            required_policy_refs: vec![config_record.provider_policy_ref.clone()],
+            evidence_refs: vec![format!("adapter.contract.review.{:?}", config_record.kind)],
+            created_at: fixed_contract_time(),
+            expires_at: fixed_contract_expires_at(),
+        }
+    }
+
+    fn readiness_contract_record(
+        config_record: &ProductionAdapterProviderConfigRecord,
+    ) -> ProductionAdapterReadinessContractRecord {
+        VaultController::seal_production_adapter_readiness_contract(
+            readiness_contract(config_record),
+            config_record,
+            vec!["adapter.contract.review.1".into()],
+            "vault.controller",
+        )
+        .unwrap()
+    }
+
     fn adapter_evidence(
         kind: ProductionAdapterKind,
         provider_ref: &str,
     ) -> ProductionAdapterEvidence {
+        let config_record = provider_config_record(kind, provider_ref);
+        let contract_record = readiness_contract_record(&config_record);
+
         ProductionAdapterEvidence {
             evidence_id: format!("adapter.evidence.{kind:?}"),
             tenant_id: "tenant.a".into(),
             kind,
+            runtime_mode: ProductionAdapterRuntimeMode::ExternalVerified,
+            provider_config_record_ref: config_record.record_id,
+            provider_config_hash: config_record.config_hash,
+            readiness_contract_ref: contract_record.record_id,
+            readiness_contract_hash: contract_record.contract_hash,
             adapter_ref: format!("adapter://tenant.a/{kind:?}"),
             adapter_version: "2026.05.prod".into(),
+            adapter_deployment_ref: format!("adapter-deployment://tenant.a/{kind:?}/prod-a"),
+            adapter_config_ref: format!("adapter-config://tenant.a/{kind:?}/prod"),
+            adapter_config_hash: stable_id(
+                "adapter_config_hash",
+                &(kind, provider_ref, "2026.05.prod"),
+            ),
             provider_ref: provider_ref.into(),
+            provider_policy_ref: format!("provider-policy://tenant.a/{kind:?}/prod"),
             attestation_ref: format!("attestation://tenant.a/{kind:?}"),
             healthcheck_ref: format!("health://tenant.a/{kind:?}"),
             sandbox_profile_ref: if matches!(
@@ -4604,6 +6196,10 @@ mod tests {
                 ProductionAdapterKind::ComplianceAuditExport,
                 "audit://tenant.a/soc2-bundle",
             ),
+            adapter_evidence(
+                ProductionAdapterKind::ExecutorTrustRoots,
+                "trust-store://tenant.a/prod-roots",
+            ),
         ]
     }
 
@@ -4612,8 +6208,36 @@ mod tests {
     ) -> Vec<ProductionAdapterVerificationDecision> {
         adapter_evidence
             .iter()
-            .map(VaultController::verify_production_adapter_evidence)
+            .map(|evidence| {
+                let config_record = provider_config_record(evidence.kind, &evidence.provider_ref);
+                let contract_record = readiness_contract_record(&config_record);
+                VaultController::verify_production_adapter_evidence_with_readiness_contract(
+                    evidence,
+                    &config_record,
+                    &contract_record,
+                )
+            })
             .collect()
+    }
+
+    fn adapter_decision_with_records(
+        kind: ProductionAdapterKind,
+        provider_ref: &str,
+    ) -> (
+        ProductionAdapterVerificationDecision,
+        ProductionAdapterProviderConfigRecord,
+        ProductionAdapterReadinessContractRecord,
+    ) {
+        let evidence = adapter_evidence(kind, provider_ref);
+        let config_record = provider_config_record(kind, provider_ref);
+        let contract_record = readiness_contract_record(&config_record);
+        let decision = VaultController::verify_production_adapter_evidence_with_readiness_contract(
+            &evidence,
+            &config_record,
+            &contract_record,
+        );
+
+        (decision, config_record, contract_record)
     }
 
     fn production_auth_evidence(
@@ -4809,6 +6433,8 @@ mod tests {
             adapter_decision(ProductionAdapterKind::RotationEnforcement);
         let compliance_adapter_decision =
             adapter_decision(ProductionAdapterKind::ComplianceAuditExport);
+        let trust_root_storage_adapter_decision =
+            adapter_decision(ProductionAdapterKind::ExecutorTrustRoots);
 
         let trust_root_record = VaultController::seal_trust_root(
             trust_root(),
@@ -4816,10 +6442,20 @@ mod tests {
             "vault.controller",
         )
         .unwrap();
-        let trust_root_storage_decision = VaultController::verify_trust_root_storage(
-            &trust_root_record,
-            &trust_root_storage_evidence(&trust_root_record),
+        let trust_root_storage_config_record = provider_config_record(
+            ProductionAdapterKind::ExecutorTrustRoots,
+            "trust-store://tenant.a/prod-roots",
         );
+        let trust_root_storage_contract_record =
+            readiness_contract_record(&trust_root_storage_config_record);
+        let trust_root_storage_decision =
+            VaultController::verify_trust_root_storage_with_readiness_contract(
+                &trust_root_record,
+                &trust_root_storage_evidence(&trust_root_record),
+                &trust_root_storage_adapter_decision,
+                &trust_root_storage_config_record,
+                &trust_root_storage_contract_record,
+            );
         let signature_decision =
             VaultController::verify_executor_signature_with_trust_root_records(
                 &signature(),
@@ -4827,10 +6463,15 @@ mod tests {
                 RiskLevel::High,
             )
             .unwrap();
-        let auth_decision = VaultController::verify_production_auth(
+        let auth_config_record =
+            provider_config_record(ProductionAdapterKind::AuthProvider, "oidc://prod/tenant.a");
+        let auth_contract_record = readiness_contract_record(&auth_config_record);
+        let auth_decision = VaultController::verify_production_auth_with_readiness_contract(
             &hardening,
             &auth_adapter_decision,
             &production_auth_evidence(&auth_adapter_decision),
+            &auth_config_record,
+            &auth_contract_record,
         );
         let secret_manager_decision = VaultController::verify_external_secret_manager(
             &credential,
@@ -4849,10 +6490,17 @@ mod tests {
                 &crypto_adapter_decision,
             ),
         );
-        let sandbox_decision = VaultController::verify_hardened_sandbox(
+        let sandbox_config_record = provider_config_record(
+            ProductionAdapterKind::HardenedSandbox,
+            "container://tenant.a/hardened-v1",
+        );
+        let sandbox_contract_record = readiness_contract_record(&sandbox_config_record);
+        let sandbox_decision = VaultController::verify_hardened_sandbox_with_readiness_contract(
             &hardening,
             &sandbox_adapter_decision,
             &hardened_sandbox_evidence(&sandbox_adapter_decision),
+            &sandbox_config_record,
+            &sandbox_contract_record,
         );
         let rotation_decision = VaultController::verify_rotation_enforcement_with_adapter_decision(
             &credential,
@@ -4954,6 +6602,45 @@ mod tests {
         assert_eq!(approved.decision, SecretUseDecisionKind::Allowed);
         assert_eq!(approved.approval_policy, ApprovalPolicy::Quorum);
         assert!(approved.approval_ref.is_some());
+
+        let mut tampered_approval = approval(&request.request_id);
+        tampered_approval.approval_id = "quorum_approval.tampered".into();
+        let error =
+            VaultController::decide_secret_use(&credential(), &request, Some(&tampered_approval))
+                .unwrap_err();
+        assert_eq!(error, VaultError::InvalidApproval);
+
+        let mut extended_approval = approval(&request.request_id);
+        extended_approval.expires_at += Duration::minutes(30);
+        let extended_error =
+            VaultController::decide_secret_use(&credential(), &request, Some(&extended_approval))
+                .unwrap_err();
+        assert_eq!(extended_error, VaultError::InvalidApproval);
+
+        let mut weak_quorum = approval(&request.request_id);
+        weak_quorum.required_approvers = 1;
+        weak_quorum.approval_id = expected_quorum_approval_id(&weak_quorum);
+        let weak_quorum_error =
+            VaultController::decide_secret_use(&credential(), &request, Some(&weak_quorum))
+                .unwrap_err();
+        assert_eq!(weak_quorum_error, VaultError::InvalidApproval);
+
+        let mut duplicate_approver = approval(&request.request_id);
+        duplicate_approver.approver_ids = vec!["owner.1".into(), "owner.1".into()];
+        duplicate_approver.approval_id = expected_quorum_approval_id(&duplicate_approver);
+        let duplicate_approver_error =
+            VaultController::decide_secret_use(&credential(), &request, Some(&duplicate_approver))
+                .unwrap_err();
+        assert_eq!(duplicate_approver_error, VaultError::InvalidApproval);
+
+        let mut future_approval = approval(&request.request_id);
+        future_approval.granted_at = Utc::now() + Duration::minutes(1);
+        future_approval.expires_at = future_approval.granted_at + Duration::minutes(5);
+        future_approval.approval_id = expected_quorum_approval_id(&future_approval);
+        let future_approval_error =
+            VaultController::decide_secret_use(&credential(), &request, Some(&future_approval))
+                .unwrap_err();
+        assert_eq!(future_approval_error, VaultError::InvalidApproval);
     }
 
     #[test]
@@ -4991,6 +6678,13 @@ mod tests {
         assert_eq!(decision.decision, SignatureVerificationKind::Verified);
         assert!(decision.can_issue_high_risk_ticket);
         assert_eq!(decision.trust_root_ref, Some("root.1".into()));
+
+        let mut tampered_decision = decision;
+        tampered_decision.decision_id = "signature_verification.tampered".into();
+        assert_eq!(
+            validate_signature_verification_decision(&tampered_decision).unwrap_err(),
+            VaultError::MissingEvidence
+        );
     }
 
     #[test]
@@ -5118,6 +6812,70 @@ mod tests {
     }
 
     #[test]
+    fn trust_root_storage_decision_requires_sealed_readiness_contract() {
+        let record = VaultController::seal_trust_root(
+            trust_root(),
+            vec!["security.import.review".into()],
+            "vault.controller",
+        )
+        .unwrap();
+        let evidence = trust_root_storage_evidence(&record);
+        let (adapter_decision, config_record, contract_record) = adapter_decision_with_records(
+            ProductionAdapterKind::ExecutorTrustRoots,
+            "trust-store://tenant.a/prod-roots",
+        );
+        let decision = VaultController::verify_trust_root_storage_with_readiness_contract(
+            &record,
+            &evidence,
+            &adapter_decision,
+            &config_record,
+            &contract_record,
+        );
+
+        assert_eq!(decision.decision, TrustRootStorageDecisionKind::Verified);
+        assert!(decision
+            .evidence_refs
+            .contains(&adapter_decision.decision_id));
+        assert!(decision.evidence_refs.contains(&config_record.record_id));
+        assert!(decision.evidence_refs.contains(&contract_record.record_id));
+
+        let swapped_config_record = provider_config_record(
+            ProductionAdapterKind::ComplianceAuditExport,
+            "audit://tenant.a/soc2-bundle",
+        );
+        let rejected_config = VaultController::verify_trust_root_storage_with_readiness_contract(
+            &record,
+            &evidence,
+            &adapter_decision,
+            &swapped_config_record,
+            &contract_record,
+        );
+        assert_eq!(
+            rejected_config.decision,
+            TrustRootStorageDecisionKind::Rejected
+        );
+        assert_ne!(rejected_config.decision_id, decision.decision_id);
+
+        let swapped_config_record = provider_config_record(
+            ProductionAdapterKind::ComplianceAuditExport,
+            "audit://tenant.a/soc2-bundle",
+        );
+        let swapped_contract_record = readiness_contract_record(&swapped_config_record);
+        let rejected_contract = VaultController::verify_trust_root_storage_with_readiness_contract(
+            &record,
+            &evidence,
+            &adapter_decision,
+            &swapped_config_record,
+            &swapped_contract_record,
+        );
+        assert_eq!(
+            rejected_contract.decision,
+            TrustRootStorageDecisionKind::Rejected
+        );
+        assert_ne!(rejected_contract.decision_id, decision.decision_id);
+    }
+
+    #[test]
     fn break_glass_requires_quorum_and_always_requires_audit() {
         let policy = tenant_policy();
         let request = BreakGlassRequest {
@@ -5144,6 +6902,140 @@ mod tests {
         assert_eq!(pending.decision, BreakGlassDecisionKind::RequiresApproval);
         assert_eq!(approved.decision, BreakGlassDecisionKind::Allowed);
         assert!(approved.audit_required);
+
+        let mut tampered_approval = approval(&request.request_id);
+        tampered_approval.approval_id = "quorum_approval.tampered".into();
+        let tampered_approval_error =
+            VaultController::decide_break_glass(&policy, &request, Some(&tampered_approval))
+                .unwrap_err();
+        assert_eq!(tampered_approval_error, VaultError::InvalidApproval);
+
+        let mut stricter_policy = policy.clone();
+        stricter_policy.quorum_approvers = 3;
+        let insufficient_policy_quorum_error = VaultController::decide_break_glass(
+            &stricter_policy,
+            &request,
+            Some(&approval(&request.request_id)),
+        )
+        .unwrap_err();
+        assert_eq!(
+            insufficient_policy_quorum_error,
+            VaultError::InvalidApproval
+        );
+
+        let mut three_person_approval = approval(&request.request_id);
+        three_person_approval.approver_ids.push("ops.1".into());
+        three_person_approval.required_approvers = 3;
+        three_person_approval.approval_id = expected_quorum_approval_id(&three_person_approval);
+        let stricter_approved = VaultController::decide_break_glass(
+            &stricter_policy,
+            &request,
+            Some(&three_person_approval),
+        )
+        .unwrap();
+        assert_eq!(stricter_approved.decision, BreakGlassDecisionKind::Allowed);
+
+        let mut swapped_request = request.clone();
+        swapped_request.actor_id = "owner.2".into();
+        swapped_request.evidence_refs.push("incident.2".into());
+        let swapped_request_error = VaultController::audit_break_glass_decision(
+            &policy,
+            &swapped_request,
+            &approved,
+            "redaction.compliance.v1",
+            "auditor.1",
+        )
+        .unwrap_err();
+        assert_eq!(swapped_request_error, VaultError::MissingEvidence);
+
+        let audit = VaultController::audit_break_glass_decision(
+            &policy,
+            &request,
+            &approved,
+            "redaction.compliance.v1",
+            "auditor.1",
+        )
+        .unwrap();
+        assert_eq!(audit.kind, AuditExportRecordKind::BreakGlass);
+        assert!(!audit.contains_secret_material);
+        assert!(audit.event_refs.contains(&policy.pack_id));
+        assert!(audit.event_refs.contains(&request.request_id));
+        assert!(audit.event_refs.contains(&approved.decision_id));
+
+        let mut tampered_decision = approved.clone();
+        tampered_decision.decision_id = "break_glass_decision.tampered".into();
+        let tampered_error = VaultController::audit_break_glass_decision(
+            &policy,
+            &request,
+            &tampered_decision,
+            "redaction.compliance.v1",
+            "auditor.1",
+        )
+        .unwrap_err();
+        assert_eq!(tampered_error, VaultError::MissingEvidence);
+
+        let mut expired_decision = approved.clone();
+        expired_decision.expires_at = Utc::now() - Duration::minutes(1);
+        expired_decision.decision_id =
+            expected_break_glass_decision_id(BreakGlassDecisionIdPayload::new(
+                &policy,
+                &request,
+                &expired_decision.decision,
+                &expired_decision.approval_ref,
+                expired_decision.audit_required,
+                &expired_decision.evidence_refs,
+                DecisionWindow {
+                    decided_at: expired_decision.decided_at,
+                    expires_at: expired_decision.expires_at,
+                },
+            ));
+        let expired_error = VaultController::audit_break_glass_decision(
+            &policy,
+            &request,
+            &expired_decision,
+            "redaction.compliance.v1",
+            "auditor.1",
+        )
+        .unwrap_err();
+        assert_eq!(expired_error, VaultError::MissingEvidence);
+
+        let mut future_decision = approved.clone();
+        future_decision.decided_at = Utc::now() + Duration::minutes(1);
+        future_decision.expires_at = future_decision.decided_at + Duration::minutes(10);
+        future_decision.decision_id =
+            expected_break_glass_decision_id(BreakGlassDecisionIdPayload::new(
+                &policy,
+                &request,
+                &future_decision.decision,
+                &future_decision.approval_ref,
+                future_decision.audit_required,
+                &future_decision.evidence_refs,
+                DecisionWindow {
+                    decided_at: future_decision.decided_at,
+                    expires_at: future_decision.expires_at,
+                },
+            ));
+        let future_error = VaultController::audit_break_glass_decision(
+            &policy,
+            &request,
+            &future_decision,
+            "redaction.compliance.v1",
+            "auditor.1",
+        )
+        .unwrap_err();
+        assert_eq!(future_error, VaultError::MissingEvidence);
+
+        let mut unaudited_decision = approved;
+        unaudited_decision.audit_required = false;
+        let unaudited_error = VaultController::audit_break_glass_decision(
+            &policy,
+            &request,
+            &unaudited_decision,
+            "redaction.compliance.v1",
+            "auditor.1",
+        )
+        .unwrap_err();
+        assert_eq!(unaudited_error, VaultError::MissingEvidence);
     }
 
     #[test]
@@ -5208,6 +7100,164 @@ mod tests {
         record.policy.quorum_approvers = 1;
 
         let tamper_error = VaultController::load_tenant_policy_pack(&record).unwrap_err();
+        assert_eq!(tamper_error, VaultError::MissingEvidence);
+    }
+
+    #[test]
+    fn production_adapter_provider_config_record_roundtrips_with_hash_binding() {
+        let config = provider_config(
+            ProductionAdapterKind::ExternalSecretManager,
+            "kms://tenant.a/prod",
+        );
+        let record = VaultController::seal_production_adapter_provider_config(
+            config.clone(),
+            vec!["provider.config.review.1".into()],
+            "vault.controller",
+        )
+        .unwrap();
+
+        let loaded = VaultController::load_production_adapter_provider_config(&record).unwrap();
+
+        assert_eq!(loaded, config);
+        assert_eq!(record.tenant_id, "tenant.a");
+        assert_eq!(record.provider_ref, "kms://tenant.a/prod");
+        assert!(record
+            .config_hash
+            .starts_with("production_adapter_provider_config_hash."));
+        assert!(record
+            .record_id
+            .starts_with("production_adapter_provider_config_record."));
+        assert!(record
+            .evidence_refs
+            .contains(&"provider.config.review.1".into()));
+        assert!(record.evidence_refs.contains(&record.config_id));
+        assert!(record
+            .evidence_refs
+            .contains(&record.adapter_deployment_ref));
+    }
+
+    #[test]
+    fn production_adapter_provider_config_record_rejects_tamper_and_placeholders() {
+        let config = provider_config(
+            ProductionAdapterKind::ExternalSecretManager,
+            "kms://tenant.a/prod",
+        );
+        let missing_error = VaultController::seal_production_adapter_provider_config(
+            config.clone(),
+            vec![],
+            "vault.controller",
+        )
+        .unwrap_err();
+        assert_eq!(missing_error, VaultError::MissingEvidence);
+
+        let mut local_mode = config.clone();
+        local_mode.allowed_runtime_mode = ProductionAdapterRuntimeMode::LocalMock;
+        let local_error = VaultController::seal_production_adapter_provider_config(
+            local_mode,
+            vec!["provider.config.review.1".into()],
+            "vault.controller",
+        )
+        .unwrap_err();
+        assert_eq!(local_error, VaultError::MissingEvidence);
+
+        let mut record = VaultController::seal_production_adapter_provider_config(
+            config,
+            vec!["provider.config.review.1".into()],
+            "vault.controller",
+        )
+        .unwrap();
+        record.config.provider_policy_ref = "provider-policy://tenant.a/changed".into();
+
+        let tamper_error =
+            VaultController::load_production_adapter_provider_config(&record).unwrap_err();
+        assert_eq!(tamper_error, VaultError::TenantMismatch);
+    }
+
+    #[test]
+    fn production_adapter_readiness_contract_record_roundtrips_with_config_binding() {
+        let config_record = provider_config_record(
+            ProductionAdapterKind::ExternalSecretManager,
+            "kms://tenant.a/prod",
+        );
+        let contract = readiness_contract(&config_record);
+        let record = VaultController::seal_production_adapter_readiness_contract(
+            contract.clone(),
+            &config_record,
+            vec!["adapter.contract.review.1".into()],
+            "vault.controller",
+        )
+        .unwrap();
+
+        let loaded =
+            VaultController::load_production_adapter_readiness_contract(&record, &config_record)
+                .unwrap();
+
+        assert_eq!(loaded, contract);
+        assert_eq!(record.tenant_id, "tenant.a");
+        assert_eq!(record.provider_config_record_ref, config_record.record_id);
+        assert_eq!(record.provider_config_hash, config_record.config_hash);
+        assert!(record
+            .contract_hash
+            .starts_with("production_adapter_readiness_contract_hash."));
+        assert!(record
+            .record_id
+            .starts_with("production_adapter_readiness_contract_record."));
+        assert!(record.evidence_refs.contains(&record.contract_id));
+        assert!(record
+            .evidence_refs
+            .contains(&record.provider_config_record_ref));
+    }
+
+    #[test]
+    fn production_adapter_readiness_contract_rejects_tamper_and_mismatch() {
+        let config_record = provider_config_record(
+            ProductionAdapterKind::ExternalSecretManager,
+            "kms://tenant.a/prod",
+        );
+        let contract = readiness_contract(&config_record);
+        let missing_error = VaultController::seal_production_adapter_readiness_contract(
+            contract.clone(),
+            &config_record,
+            vec![],
+            "vault.controller",
+        )
+        .unwrap_err();
+        assert_eq!(missing_error, VaultError::MissingEvidence);
+
+        let mut local_mode = contract.clone();
+        local_mode.required_runtime_mode = ProductionAdapterRuntimeMode::LocalMock;
+        let local_error = VaultController::seal_production_adapter_readiness_contract(
+            local_mode,
+            &config_record,
+            vec!["adapter.contract.review.1".into()],
+            "vault.controller",
+        )
+        .unwrap_err();
+        assert_eq!(local_error, VaultError::MissingEvidence);
+
+        let mut mismatched = contract.clone();
+        mismatched.provider_config_hash = "production_adapter_provider_config_hash.changed".into();
+        let mismatch_error = VaultController::seal_production_adapter_readiness_contract(
+            mismatched,
+            &config_record,
+            vec!["adapter.contract.review.1".into()],
+            "vault.controller",
+        )
+        .unwrap_err();
+        assert_eq!(mismatch_error, VaultError::TenantMismatch);
+
+        let mut record = VaultController::seal_production_adapter_readiness_contract(
+            contract,
+            &config_record,
+            vec!["adapter.contract.review.1".into()],
+            "vault.controller",
+        )
+        .unwrap();
+        record.contract.required_healthcheck_ref = "health://tenant.a/changed".into();
+
+        let tamper_error =
+            VaultController::load_production_adapter_readiness_contract(&record, &config_record)
+                .unwrap_err();
         assert_eq!(tamper_error, VaultError::MissingEvidence);
     }
 
@@ -5396,6 +7446,17 @@ mod tests {
             VaultController::load_p1_execution_readiness_profile(&record, &policy).unwrap(),
             production_profile
         );
+
+        let mut tampered_ready = ready;
+        tampered_ready.decision_id = "production_readiness.tampered".into();
+        let tampered_error = VaultController::seal_production_p1_execution_readiness_profile(
+            &policy,
+            P1ExecutionReadinessProfile::production("tenant.a", vec!["file.read".into()]),
+            &tampered_ready,
+            "vault.controller",
+        )
+        .unwrap_err();
+        assert_eq!(tampered_error, VaultError::MissingEvidence);
     }
 
     #[test]
@@ -5460,6 +7521,17 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(tampered_readiness_error, VaultError::MissingEvidence);
+
+        let mut tampered_readiness_id = ready.clone();
+        tampered_readiness_id.decision_id = "production_readiness.tampered".into();
+        let tampered_readiness_id_error =
+            VaultController::load_p1_execution_readiness_profile_with_production_readiness(
+                &record,
+                &policy_record,
+                Some(&tampered_readiness_id),
+            )
+            .unwrap_err();
+        assert_eq!(tampered_readiness_id_error, VaultError::MissingEvidence);
 
         let mut tampered_record = record;
         tampered_record.production_readiness_evidence_hash =
@@ -5588,6 +7660,17 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(direct_ticket_error, VaultError::MissingEvidence);
+
+        let mut tampered_id_decision = decision.clone();
+        tampered_id_decision.decision_id = "p1_execution_readiness.tampered".into();
+        let tampered_id_error = VaultController::audit_p1_execution_readiness(
+            &tampered_id_decision,
+            &record,
+            "redaction.compliance.v1",
+            "auditor.1",
+        )
+        .unwrap_err();
+        assert_eq!(tampered_id_error, VaultError::MissingEvidence);
 
         let mut missing_profile_evidence_decision = decision;
         missing_profile_evidence_decision
@@ -6319,6 +8402,95 @@ mod tests {
     }
 
     #[test]
+    fn compliance_export_delivery_decision_requires_sealed_readiness_contract() {
+        let policy_record = VaultController::seal_tenant_policy_pack(
+            tenant_policy(),
+            vec!["policy.approved.1".into()],
+            "vault.controller",
+        )
+        .unwrap();
+        let export = VaultController::audit_export_record(
+            "tenant.a",
+            "run.compliance.contract",
+            AuditExportRecordKind::Run,
+            "redaction.compliance.v1",
+            vec!["ledger.contract".into(), "proof.contract".into()],
+            "auditor.1",
+        )
+        .unwrap();
+        let bundle = VaultController::compliance_export_bundle(
+            "run.compliance.contract",
+            &policy_record,
+            std::slice::from_ref(&export),
+            &[],
+            None,
+            "auditor.1",
+        )
+        .unwrap();
+        let (adapter_decision, config_record, contract_record) = adapter_decision_with_records(
+            ProductionAdapterKind::ComplianceAuditExport,
+            "compliance-store://tenant.a/prod-archive",
+        );
+        let mut evidence = compliance_delivery_evidence(&bundle);
+        evidence.adapter_decision_ref = Some(adapter_decision.decision_id.clone());
+        let decision = VaultController::verify_compliance_export_delivery_with_readiness_contract(
+            &bundle,
+            &evidence,
+            &adapter_decision,
+            &config_record,
+            &contract_record,
+        );
+
+        assert_eq!(
+            decision.decision,
+            ComplianceExportDeliveryDecisionKind::Verified
+        );
+        assert_eq!(
+            decision.adapter_decision_ref,
+            Some(adapter_decision.decision_id.clone())
+        );
+        assert!(decision.evidence_refs.contains(&config_record.record_id));
+        assert!(decision.evidence_refs.contains(&contract_record.record_id));
+
+        let swapped_config_record = provider_config_record(
+            ProductionAdapterKind::RotationEnforcement,
+            "rotation://tenant.a/30d-enforced",
+        );
+        let rejected_config =
+            VaultController::verify_compliance_export_delivery_with_readiness_contract(
+                &bundle,
+                &evidence,
+                &adapter_decision,
+                &swapped_config_record,
+                &contract_record,
+            );
+        assert_eq!(
+            rejected_config.decision,
+            ComplianceExportDeliveryDecisionKind::Rejected
+        );
+        assert_ne!(rejected_config.decision_id, decision.decision_id);
+
+        let swapped_config_record = provider_config_record(
+            ProductionAdapterKind::RotationEnforcement,
+            "rotation://tenant.a/30d-enforced",
+        );
+        let swapped_contract_record = readiness_contract_record(&swapped_config_record);
+        let rejected_contract =
+            VaultController::verify_compliance_export_delivery_with_readiness_contract(
+                &bundle,
+                &evidence,
+                &adapter_decision,
+                &swapped_config_record,
+                &swapped_contract_record,
+            );
+        assert_eq!(
+            rejected_contract.decision,
+            ComplianceExportDeliveryDecisionKind::Rejected
+        );
+        assert_ne!(rejected_contract.decision_id, decision.decision_id);
+    }
+
+    #[test]
     fn compliance_export_delivery_decision_carries_readiness_evidence_hash() {
         let policy = tenant_policy();
         let policy_record = VaultController::seal_tenant_policy_pack(
@@ -6457,7 +8629,13 @@ mod tests {
     fn production_adapter_evidence_verification_is_tenant_bound_and_fail_closed() {
         let evidence =
             adapter_evidence(ProductionAdapterKind::AuthProvider, "oidc://prod/tenant.a");
-        let decision = VaultController::verify_production_adapter_evidence(&evidence);
+        let config_record =
+            provider_config_record(ProductionAdapterKind::AuthProvider, "oidc://prod/tenant.a");
+        let decision =
+            VaultController::verify_production_adapter_evidence_with_provider_config_record(
+                &evidence,
+                &config_record,
+            );
 
         assert_eq!(
             decision.decision,
@@ -6466,8 +8644,40 @@ mod tests {
         assert_eq!(decision.tenant_id, evidence.tenant_id);
         assert_eq!(decision.evidence_id, evidence.evidence_id);
         assert_eq!(decision.kind, evidence.kind);
+        assert_eq!(decision.provider_config_record_ref, config_record.record_id);
+        assert_eq!(decision.provider_config_hash, config_record.config_hash);
+        assert!(!decision.readiness_contract_ref.is_empty());
+        assert!(!decision.readiness_contract_hash.is_empty());
+        assert_eq!(
+            decision.runtime_mode,
+            ProductionAdapterRuntimeMode::ExternalVerified
+        );
         assert!(decision.evidence_refs.contains(&evidence.attestation_ref));
         assert!(decision.evidence_refs.contains(&evidence.healthcheck_ref));
+        assert!(decision
+            .evidence_refs
+            .contains(&evidence.adapter_deployment_ref));
+        assert!(decision
+            .evidence_refs
+            .contains(&evidence.adapter_config_ref));
+        assert!(decision
+            .evidence_refs
+            .contains(&evidence.adapter_config_hash));
+        assert!(decision
+            .evidence_refs
+            .contains(&evidence.provider_policy_ref));
+        assert!(decision
+            .evidence_refs
+            .contains(&evidence.provider_config_record_ref));
+        assert!(decision
+            .evidence_refs
+            .contains(&evidence.provider_config_hash));
+        assert!(decision
+            .evidence_refs
+            .contains(&evidence.readiness_contract_ref));
+        assert!(decision
+            .evidence_refs
+            .contains(&evidence.readiness_contract_hash));
 
         let mut placeholder = evidence;
         placeholder.healthcheck_ref = "mock-healthcheck".into();
@@ -6478,17 +8688,130 @@ mod tests {
             ProductionAdapterVerificationKind::Rejected
         );
         assert!(!rejected.reasons.is_empty());
+
+        let mut local_mock = adapter_evidence(
+            ProductionAdapterKind::ExternalSecretManager,
+            "kms://tenant.a/prod",
+        );
+        local_mock.runtime_mode = ProductionAdapterRuntimeMode::LocalMock;
+        let rejected_local = VaultController::verify_production_adapter_evidence(&local_mock);
+        assert_eq!(
+            rejected_local.decision,
+            ProductionAdapterVerificationKind::Rejected
+        );
+        assert!(rejected_local
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("external verified runtime")));
+
+        let mut placeholder_config = adapter_evidence(
+            ProductionAdapterKind::ExternalSecretManager,
+            "kms://tenant.a/prod",
+        );
+        placeholder_config.adapter_config_ref = "adapter-config://test/secret-manager".into();
+        let rejected_config =
+            VaultController::verify_production_adapter_evidence(&placeholder_config);
+        assert_eq!(
+            rejected_config.decision,
+            ProductionAdapterVerificationKind::Rejected
+        );
+        assert!(!rejected_config.reasons.is_empty());
+
+        let mut placeholder_deployment = adapter_evidence(
+            ProductionAdapterKind::ExternalSecretManager,
+            "kms://tenant.a/prod",
+        );
+        placeholder_deployment.adapter_deployment_ref =
+            "adapter-deployment://example/secret-manager".into();
+        let rejected_deployment =
+            VaultController::verify_production_adapter_evidence(&placeholder_deployment);
+        assert_eq!(
+            rejected_deployment.decision,
+            ProductionAdapterVerificationKind::Rejected
+        );
+        assert!(!rejected_deployment.reasons.is_empty());
+
+        let mut placeholder_policy = adapter_evidence(
+            ProductionAdapterKind::ExternalSecretManager,
+            "kms://tenant.a/prod",
+        );
+        placeholder_policy.provider_policy_ref = "provider-policy://example/secret-manager".into();
+        let rejected_policy =
+            VaultController::verify_production_adapter_evidence(&placeholder_policy);
+        assert_eq!(
+            rejected_policy.decision,
+            ProductionAdapterVerificationKind::Rejected
+        );
+        assert!(!rejected_policy.reasons.is_empty());
+
+        let mut missing_config_record = adapter_evidence(
+            ProductionAdapterKind::ExternalSecretManager,
+            "kms://tenant.a/prod",
+        );
+        missing_config_record.provider_config_record_ref = String::new();
+        let rejected_config_record =
+            VaultController::verify_production_adapter_evidence(&missing_config_record);
+        assert_eq!(
+            rejected_config_record.decision,
+            ProductionAdapterVerificationKind::Rejected
+        );
+        assert!(!rejected_config_record.reasons.is_empty());
+
+        let mut provider_mismatch_record =
+            provider_config_record(ProductionAdapterKind::AuthProvider, "oidc://prod/tenant.a");
+        provider_mismatch_record.provider_ref = "oidc://prod/tenant.a/other".into();
+        let rejected_mismatch =
+            VaultController::verify_production_adapter_evidence_with_provider_config_record(
+                &adapter_evidence(ProductionAdapterKind::AuthProvider, "oidc://prod/tenant.a"),
+                &provider_mismatch_record,
+            );
+        assert_eq!(
+            rejected_mismatch.decision,
+            ProductionAdapterVerificationKind::Rejected
+        );
+        assert!(rejected_mismatch
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("sealed provider config record")));
+
+        let evidence =
+            adapter_evidence(ProductionAdapterKind::AuthProvider, "oidc://prod/tenant.a");
+        let config_record =
+            provider_config_record(ProductionAdapterKind::AuthProvider, "oidc://prod/tenant.a");
+        let mut contract_record = readiness_contract_record(&config_record);
+        contract_record.contract.required_attestation_ref =
+            "attestation://tenant.a/AuthProvider/other".into();
+        let rejected_contract =
+            VaultController::verify_production_adapter_evidence_with_readiness_contract(
+                &evidence,
+                &config_record,
+                &contract_record,
+            );
+        assert_eq!(
+            rejected_contract.decision,
+            ProductionAdapterVerificationKind::Rejected
+        );
+        assert!(rejected_contract
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("sealed readiness contract record")));
     }
 
     #[test]
     fn production_auth_decision_is_provider_and_adapter_bound_fail_closed() {
         let hardening = hardening_evidence();
-        let adapter_decision = VaultController::verify_production_adapter_evidence(
-            &adapter_evidence(ProductionAdapterKind::AuthProvider, "oidc://prod/tenant.a"),
+        let (adapter_decision, config_record, contract_record) = adapter_decision_with_records(
+            ProductionAdapterKind::AuthProvider,
+            "oidc://prod/tenant.a",
         );
         let evidence = production_auth_evidence(&adapter_decision);
-        let decision =
-            VaultController::verify_production_auth(&hardening, &adapter_decision, &evidence);
+        let decision = VaultController::verify_production_auth_with_readiness_contract(
+            &hardening,
+            &adapter_decision,
+            &evidence,
+            &config_record,
+            &contract_record,
+        );
 
         assert_eq!(decision.decision, ProductionAuthDecisionKind::Verified);
         assert_eq!(decision.tenant_id, "tenant.a");
@@ -6496,6 +8819,10 @@ mod tests {
         assert!(decision
             .evidence_refs
             .contains(&adapter_decision.decision_id));
+        assert!(decision.evidence_refs.contains(&contract_record.record_id));
+        assert!(decision
+            .evidence_refs
+            .contains(&contract_record.contract_hash));
         assert!(decision.evidence_refs.contains(&evidence.evidence_id));
         assert!(decision.evidence_refs.contains(&evidence.jwks_ref));
 
@@ -6538,23 +8865,43 @@ mod tests {
             ProductionAuthDecisionKind::Rejected
         );
         assert!(!rejected_adapter.reasons.is_empty());
+
+        let mut swapped_contract_record = contract_record;
+        swapped_contract_record.record_id =
+            "production_adapter_readiness_contract_record.swapped".into();
+        let rejected_contract = VaultController::verify_production_auth_with_readiness_contract(
+            &hardening,
+            &adapter_decision,
+            &production_auth_evidence(&adapter_decision),
+            &config_record,
+            &swapped_contract_record,
+        );
+        assert_eq!(
+            rejected_contract.decision,
+            ProductionAuthDecisionKind::Rejected
+        );
+        assert!(rejected_contract
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("sealed adapter readiness contract")));
     }
 
     #[test]
     fn external_secret_manager_decision_is_credential_and_adapter_bound_fail_closed() {
         let credential = credential();
         let hardening = hardening_evidence();
-        let adapter_decision =
-            VaultController::verify_production_adapter_evidence(&adapter_evidence(
-                ProductionAdapterKind::ExternalSecretManager,
-                "kms://tenant.a/prod",
-            ));
+        let (adapter_decision, config_record, contract_record) = adapter_decision_with_records(
+            ProductionAdapterKind::ExternalSecretManager,
+            "kms://tenant.a/prod",
+        );
         let evidence = external_secret_manager_evidence(&credential, &adapter_decision);
-        let decision = VaultController::verify_external_secret_manager(
+        let decision = VaultController::verify_external_secret_manager_with_readiness_contract(
             &credential,
             &hardening,
             &adapter_decision,
             &evidence,
+            &config_record,
+            &contract_record,
         );
 
         assert_eq!(
@@ -6568,6 +8915,10 @@ mod tests {
         assert!(decision
             .evidence_refs
             .contains(&adapter_decision.decision_id));
+        assert!(decision.evidence_refs.contains(&contract_record.record_id));
+        assert!(decision
+            .evidence_refs
+            .contains(&contract_record.contract_hash));
         assert!(decision.evidence_refs.contains(&evidence.evidence_id));
         assert!(decision.evidence_refs.contains(&evidence.hsm_partition_ref));
 
@@ -6616,6 +8967,27 @@ mod tests {
             ExternalSecretManagerDecisionKind::Rejected
         );
         assert!(!rejected_adapter.reasons.is_empty());
+
+        let mut swapped_config_record = config_record;
+        swapped_config_record.record_id =
+            "production_adapter_provider_config_record.swapped".into();
+        let rejected_contract =
+            VaultController::verify_external_secret_manager_with_readiness_contract(
+                &credential,
+                &hardening,
+                &adapter_decision,
+                &external_secret_manager_evidence(&credential, &adapter_decision),
+                &swapped_config_record,
+                &contract_record,
+            );
+        assert_eq!(
+            rejected_contract.decision,
+            ExternalSecretManagerDecisionKind::Rejected
+        );
+        assert!(rejected_contract
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("sealed adapter readiness contract")));
     }
 
     #[test]
@@ -6634,22 +9006,23 @@ mod tests {
                 RiskLevel::High,
             )
             .unwrap();
-        let adapter_decision =
-            VaultController::verify_production_adapter_evidence(&adapter_evidence(
-                ProductionAdapterKind::CryptographicVerifier,
-                "sigstore://tenant.a/verifier",
-            ));
+        let (adapter_decision, config_record, contract_record) = adapter_decision_with_records(
+            ProductionAdapterKind::CryptographicVerifier,
+            "sigstore://tenant.a/verifier",
+        );
         let evidence = cryptographic_verifier_evidence(
             &signature_decision,
             &trust_root_record,
             &adapter_decision,
         );
-        let decision = VaultController::verify_cryptographic_verifier(
+        let decision = VaultController::verify_cryptographic_verifier_with_readiness_contract(
             &hardening,
             &signature_decision,
             &trust_root_record,
             &adapter_decision,
             &evidence,
+            &config_record,
+            &contract_record,
         );
 
         assert_eq!(
@@ -6669,6 +9042,10 @@ mod tests {
         assert!(decision
             .evidence_refs
             .contains(&adapter_decision.decision_id));
+        assert!(decision.evidence_refs.contains(&contract_record.record_id));
+        assert!(decision
+            .evidence_refs
+            .contains(&contract_record.contract_hash));
         assert!(decision
             .evidence_refs
             .contains(&trust_root_record.trust_root_hash));
@@ -6736,19 +9113,49 @@ mod tests {
             CryptographicVerifierDecisionKind::Rejected
         );
         assert!(!rejected_adapter.reasons.is_empty());
+
+        let mut swapped_contract_record = contract_record;
+        swapped_contract_record.record_id =
+            "production_adapter_readiness_contract_record.swapped".into();
+        let rejected_contract =
+            VaultController::verify_cryptographic_verifier_with_readiness_contract(
+                &hardening,
+                &signature_decision,
+                &trust_root_record,
+                &adapter_decision,
+                &cryptographic_verifier_evidence(
+                    &signature_decision,
+                    &trust_root_record,
+                    &adapter_decision,
+                ),
+                &config_record,
+                &swapped_contract_record,
+            );
+        assert_eq!(
+            rejected_contract.decision,
+            CryptographicVerifierDecisionKind::Rejected
+        );
+        assert!(rejected_contract
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("sealed adapter readiness contract")));
     }
 
     #[test]
     fn hardened_sandbox_decision_is_profile_and_adapter_bound_fail_closed() {
         let hardening = hardening_evidence();
-        let adapter_decision =
-            VaultController::verify_production_adapter_evidence(&adapter_evidence(
-                ProductionAdapterKind::HardenedSandbox,
-                "container://tenant.a/hardened-v1",
-            ));
+        let (adapter_decision, config_record, contract_record) = adapter_decision_with_records(
+            ProductionAdapterKind::HardenedSandbox,
+            "container://tenant.a/hardened-v1",
+        );
         let evidence = hardened_sandbox_evidence(&adapter_decision);
-        let decision =
-            VaultController::verify_hardened_sandbox(&hardening, &adapter_decision, &evidence);
+        let decision = VaultController::verify_hardened_sandbox_with_readiness_contract(
+            &hardening,
+            &adapter_decision,
+            &evidence,
+            &config_record,
+            &contract_record,
+        );
 
         assert_eq!(decision.decision, HardenedSandboxDecisionKind::Verified);
         assert_eq!(decision.tenant_id, hardening.tenant_id);
@@ -6759,6 +9166,10 @@ mod tests {
         assert!(decision
             .evidence_refs
             .contains(&adapter_decision.decision_id));
+        assert!(decision.evidence_refs.contains(&contract_record.record_id));
+        assert!(decision
+            .evidence_refs
+            .contains(&contract_record.contract_hash));
         assert!(decision
             .evidence_refs
             .contains(&"syscall-policy://tenant.a/seccomp-prod".into()));
@@ -6805,6 +9216,25 @@ mod tests {
             HardenedSandboxDecisionKind::Rejected
         );
         assert!(!rejected_adapter.reasons.is_empty());
+
+        let mut swapped_config_record = config_record;
+        swapped_config_record.record_id =
+            "production_adapter_provider_config_record.swapped".into();
+        let rejected_contract = VaultController::verify_hardened_sandbox_with_readiness_contract(
+            &hardening,
+            &adapter_decision,
+            &hardened_sandbox_evidence(&adapter_decision),
+            &swapped_config_record,
+            &contract_record,
+        );
+        assert_eq!(
+            rejected_contract.decision,
+            HardenedSandboxDecisionKind::Rejected
+        );
+        assert!(rejected_contract
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("sealed adapter readiness contract")));
     }
 
     #[test]
@@ -6873,6 +9303,102 @@ mod tests {
             .unwrap_err();
         assert_eq!(mismatched_error, VaultError::MissingEvidence);
 
+        let mut config_swapped_decisions = adapter_decisions.clone();
+        config_swapped_decisions[0].adapter_config_hash =
+            stable_id("adapter_config_hash", &("swapped", "oidc://prod/tenant.a"));
+        let config_swapped_error =
+            VaultController::evaluate_production_readiness_with_adapter_decisions(
+                &policy,
+                &[credential()],
+                std::slice::from_ref(&signature_decision),
+                &hardening_evidence(),
+                &adapters,
+                &config_swapped_decisions,
+            )
+            .unwrap_err();
+        assert_eq!(config_swapped_error, VaultError::MissingEvidence);
+
+        let mut provider_config_swapped_decisions = adapter_decisions.clone();
+        provider_config_swapped_decisions[0].provider_config_hash =
+            "production_adapter_provider_config_hash.swapped".into();
+        let provider_config_swapped_error =
+            VaultController::evaluate_production_readiness_with_adapter_decisions(
+                &policy,
+                &[credential()],
+                std::slice::from_ref(&signature_decision),
+                &hardening_evidence(),
+                &adapters,
+                &provider_config_swapped_decisions,
+            )
+            .unwrap_err();
+        assert_eq!(provider_config_swapped_error, VaultError::MissingEvidence);
+
+        let mut provider_config_record_swapped_decisions = adapter_decisions.clone();
+        provider_config_record_swapped_decisions[0].provider_config_record_ref =
+            "production_adapter_provider_config_record.swapped".into();
+        let provider_config_record_swapped_error =
+            VaultController::evaluate_production_readiness_with_adapter_decisions(
+                &policy,
+                &[credential()],
+                std::slice::from_ref(&signature_decision),
+                &hardening_evidence(),
+                &adapters,
+                &provider_config_record_swapped_decisions,
+            )
+            .unwrap_err();
+        assert_eq!(
+            provider_config_record_swapped_error,
+            VaultError::MissingEvidence
+        );
+
+        let mut readiness_contract_swapped_decisions = adapter_decisions.clone();
+        readiness_contract_swapped_decisions[0].readiness_contract_hash =
+            "production_adapter_readiness_contract_hash.swapped".into();
+        let readiness_contract_swapped_error =
+            VaultController::evaluate_production_readiness_with_adapter_decisions(
+                &policy,
+                &[credential()],
+                std::slice::from_ref(&signature_decision),
+                &hardening_evidence(),
+                &adapters,
+                &readiness_contract_swapped_decisions,
+            )
+            .unwrap_err();
+        assert_eq!(
+            readiness_contract_swapped_error,
+            VaultError::MissingEvidence
+        );
+
+        let mut deployment_swapped_decisions = adapter_decisions.clone();
+        deployment_swapped_decisions[0].adapter_deployment_ref =
+            "adapter-deployment://tenant.a/AuthProvider/prod-b".into();
+        let deployment_swapped_error =
+            VaultController::evaluate_production_readiness_with_adapter_decisions(
+                &policy,
+                &[credential()],
+                std::slice::from_ref(&signature_decision),
+                &hardening_evidence(),
+                &adapters,
+                &deployment_swapped_decisions,
+            )
+            .unwrap_err();
+        assert_eq!(deployment_swapped_error, VaultError::MissingEvidence);
+
+        let mut policy_swapped_decisions = adapter_decisions.clone();
+        policy_swapped_decisions[0].provider_policy_ref =
+            "provider-policy://tenant.a/AuthProvider/alternate".into();
+        let policy_swapped_error =
+            VaultController::evaluate_production_readiness_with_adapter_decisions(
+                &policy,
+                &[credential()],
+                std::slice::from_ref(&signature_decision),
+                &hardening_evidence(),
+                &adapters,
+                &policy_swapped_decisions,
+            )
+            .unwrap_err();
+        assert_eq!(policy_swapped_error, VaultError::MissingEvidence);
+
         let mut rejected_decisions = adapter_decisions.clone();
         rejected_decisions[0].decision = ProductionAdapterVerificationKind::Rejected;
         let rejected_error = VaultController::evaluate_production_readiness_with_adapter_decisions(
@@ -6885,6 +9411,39 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(rejected_error, VaultError::MissingEvidence);
+
+        let mut configured_only_adapters = adapters.clone();
+        configured_only_adapters[0].runtime_mode = ProductionAdapterRuntimeMode::ExternalConfigured;
+        let configured_only_decisions = all_adapter_decisions(&configured_only_adapters);
+        assert_eq!(
+            configured_only_decisions[0].decision,
+            ProductionAdapterVerificationKind::Rejected
+        );
+        let configured_only_error =
+            VaultController::evaluate_production_readiness_with_adapter_decisions(
+                &policy,
+                &[credential()],
+                std::slice::from_ref(&signature_decision),
+                &hardening_evidence(),
+                &configured_only_adapters,
+                &configured_only_decisions,
+            )
+            .unwrap_err();
+        assert_eq!(configured_only_error, VaultError::MissingEvidence);
+
+        let mut tampered_id_decisions = adapter_decisions.clone();
+        tampered_id_decisions[0].decision_id = "production_adapter_verification.tampered".into();
+        let tampered_id_error =
+            VaultController::evaluate_production_readiness_with_adapter_decisions(
+                &policy,
+                &[credential()],
+                std::slice::from_ref(&signature_decision),
+                &hardening_evidence(),
+                &adapters,
+                &tampered_id_decisions,
+            )
+            .unwrap_err();
+        assert_eq!(tampered_id_error, VaultError::MissingEvidence);
 
         let cross_tenant_decisions = vec![ProductionAdapterVerificationDecision {
             tenant_id: "tenant.b".into(),
@@ -7069,6 +9628,362 @@ mod tests {
     }
 
     #[test]
+    fn production_readiness_rejects_tampered_production_auth_decision_id() {
+        let mut fixtures = production_hardening_decision_fixtures();
+        fixtures.auth_decision.decision_id = "production_auth.tampered".into();
+
+        let error = VaultController::evaluate_production_readiness_with_hardening_decision_set(
+            &tenant_policy(),
+            std::slice::from_ref(&fixtures.credential),
+            std::slice::from_ref(&fixtures.signature_decision),
+            &fixtures.hardening,
+            &fixtures.adapters,
+            &fixtures.adapter_decisions,
+            fixtures.decision_set(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error, VaultError::MissingEvidence);
+    }
+
+    #[test]
+    fn production_readiness_rejects_unbacked_production_auth_decision() {
+        let mut fixtures = production_hardening_decision_fixtures();
+        fixtures.auth_decision.evidence_refs = fixtures
+            .auth_decision
+            .evidence_refs
+            .iter()
+            .filter(|evidence_ref| {
+                !fixtures.adapter_decisions.iter().any(|adapter_decision| {
+                    adapter_decision.kind == ProductionAdapterKind::AuthProvider
+                        && (adapter_decision.decision_id == **evidence_ref
+                            || adapter_decision.evidence_refs.contains(evidence_ref))
+                })
+            })
+            .cloned()
+            .collect();
+        fixtures.auth_decision.decision_id =
+            expected_production_auth_decision_id(&fixtures.auth_decision);
+
+        let error = VaultController::evaluate_production_readiness_with_hardening_decision_set(
+            &tenant_policy(),
+            std::slice::from_ref(&fixtures.credential),
+            std::slice::from_ref(&fixtures.signature_decision),
+            &fixtures.hardening,
+            &fixtures.adapters,
+            &fixtures.adapter_decisions,
+            fixtures.decision_set(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error, VaultError::MissingEvidence);
+    }
+
+    #[test]
+    fn production_readiness_rejects_auth_decision_missing_sealed_adapter_refs() {
+        let mut fixtures = production_hardening_decision_fixtures();
+        let adapter_decision = fixtures
+            .adapter_decisions
+            .iter()
+            .find(|decision| decision.kind == ProductionAdapterKind::AuthProvider)
+            .unwrap();
+        fixtures.auth_decision.evidence_refs = fixtures
+            .auth_decision
+            .evidence_refs
+            .iter()
+            .filter(|evidence_ref| {
+                ![
+                    &adapter_decision.provider_config_record_ref,
+                    &adapter_decision.provider_config_hash,
+                    &adapter_decision.readiness_contract_ref,
+                    &adapter_decision.readiness_contract_hash,
+                ]
+                .contains(evidence_ref)
+            })
+            .cloned()
+            .collect();
+        fixtures.auth_decision.decision_id =
+            expected_production_auth_decision_id(&fixtures.auth_decision);
+
+        let error = VaultController::evaluate_production_readiness_with_hardening_decision_set(
+            &tenant_policy(),
+            std::slice::from_ref(&fixtures.credential),
+            std::slice::from_ref(&fixtures.signature_decision),
+            &fixtures.hardening,
+            &fixtures.adapters,
+            &fixtures.adapter_decisions,
+            fixtures.decision_set(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error, VaultError::MissingEvidence);
+    }
+
+    #[test]
+    fn production_readiness_rejects_tampered_external_secret_manager_decision_id() {
+        let mut fixtures = production_hardening_decision_fixtures();
+        fixtures.external_secret_manager_decisions[0].decision_id =
+            "external_secret_manager.tampered".into();
+
+        let error = VaultController::evaluate_production_readiness_with_hardening_decision_set(
+            &tenant_policy(),
+            std::slice::from_ref(&fixtures.credential),
+            std::slice::from_ref(&fixtures.signature_decision),
+            &fixtures.hardening,
+            &fixtures.adapters,
+            &fixtures.adapter_decisions,
+            fixtures.decision_set(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error, VaultError::MissingEvidence);
+    }
+
+    #[test]
+    fn production_readiness_rejects_tampered_cryptographic_verifier_decision_id() {
+        let mut fixtures = production_hardening_decision_fixtures();
+        fixtures.cryptographic_verifier_decisions[0].decision_id =
+            "cryptographic_verifier.tampered".into();
+
+        let error = VaultController::evaluate_production_readiness_with_hardening_decision_set(
+            &tenant_policy(),
+            std::slice::from_ref(&fixtures.credential),
+            std::slice::from_ref(&fixtures.signature_decision),
+            &fixtures.hardening,
+            &fixtures.adapters,
+            &fixtures.adapter_decisions,
+            fixtures.decision_set(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error, VaultError::MissingEvidence);
+    }
+
+    #[test]
+    fn production_readiness_rejects_tampered_hardened_sandbox_decision_id() {
+        let mut fixtures = production_hardening_decision_fixtures();
+        fixtures.hardened_sandbox_decisions[0].decision_id = "hardened_sandbox.tampered".into();
+
+        let error = VaultController::evaluate_production_readiness_with_hardening_decision_set(
+            &tenant_policy(),
+            std::slice::from_ref(&fixtures.credential),
+            std::slice::from_ref(&fixtures.signature_decision),
+            &fixtures.hardening,
+            &fixtures.adapters,
+            &fixtures.adapter_decisions,
+            fixtures.decision_set(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error, VaultError::MissingEvidence);
+    }
+
+    #[test]
+    fn production_readiness_rejects_unbacked_hardened_sandbox_decision() {
+        let mut fixtures = production_hardening_decision_fixtures();
+        fixtures.hardened_sandbox_decisions[0].evidence_refs = fixtures.hardened_sandbox_decisions
+            [0]
+        .evidence_refs
+        .iter()
+        .filter(|evidence_ref| {
+            !fixtures.adapter_decisions.iter().any(|adapter_decision| {
+                adapter_decision.kind == ProductionAdapterKind::HardenedSandbox
+                    && (adapter_decision.decision_id == **evidence_ref
+                        || adapter_decision.evidence_refs.contains(evidence_ref))
+            })
+        })
+        .cloned()
+        .collect();
+        fixtures.hardened_sandbox_decisions[0].decision_id =
+            expected_hardened_sandbox_decision_id(&fixtures.hardened_sandbox_decisions[0]);
+
+        let error = VaultController::evaluate_production_readiness_with_hardening_decision_set(
+            &tenant_policy(),
+            std::slice::from_ref(&fixtures.credential),
+            std::slice::from_ref(&fixtures.signature_decision),
+            &fixtures.hardening,
+            &fixtures.adapters,
+            &fixtures.adapter_decisions,
+            fixtures.decision_set(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error, VaultError::MissingEvidence);
+    }
+
+    #[test]
+    fn production_readiness_rejects_sandbox_decision_missing_sealed_adapter_refs() {
+        let mut fixtures = production_hardening_decision_fixtures();
+        let adapter_decision = fixtures
+            .adapter_decisions
+            .iter()
+            .find(|decision| decision.kind == ProductionAdapterKind::HardenedSandbox)
+            .unwrap();
+        fixtures.hardened_sandbox_decisions[0].evidence_refs = fixtures.hardened_sandbox_decisions
+            [0]
+        .evidence_refs
+        .iter()
+        .filter(|evidence_ref| {
+            ![
+                &adapter_decision.provider_config_record_ref,
+                &adapter_decision.provider_config_hash,
+                &adapter_decision.readiness_contract_ref,
+                &adapter_decision.readiness_contract_hash,
+            ]
+            .contains(evidence_ref)
+        })
+        .cloned()
+        .collect();
+        fixtures.hardened_sandbox_decisions[0].decision_id =
+            expected_hardened_sandbox_decision_id(&fixtures.hardened_sandbox_decisions[0]);
+
+        let error = VaultController::evaluate_production_readiness_with_hardening_decision_set(
+            &tenant_policy(),
+            std::slice::from_ref(&fixtures.credential),
+            std::slice::from_ref(&fixtures.signature_decision),
+            &fixtures.hardening,
+            &fixtures.adapters,
+            &fixtures.adapter_decisions,
+            fixtures.decision_set(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error, VaultError::MissingEvidence);
+    }
+
+    #[test]
+    fn production_readiness_rejects_tampered_rotation_hardening_evidence_ref() {
+        let mut fixtures = production_hardening_decision_fixtures();
+        fixtures.rotation_decisions[0].hardening_evidence_ref =
+            "production.hardening.evidence.tampered".into();
+
+        let error = VaultController::evaluate_production_readiness_with_hardening_decision_set(
+            &tenant_policy(),
+            std::slice::from_ref(&fixtures.credential),
+            std::slice::from_ref(&fixtures.signature_decision),
+            &fixtures.hardening,
+            &fixtures.adapters,
+            &fixtures.adapter_decisions,
+            fixtures.decision_set(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error, VaultError::MissingEvidence);
+    }
+
+    #[test]
+    fn production_readiness_rejects_tampered_rotation_decision_id() {
+        let mut fixtures = production_hardening_decision_fixtures();
+        fixtures.rotation_decisions[0].decision_id = "rotation_enforcement.tampered".into();
+
+        let error = VaultController::evaluate_production_readiness_with_hardening_decision_set(
+            &tenant_policy(),
+            std::slice::from_ref(&fixtures.credential),
+            std::slice::from_ref(&fixtures.signature_decision),
+            &fixtures.hardening,
+            &fixtures.adapters,
+            &fixtures.adapter_decisions,
+            fixtures.decision_set(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error, VaultError::MissingEvidence);
+    }
+
+    #[test]
+    fn production_readiness_rejects_unbacked_trust_root_storage_decision() {
+        let mut fixtures = production_hardening_decision_fixtures();
+        fixtures.trust_root_storage_decisions[0] = TrustRootStorageDecision {
+            evidence_refs: fixtures.trust_root_storage_decisions[0]
+                .evidence_refs
+                .iter()
+                .filter(|evidence_ref| {
+                    !fixtures.adapter_decisions.iter().any(|adapter_decision| {
+                        adapter_decision.kind == ProductionAdapterKind::ExecutorTrustRoots
+                            && (adapter_decision.decision_id == **evidence_ref
+                                || adapter_decision.evidence_refs.contains(evidence_ref))
+                    })
+                })
+                .cloned()
+                .collect(),
+            ..fixtures.trust_root_storage_decisions[0].clone()
+        };
+        fixtures.trust_root_storage_decisions[0].decision_id =
+            expected_trust_root_storage_decision_id(&fixtures.trust_root_storage_decisions[0]);
+
+        let error = VaultController::evaluate_production_readiness_with_hardening_decision_set(
+            &tenant_policy(),
+            std::slice::from_ref(&fixtures.credential),
+            std::slice::from_ref(&fixtures.signature_decision),
+            &fixtures.hardening,
+            &fixtures.adapters,
+            &fixtures.adapter_decisions,
+            fixtures.decision_set(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error, VaultError::MissingEvidence);
+    }
+
+    #[test]
+    fn production_readiness_rejects_tampered_secret_injection_evidence_ref() {
+        let mut fixtures = production_hardening_decision_fixtures();
+        fixtures.secret_injection_decisions[0].injection_evidence_ref =
+            "secret.injection.evidence.tampered".into();
+
+        let error = VaultController::evaluate_production_readiness_with_hardening_decision_set(
+            &tenant_policy(),
+            std::slice::from_ref(&fixtures.credential),
+            std::slice::from_ref(&fixtures.signature_decision),
+            &fixtures.hardening,
+            &fixtures.adapters,
+            &fixtures.adapter_decisions,
+            fixtures.decision_set(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error, VaultError::MissingEvidence);
+    }
+
+    #[test]
+    fn production_readiness_rejects_tampered_secret_injection_decision_id() {
+        let mut fixtures = production_hardening_decision_fixtures();
+        fixtures.secret_injection_decisions[0].decision_id = "secret_injection.tampered".into();
+
+        let error = VaultController::evaluate_production_readiness_with_hardening_decision_set(
+            &tenant_policy(),
+            std::slice::from_ref(&fixtures.credential),
+            std::slice::from_ref(&fixtures.signature_decision),
+            &fixtures.hardening,
+            &fixtures.adapters,
+            &fixtures.adapter_decisions,
+            fixtures.decision_set(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error, VaultError::MissingEvidence);
+    }
+
+    #[test]
+    fn production_readiness_rejects_tampered_signature_verification_decision_id() {
+        let mut fixtures = production_hardening_decision_fixtures();
+        fixtures.signature_decision.decision_id = "signature_verification.tampered".into();
+
+        let error = VaultController::evaluate_production_readiness_with_hardening_decision_set(
+            &tenant_policy(),
+            std::slice::from_ref(&fixtures.credential),
+            std::slice::from_ref(&fixtures.signature_decision),
+            &fixtures.hardening,
+            &fixtures.adapters,
+            &fixtures.adapter_decisions,
+            fixtures.decision_set(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error, VaultError::MissingEvidence);
+    }
+
+    #[test]
     fn production_readiness_hardening_decision_set_is_fail_closed() {
         let mut fixtures = production_hardening_decision_fixtures();
 
@@ -7199,6 +10114,13 @@ mod tests {
         assert_eq!(decision.rotation_ref, credential.rotation_ref);
         assert_eq!(decision.rotation_policy_ref, hardening.rotation_policy_ref);
         assert!(decision.evidence_refs.contains(&credential.credential_id));
+        assert_eq!(
+            decision.hardening_evidence_ref,
+            production_hardening_evidence_hash(&hardening)
+        );
+        assert!(decision
+            .evidence_refs
+            .contains(&decision.hardening_evidence_ref));
         assert!(decision
             .evidence_refs
             .contains(&"rotation://tenant.a/30d-enforced".into()));
@@ -7284,6 +10206,67 @@ mod tests {
     }
 
     #[test]
+    fn rotation_enforcement_decision_requires_sealed_readiness_contract() {
+        let credential = credential();
+        let hardening = hardening_evidence();
+        let (adapter_decision, config_record, contract_record) = adapter_decision_with_records(
+            ProductionAdapterKind::RotationEnforcement,
+            "rotation://tenant.a/30d-enforced",
+        );
+        let decision = VaultController::verify_rotation_enforcement_with_readiness_contract(
+            &credential,
+            &hardening,
+            &adapter_decision,
+            &config_record,
+            &contract_record,
+        );
+
+        assert_eq!(decision.decision, RotationEnforcementDecisionKind::Verified);
+        assert_eq!(
+            decision.adapter_decision_ref,
+            Some(adapter_decision.decision_id.clone())
+        );
+        assert!(decision.evidence_refs.contains(&config_record.record_id));
+        assert!(decision.evidence_refs.contains(&contract_record.record_id));
+
+        let swapped_config_record = provider_config_record(
+            ProductionAdapterKind::SecretInjection,
+            "injector://tenant.a/prod",
+        );
+        let rejected_config = VaultController::verify_rotation_enforcement_with_readiness_contract(
+            &credential,
+            &hardening,
+            &adapter_decision,
+            &swapped_config_record,
+            &contract_record,
+        );
+        assert_eq!(
+            rejected_config.decision,
+            RotationEnforcementDecisionKind::Rejected
+        );
+        assert_ne!(rejected_config.decision_id, decision.decision_id);
+
+        let swapped_config_record = provider_config_record(
+            ProductionAdapterKind::SecretInjection,
+            "injector://tenant.a/prod",
+        );
+        let swapped_contract_record = readiness_contract_record(&swapped_config_record);
+        let rejected_contract =
+            VaultController::verify_rotation_enforcement_with_readiness_contract(
+                &credential,
+                &hardening,
+                &adapter_decision,
+                &swapped_config_record,
+                &swapped_contract_record,
+            );
+        assert_eq!(
+            rejected_contract.decision,
+            RotationEnforcementDecisionKind::Rejected
+        );
+        assert_ne!(rejected_contract.decision_id, decision.decision_id);
+    }
+
+    #[test]
     fn secret_injection_decision_is_secret_use_and_sandbox_bound_fail_closed() {
         let credential = credential();
         let secret_use = VaultController::decide_secret_use(
@@ -7311,6 +10294,12 @@ mod tests {
         assert_eq!(decision.tenant_id, credential.tenant_id);
         assert_eq!(decision.credential_id, credential.credential_id);
         assert_eq!(decision.secret_use_decision_id, secret_use.decision_id);
+        assert_eq!(decision.injection_evidence_ref, evidence.evidence_id);
+        assert_eq!(decision.adapter_decision_ref, adapter_decision.decision_id);
+        assert_eq!(
+            decision.injection_receipt_ref,
+            evidence.injection_receipt_ref
+        );
         assert_eq!(
             decision.secret_injection_profile_ref,
             "injector://tenant.a/prod"
@@ -7323,6 +10312,9 @@ mod tests {
         assert!(decision
             .evidence_refs
             .contains(&adapter_decision.decision_id));
+        assert!(decision
+            .evidence_refs
+            .contains(&decision.injection_evidence_ref));
         assert!(decision
             .evidence_refs
             .contains(&evidence.injection_receipt_ref));
@@ -7341,6 +10333,106 @@ mod tests {
             SecretInjectionDecisionKind::Rejected
         );
         assert!(!rejected_secret_use.reasons.is_empty());
+
+        let mut forged_allowed_secret_use = secret_use.clone();
+        forged_allowed_secret_use.decision_id =
+            VaultController::decide_secret_use(&credential, &secret_request(RiskLevel::High), None)
+                .unwrap()
+                .decision_id;
+        forged_allowed_secret_use.approval_ref = None;
+        forged_allowed_secret_use.approval_policy = ApprovalPolicy::Quorum;
+        let mut forged_allowed_evidence = evidence.clone();
+        forged_allowed_evidence.secret_use_decision_id =
+            forged_allowed_secret_use.decision_id.clone();
+        let rejected_forged_allowed = VaultController::verify_secret_injection(
+            &credential,
+            &forged_allowed_secret_use,
+            &hardening,
+            &adapter_decision,
+            &forged_allowed_evidence,
+        );
+        assert_eq!(
+            rejected_forged_allowed.decision,
+            SecretInjectionDecisionKind::Rejected
+        );
+        assert!(!rejected_forged_allowed.reasons.is_empty());
+
+        let mut tampered_secret_use_id = secret_use.clone();
+        tampered_secret_use_id.decision_id = "secret_use_decision.tampered".into();
+        let mut tampered_secret_use_evidence = evidence.clone();
+        tampered_secret_use_evidence.secret_use_decision_id =
+            tampered_secret_use_id.decision_id.clone();
+        let rejected_secret_use_id = VaultController::verify_secret_injection(
+            &credential,
+            &tampered_secret_use_id,
+            &hardening,
+            &adapter_decision,
+            &tampered_secret_use_evidence,
+        );
+        assert_eq!(
+            rejected_secret_use_id.decision,
+            SecretInjectionDecisionKind::Rejected
+        );
+        assert!(!rejected_secret_use_id.reasons.is_empty());
+
+        let mut expired_secret_use = secret_use.clone();
+        expired_secret_use.expires_at = Utc::now() - Duration::minutes(1);
+        expired_secret_use.decision_id = expected_secret_use_decision_id(&expired_secret_use);
+        let mut expired_secret_use_evidence = evidence.clone();
+        expired_secret_use_evidence.secret_use_decision_id = expired_secret_use.decision_id.clone();
+        let rejected_expired_secret_use = VaultController::verify_secret_injection(
+            &credential,
+            &expired_secret_use,
+            &hardening,
+            &adapter_decision,
+            &expired_secret_use_evidence,
+        );
+        assert_eq!(
+            rejected_expired_secret_use.decision,
+            SecretInjectionDecisionKind::Rejected
+        );
+        assert!(!rejected_expired_secret_use.reasons.is_empty());
+
+        let mut future_secret_use = secret_use.clone();
+        future_secret_use.decided_at = Utc::now() + Duration::minutes(1);
+        future_secret_use.expires_at = future_secret_use.decided_at + Duration::minutes(15);
+        future_secret_use.decision_id = expected_secret_use_decision_id(&future_secret_use);
+        let mut future_secret_use_evidence = evidence.clone();
+        future_secret_use_evidence.secret_use_decision_id = future_secret_use.decision_id.clone();
+        let rejected_future_secret_use = VaultController::verify_secret_injection(
+            &credential,
+            &future_secret_use,
+            &hardening,
+            &adapter_decision,
+            &future_secret_use_evidence,
+        );
+        assert_eq!(
+            rejected_future_secret_use.decision,
+            SecretInjectionDecisionKind::Rejected
+        );
+        assert!(!rejected_future_secret_use.reasons.is_empty());
+
+        let mut scope_swapped_secret_use = secret_use.clone();
+        scope_swapped_secret_use.capability_id = "database.admin".into();
+        scope_swapped_secret_use.resource_ref = "db://prod/root".into();
+        scope_swapped_secret_use.risk_level = RiskLevel::Critical;
+        scope_swapped_secret_use.decision_id =
+            expected_secret_use_decision_id(&scope_swapped_secret_use);
+        let mut scope_swapped_evidence = evidence.clone();
+        scope_swapped_evidence.secret_use_decision_id =
+            scope_swapped_secret_use.decision_id.clone();
+        let rejected_scope_swapped_secret_use = VaultController::verify_secret_injection(
+            &credential,
+            &scope_swapped_secret_use,
+            &hardening,
+            &adapter_decision,
+            &scope_swapped_evidence,
+        );
+        assert_eq!(
+            rejected_scope_swapped_secret_use.decision,
+            SecretInjectionDecisionKind::Rejected
+        );
+        assert!(!rejected_scope_swapped_secret_use.reasons.is_empty());
 
         let mut placeholder_receipt = evidence.clone();
         placeholder_receipt.injection_receipt_ref = "mock-receipt".into();
@@ -7390,6 +10482,76 @@ mod tests {
             SecretInjectionDecisionKind::Rejected
         );
         assert!(!rejected_adapter.reasons.is_empty());
+    }
+
+    #[test]
+    fn secret_injection_decision_requires_sealed_readiness_contract() {
+        let credential = credential();
+        let secret_use = VaultController::decide_secret_use(
+            &credential,
+            &secret_request(RiskLevel::High),
+            Some(&approval("secret.req.1")),
+        )
+        .unwrap();
+        let hardening = hardening_evidence();
+        let (adapter_decision, config_record, contract_record) = adapter_decision_with_records(
+            ProductionAdapterKind::SecretInjection,
+            "injector://tenant.a/prod",
+        );
+        let evidence = secret_injection_evidence(&credential, &secret_use, &adapter_decision);
+        let decision = VaultController::verify_secret_injection_with_readiness_contract(
+            &credential,
+            &secret_use,
+            &hardening,
+            &adapter_decision,
+            &evidence,
+            &config_record,
+            &contract_record,
+        );
+
+        assert_eq!(decision.decision, SecretInjectionDecisionKind::Verified);
+        assert_eq!(decision.adapter_decision_ref, adapter_decision.decision_id);
+        assert!(decision.evidence_refs.contains(&config_record.record_id));
+        assert!(decision.evidence_refs.contains(&contract_record.record_id));
+
+        let swapped_config_record = provider_config_record(
+            ProductionAdapterKind::HardenedSandbox,
+            "container://tenant.a/hardened-v1",
+        );
+        let rejected_config = VaultController::verify_secret_injection_with_readiness_contract(
+            &credential,
+            &secret_use,
+            &hardening,
+            &adapter_decision,
+            &evidence,
+            &swapped_config_record,
+            &contract_record,
+        );
+        assert_eq!(
+            rejected_config.decision,
+            SecretInjectionDecisionKind::Rejected
+        );
+        assert_ne!(rejected_config.decision_id, decision.decision_id);
+
+        let swapped_config_record = provider_config_record(
+            ProductionAdapterKind::HardenedSandbox,
+            "container://tenant.a/hardened-v1",
+        );
+        let swapped_contract_record = readiness_contract_record(&swapped_config_record);
+        let rejected_contract = VaultController::verify_secret_injection_with_readiness_contract(
+            &credential,
+            &secret_use,
+            &hardening,
+            &adapter_decision,
+            &evidence,
+            &swapped_config_record,
+            &swapped_contract_record,
+        );
+        assert_eq!(
+            rejected_contract.decision,
+            SecretInjectionDecisionKind::Rejected
+        );
+        assert_ne!(rejected_contract.decision_id, decision.decision_id);
     }
 
     #[test]

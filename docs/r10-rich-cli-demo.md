@@ -62,6 +62,9 @@ The default entry opens the resident workbench. Use `q` to quit.
 - Backend output includes a local plan id, suggested plan steps, and blocked
   authority categories so the task tracker can explain what would require a
   real P1/P0 adapter.
+- The default backend asks `moxi-runtime` for read-only planner steps before
+  falling back to local planning, but it never issues tickets, executes,
+  verifies proofs, or commits ledger events.
 - Task Tracking shows the active turn first, keeping the latest backend plan
   visible before older session turns.
 - Read-only workspace facts are collected locally: cwd, Git status, Cargo state,

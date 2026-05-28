@@ -528,6 +528,11 @@ authority categories. The conversation body and Task Tracking detail render
 that artifact, making the TUI feel more like an agent workbench while still
 stopping all write, shell, Git/GitHub, ticket, proof, and ledger authority at
 the P2 boundary.
+The default backend now first asks `moxi-runtime` for a read-only planner plan
+using the shell/IDE read-only profile, maps those planner steps into Task
+Tracking, and falls back to the local plan only if the runtime planner is
+unavailable. This adapter does not call execution, ticket, proof, or ledger
+paths.
 Task Tracking now prioritizes the active turn before older turns, so the latest
 backend plan steps stay visible after a response completes. The right pane shows
 the backend plan id, local plan steps, and final P1/P0-adapter wait state before

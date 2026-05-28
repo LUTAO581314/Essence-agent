@@ -1264,6 +1264,7 @@ version = "0.2.0"
 dependencies = [
  "crossterm",
  "moxi-contracts",
+ "moxi-core",
  "moxi-runtime",
  "moxi-shells",
  "ratatui",

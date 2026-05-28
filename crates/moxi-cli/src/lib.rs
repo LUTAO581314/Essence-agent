@@ -4,7 +4,11 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use moxi_contracts::{RiskLevel, ShellAdapterManifest, ShellSurface};
-use moxi_runtime::{ResumeBlocker, RuntimeEventFeedSnapshot, RuntimeQuerySnapshot};
+use moxi_core::{file_read_capability, Kernel};
+use moxi_runtime::{
+    read_only_intent, PlannerStep, ResumeBlocker, RuntimeEventFeedSnapshot, RuntimePolicyProfile,
+    RuntimeQuerySnapshot, RuntimeSession,
+};
 use moxi_shells::{adapter_manifest, ShellController, ShellRequestDraft};
 use ratatui::{
     backend::{CrosstermBackend, TestBackend},
@@ -764,7 +768,9 @@ impl TuiAgentBackend for ReadOnlyWorkspaceBackend {
         if request.tools.iter().any(|tool| tool == "git.status") {
             response_tools.push("git.status".to_owned());
         }
-        let plan = read_only_backend_plan(&request);
+        let plan = RuntimePlanningAdapter
+            .plan(&request)
+            .unwrap_or_else(|| read_only_backend_plan(&request));
         let body = read_only_project_analysis(&request, &plan);
 
         TuiBackendResponse {
@@ -783,6 +789,41 @@ impl TuiAgentBackend for ReadOnlyWorkspaceBackend {
             next_step_detail: "waiting for a real P1/P0 backend adapter or owner command"
                 .to_owned(),
         }
+    }
+}
+
+#[derive(Default)]
+struct RuntimePlanningAdapter;
+
+impl RuntimePlanningAdapter {
+    fn plan(&self, request: &TuiBackendRequest<'_>) -> Option<TuiBackendPlan> {
+        let mut kernel = Kernel::new_in_memory(&request.workspace.cwd).ok()?;
+        kernel.register_capability(file_read_capability()).ok()?;
+        let runtime = RuntimeSession::new(kernel)
+            .with_policy_profile(RuntimePolicyProfile::shell_ide_readonly());
+        let intent = read_only_intent(request.task, &request.workspace.cwd, "file.read");
+        let planner = runtime.planner_plan(&intent).ok()?;
+        let steps = planner
+            .steps
+            .iter()
+            .map(runtime_planner_step_to_tui)
+            .collect::<Vec<_>>();
+        Some(TuiBackendPlan {
+            plan_id: format!("runtime-{}", planner.plan_id),
+            source: format!("runtime-planner:{:?}", planner.source),
+            steps,
+            blocked_authority: blocked_p2_authority(),
+        })
+    }
+}
+
+fn runtime_planner_step_to_tui(step: &PlannerStep) -> TuiBackendPlanStep {
+    TuiBackendPlanStep {
+        label: format!("{} via {}", step.capability_id, step.step_id),
+        detail: format!(
+            "{}; target={:?}:{}; risk={:?}",
+            step.rationale, step.target.resource_type, step.target.resource_ref, step.risk_level
+        ),
     }
 }
 
@@ -839,15 +880,19 @@ fn read_only_backend_plan(request: &TuiBackendRequest<'_>) -> TuiBackendPlan {
                     .to_owned(),
             },
         ],
-        blocked_authority: vec![
-            "write".to_owned(),
-            "shell.execute".to_owned(),
-            "git.github".to_owned(),
-            "ticket.issue".to_owned(),
-            "proof.verify".to_owned(),
-            "ledger.commit".to_owned(),
-        ],
+        blocked_authority: blocked_p2_authority(),
     }
+}
+
+fn blocked_p2_authority() -> Vec<String> {
+    vec![
+        "write".to_owned(),
+        "shell.execute".to_owned(),
+        "git.github".to_owned(),
+        "ticket.issue".to_owned(),
+        "proof.verify".to_owned(),
+        "ledger.commit".to_owned(),
+    ]
 }
 
 fn read_only_project_analysis(request: &TuiBackendRequest<'_>, plan: &TuiBackendPlan) -> String {
@@ -5526,7 +5571,7 @@ mod tests {
         assert!(snapshot
             .steps
             .iter()
-            .any(|step| step.label == "Plan: Summarize project state"));
+            .any(|step| step.label.starts_with("Plan: file.read via")));
         assert!(snapshot
             .steps
             .iter()
@@ -5759,11 +5804,9 @@ reasoning = "low"
         assert!(completed_reply.body.contains("focus=project status"));
         assert!(completed_reply
             .body
-            .contains("backend=read-only-workspace-backend"));
-        assert!(completed_reply.body.contains("plan=tui-readonly-turn-2"));
-        assert!(completed_reply
-            .body
-            .contains("first_step=\"Summarize project state\""));
+            .contains("backend=runtime-planner:Deterministic"));
+        assert!(completed_reply.body.contains("plan=runtime-plan_"));
+        assert!(completed_reply.body.contains("first_step=\"file.read via"));
         assert!(completed_reply.body.contains("blocked=write"));
         assert!(completed_reply.body.contains("context="));
         assert!(completed_reply.body.contains("agents="));
@@ -5784,12 +5827,12 @@ reasoning = "low"
             .session
             .steps
             .iter()
-            .any(|step| step.label == "Backend plan tui-readonly-turn-2"));
+            .any(|step| step.label.starts_with("Backend plan runtime-plan_")));
         assert!(state
             .session
             .steps
             .iter()
-            .any(|step| step.label == "Plan: Summarize project state"));
+            .any(|step| step.label.starts_with("Plan: file.read via")));
         assert!(state
             .session
             .steps
@@ -5845,12 +5888,12 @@ reasoning = "low"
         assert!(agents_response.body.contains("context=88%"));
         assert!(agents_response.body.contains("agents=1"));
         assert!(agents_response.body.contains("skills=2"));
-        assert_eq!(agents_response.plan.plan_id, "tui-readonly-turn-2");
-        assert_eq!(agents_response.plan.source, "read-only-workspace-backend");
-        assert_eq!(
-            agents_response.plan.steps[0].label,
-            "Summarize active agents"
-        );
+        assert!(agents_response.plan.plan_id.starts_with("runtime-plan_"));
+        assert_eq!(agents_response.plan.source, "runtime-planner:Deterministic");
+        assert!(agents_response.plan.steps[0]
+            .label
+            .starts_with("file.read via"));
+        assert!(agents_response.plan.steps[0].detail.contains("target=File"));
         assert!(agents_response
             .plan
             .blocked_authority
@@ -5868,10 +5911,9 @@ reasoning = "low"
             context_percent: 88,
         });
         assert!(verification.body.contains("focus=verification readiness"));
-        assert_eq!(
-            verification.plan.steps[0].label,
-            "Prepare verification plan"
-        );
+        assert!(verification.plan.steps[0]
+            .label
+            .starts_with("file.read via"));
         assert!(verification.body.contains("P0 remains required"));
     }
 
@@ -6193,9 +6235,9 @@ reasoning = "low"
         let text = String::from_utf8(output).unwrap();
 
         assert_eq!(code, 0);
-        assert!(text.contains("Backend plan tui-readonly-turn-2"));
-        assert!(text.contains("Plan: Inspect workspace context"));
-        assert!(text.contains("Plan: Wait for P0-capable adapter"));
+        assert!(text.contains("runtime-planner:Deterministic"));
+        assert!(text.contains("Plan: file.read via"));
+        assert!(text.contains("Await P1/P0 adapter"));
         assert!(text.contains("read-only backend response prepared"));
     }
 

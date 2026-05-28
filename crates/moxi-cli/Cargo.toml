@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 moxi-contracts = { path = "../moxi-contracts" }
+moxi-core = { path = "../moxi-core" }
 moxi-runtime = { path = "../moxi-runtime" }
 moxi-shells = { path = "../moxi-shells" }
 crossterm = "0.29"

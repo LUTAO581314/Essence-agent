@@ -457,11 +457,11 @@ message by default, PageUp/PageDown or scripted `chat-up`/`chat-down` switch to
 manual chat review, and the pane keeps a fixed status line plus hidden-line
 markers so older and newer messages remain discoverable without covering the
 input box or Task Tracking pane.
-User-submitted tasks now enter a local streaming visual state before completing:
-the conversation shows a `streaming` badge, the agent reply carries a loading
-marker and stream metadata, Task Tracking keeps the response-planning step
-active, and refresh advances the demo frame until the message is marked
-complete. This is still a P2-only visual state; no backend execution,
+User-submitted tasks now enter a staged streaming visual state before
+completing: the conversation shows a `streaming` badge, the agent reply carries
+loading and chunk metadata, Task Tracking advances from context gathering to
+model-response receipt, and refresh appends response chunks until the message is
+marked complete. This is still a P2-only visual state; no backend execution,
 authorization, ticket issuance, proof, or ledger commit occurs.
 `/context` is now state-backed. The session derives a context snapshot from cwd,
 Git status, Cargo workspace state, `docs/status.md`, `.moxi/agents.toml`, active
@@ -550,7 +550,8 @@ limit, bad endpoint, network, timeout, or unsupported response while keeping
 secrets redacted. Configured TUI task submissions now prefer a read-only
 OpenAI-compatible `/chat/completions` adapter that packages workspace facts,
 trust state, active agents, skills, and the owner task; provider/config errors
-fall back to local read-only analysis with redacted previews. Token streaming
+fall back to local read-only analysis with redacted previews. The TUI now stages
+complete provider replies into visible chunks; true provider chunk/SSE streaming
 remains next-step work, and the shell remains read-only/P2.
 Task Tracking now prioritizes the active turn before older turns, so the latest
 backend plan steps stay visible after a response completes. The right pane shows

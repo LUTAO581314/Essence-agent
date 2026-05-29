@@ -50,7 +50,8 @@ The default entry opens the resident workbench. Use `q` to quit.
 6. Point out `cwd`, config, trust, active agents, tools, skills, and snapshot path.
 7. Run `.\scripts\demo-r10-rich-cli.ps1`.
 8. In the workbench, type `inspect project status` and press Enter.
-9. Press `r` three times to advance the local streaming demo.
+9. Press `r` repeatedly to advance staged reply rendering until the turn
+   completes.
 10. Press `?` to open the command palette.
 11. Type `/con` and press Enter to show context sources.
 12. Type `commit and push current branch` and press Enter to show the risk prompt.
@@ -85,7 +86,8 @@ The default entry opens the resident workbench. Use `q` to quit.
 - Configured workbench tasks now use the OpenAI-compatible `/chat/completions`
   adapter in read-only mode. If config, network, provider, or response parsing
   fails, the TUI falls back to local read-only analysis and redacts error
-  previews.
+  previews. Replies are staged into visible chunks so the conversation feels
+  live while the terminal remains read-only.
 - Risk prompts are local intent capture only.
 - `/approve` inside the TUI does not grant write, shell, Git/GitHub, ticket,
   proof, or ledger authority.
@@ -100,7 +102,7 @@ The default entry opens the resident workbench. Use `q` to quit.
 - `Up` / `Down`: move command palette selection, or task selection when the
   palette is closed.
 - `PageUp` / `PageDown`: review conversation history.
-- `r`: advance the local streaming demo frame.
+- `r`: advance startup/loading frames and staged reply chunks.
 - `1` / `2` / `3` / `4` / `5`: jump to Boot / Trust / Setup / Agent Core /
   Workspace.
 - `q`: quit.

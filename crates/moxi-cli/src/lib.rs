@@ -228,6 +228,8 @@ struct TuiAgentSession {
     steps: Vec<TuiStep>,
     active_step_index: usize,
     loading_tick: usize,
+    #[serde(skip)]
+    pending_reply: Option<TuiPendingReply>,
     turn_count: usize,
 }
 
@@ -305,6 +307,7 @@ impl Default for TuiAgentSession {
             ],
             active_step_index: 1,
             loading_tick: 0,
+            pending_reply: None,
             turn_count: 1,
         }
     }
@@ -579,27 +582,40 @@ impl TuiAgentSession {
         ));
         self.active_step_index = self.steps.len().saturating_sub(2);
         self.loading_tick = 0;
+        self.pending_reply = None;
     }
 
     fn advance_loading(&mut self) {
-        let workspace = self.workspace.clone();
-        let trust = self.trust.status;
-        let agents = self.agents.clone();
-        let skills = self.skills.clone();
-        let tools = self.tools.clone();
-        let context_percent = self.context_snapshot().percent;
-        let Some(message) = self
+        let Some(message_index) = self
             .messages
-            .iter_mut()
-            .rev()
-            .find(|message| message.state == TuiMessageState::Streaming)
+            .iter()
+            .rposition(|message| message.state == TuiMessageState::Streaming)
         else {
             return;
         };
         self.loading_tick = self.loading_tick.saturating_add(1);
         let turn = self.turn_count;
-        if self.loading_tick >= 3 {
-            let task = message.task.as_deref().unwrap_or("<unknown task>");
+        if self.loading_tick < 3 {
+            let frame = loading_frame(self.loading_tick);
+            let message = &mut self.messages[message_index];
+            message.body = format!(
+                "{frame} Turn {turn} streaming: reading workspace facts, checking risk, and preparing model context..."
+            );
+            message.metadata.status = format!("stream tick {}", self.loading_tick);
+            return;
+        }
+
+        if self.pending_reply.is_none() {
+            let workspace = self.workspace.clone();
+            let trust = self.trust.status;
+            let agents = self.agents.clone();
+            let skills = self.skills.clone();
+            let tools = self.tools.clone();
+            let context_percent = self.context_snapshot().percent;
+            let task = self.messages[message_index]
+                .task
+                .as_deref()
+                .unwrap_or("<unknown task>");
             let request = TuiBackendRequest {
                 turn,
                 task,
@@ -613,23 +629,48 @@ impl TuiAgentSession {
             let response = ModelBackedReadOnlyBackend::new(&self.model_config)
                 .respond(request)
                 .unwrap_or_else(|error| ReadOnlyWorkspaceBackend.respond_with_note(request, error));
-            message.agent = response.agent;
-            message.role = response.role;
-            message.body = response.body;
-            message.metadata = response.metadata;
-            message.state = TuiMessageState::Complete;
-            let plan = response.plan;
             if let Some(step) = self.steps.get_mut(self.active_step_index) {
                 step.state = TuiStepState::Done;
-                step.detail = response.completed_step_detail;
+                step.detail = response.completed_step_detail.clone();
             }
-            self.append_backend_plan_steps(turn, plan, response.next_step_detail);
-        } else {
-            let frame = loading_frame(self.loading_tick);
-            message.body = format!(
-                "{frame} Turn {turn} streaming: reading workspace facts, checking risk, and preparing model context..."
+            if let Some(step) = self.steps.get_mut(self.active_step_index.saturating_add(1)) {
+                step.state = TuiStepState::Active;
+                step.label = "Receive model response".to_owned();
+                step.detail =
+                    "adapter response is ready; staged rendering is appending chunks".to_owned();
+            }
+            self.pending_reply = Some(TuiPendingReply::from_response(turn, response));
+        }
+
+        let done = {
+            let pending = self
+                .pending_reply
+                .as_mut()
+                .expect("pending reply is initialized above");
+            let message = &mut self.messages[message_index];
+            message.agent = pending.response.agent.clone();
+            message.role = pending.response.role.clone();
+            message.metadata = pending.response.metadata.clone();
+            message.body = pending.render_next_chunk(loading_frame(self.loading_tick));
+            message.metadata.status = format!(
+                "stream chunk {}/{} | backend: {}",
+                pending.cursor,
+                pending.chunks.len(),
+                pending.response.plan.source
             );
-            message.metadata.status = format!("stream tick {}", self.loading_tick);
+            pending.is_done()
+        };
+
+        if done {
+            let Some(pending) = self.pending_reply.take() else {
+                return;
+            };
+            let message = &mut self.messages[message_index];
+            message.body = pending.response.body.clone();
+            message.metadata = pending.response.metadata.clone();
+            message.state = TuiMessageState::Complete;
+            let plan = pending.response.plan;
+            self.append_backend_plan_steps(turn, plan, pending.response.next_step_detail);
         }
     }
 
@@ -766,6 +807,50 @@ struct TuiBackendResponse {
     plan: TuiBackendPlan,
     completed_step_detail: String,
     next_step_detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TuiPendingReply {
+    response: TuiBackendResponse,
+    chunks: Vec<String>,
+    cursor: usize,
+}
+
+impl TuiPendingReply {
+    fn from_response(turn: usize, response: TuiBackendResponse) -> Self {
+        let chunks = staged_reply_chunks(&response.body);
+        let chunks = if chunks.is_empty() {
+            vec![format!("Turn {turn} received an empty model reply.")]
+        } else {
+            chunks
+        };
+        Self {
+            response,
+            chunks,
+            cursor: 0,
+        }
+    }
+
+    fn render_next_chunk(&mut self, frame: &str) -> String {
+        if self.cursor < self.chunks.len() {
+            self.cursor += 1;
+        }
+        let visible = self.chunks[..self.cursor].join("");
+        if self.is_done() {
+            visible
+        } else {
+            format!(
+                "{}{} {}",
+                visible,
+                if visible.ends_with('\n') { "" } else { "\n" },
+                frame
+            )
+        }
+    }
+
+    fn is_done(&self) -> bool {
+        self.cursor >= self.chunks.len()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1153,6 +1238,29 @@ fn build_read_only_chat_prompt(request: TuiBackendRequest<'_>) -> String {
         request.skills.join(", "),
         request.tools.join(", ")
     )
+}
+
+fn staged_reply_chunks(body: &str) -> Vec<String> {
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    for segment in body.split_inclusive(['。', '.', '!', '?', '\n']) {
+        current.push_str(segment);
+        if current.chars().count() >= 48 || segment.ends_with('\n') {
+            chunks.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    if chunks.len() <= 1 && body.chars().count() > 72 {
+        chunks = body
+            .chars()
+            .collect::<Vec<_>>()
+            .chunks(56)
+            .map(|chunk| chunk.iter().collect::<String>())
+            .collect();
+    }
+    chunks
 }
 
 fn read_only_project_analysis(request: &TuiBackendRequest<'_>, plan: &TuiBackendPlan) -> String {
@@ -6774,6 +6882,36 @@ mod tests {
         assert!(error.contains("sk-v...0000"));
     }
 
+    #[test]
+    fn staged_reply_chunks_progress_before_completion() {
+        let body = "第一段说明 MOXI 正在读取上下文，并且会把当前工作区状态压缩为只读事实。第二段说明模型回复会分块显示，让主人看到回答正在逐步出现。第三段提醒 P0 仍然负责写入和执行，TUI 只负责展示和收集主人意图。";
+        let response = TuiBackendResponse {
+            agent: "moxi-agent".to_owned(),
+            role: "orchestrator".to_owned(),
+            body: body.to_owned(),
+            metadata: TuiMessageMeta::new(
+                "gpt-demo",
+                "medium",
+                ["model.chat"],
+                "state: complete | backend: read-only model",
+            ),
+            plan: read_only_backend_plan(&sample_backend_request("检查状态")),
+            completed_step_detail: "complete".to_owned(),
+            next_step_detail: "next".to_owned(),
+        };
+        let mut pending = TuiPendingReply::from_response(2, response);
+
+        let first = pending.render_next_chunk("[/]");
+        assert!(!pending.is_done());
+        assert!(first.contains("第一段"));
+        assert!(first.contains("[/]"));
+
+        while !pending.is_done() {
+            pending.render_next_chunk("[-]");
+        }
+        assert!(pending.is_done());
+    }
+
     fn test_doctor_config(endpoint: &str) -> TuiModelConfig {
         TuiModelConfig {
             provider: TuiModelProvider::Custom,
@@ -6784,6 +6922,65 @@ mod tests {
             },
             config_path: ".moxi\\config.toml".to_owned(),
             config_state: "present".to_owned(),
+        }
+    }
+
+    fn advance_session_until_complete(session: &mut TuiAgentSession) {
+        for _ in 0..32 {
+            if !session.is_streaming() {
+                return;
+            }
+            session.advance_loading();
+        }
+        panic!("session did not finish staged reply");
+    }
+
+    fn advance_state_until_complete(state: &mut TuiState) {
+        for _ in 0..32 {
+            if !state.session.is_streaming() {
+                return;
+            }
+            apply_tui_key(state, &TuiKey::Refresh);
+        }
+        panic!("state did not finish staged reply");
+    }
+
+    fn sample_backend_request(task: &str) -> TuiBackendRequest<'_> {
+        let workspace = Box::leak(Box::new(WorkspaceFacts {
+            cwd: "C:\\demo".to_owned(),
+            short_path: "demo".to_owned(),
+            config_path: ".moxi\\agents.toml".to_owned(),
+            config_state: "present".to_owned(),
+            trust_path: ".moxi\\trust.toml".to_owned(),
+            trust_state: "present".to_owned(),
+            git_state: "main clean".to_owned(),
+            cargo_state: "workspace 2 crates".to_owned(),
+            docs_state: "present".to_owned(),
+            trust: "pending".to_owned(),
+        }));
+        let agents = Box::leak(Box::new(vec![TuiAgentProfile {
+            name: "moxi-agent".to_owned(),
+            role: "orchestrator".to_owned(),
+            model: "backend-local".to_owned(),
+            reasoning: "high".to_owned(),
+        }]));
+        let skills = Box::leak(Box::new(vec![
+            "tui.design".to_owned(),
+            "risk.review".to_owned(),
+        ]));
+        let tools = Box::leak(Box::new(vec![
+            "repo.inspect".to_owned(),
+            "git.status".to_owned(),
+        ]));
+        TuiBackendRequest {
+            turn: 2,
+            task,
+            workspace,
+            trust: TuiTrustStatus::KnownReadOnly,
+            agents,
+            skills,
+            tools,
+            context_percent: 88,
         }
     }
 
@@ -6895,9 +7092,7 @@ mod tests {
         };
 
         session.submit_user_task("检查当前项目状态");
-        session.advance_loading();
-        session.advance_loading();
-        session.advance_loading();
+        advance_session_until_complete(&mut session);
         env::remove_var(env_name);
 
         let message = session.messages.last().unwrap();
@@ -6922,9 +7117,7 @@ mod tests {
             ..TuiAgentSession::default()
         };
         session.submit_user_task("inspect project status");
-        session.advance_loading();
-        session.advance_loading();
-        session.advance_loading();
+        advance_session_until_complete(&mut session);
 
         let path = session.save_persistence_snapshot().unwrap();
         assert_eq!(
@@ -7158,6 +7351,17 @@ reasoning = "low"
 
         apply_tui_key(&mut state, &TuiKey::Refresh);
         apply_tui_key(&mut state, &TuiKey::Refresh);
+        assert!(state.session.is_streaming());
+        let staged_reply = state
+            .session
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.agent == "moxi-agent")
+            .unwrap();
+        assert!(staged_reply.metadata.status.contains("stream chunk 1/"));
+
+        advance_state_until_complete(&mut state);
 
         assert!(!state.session.is_streaming());
         assert!(state.command_status.contains("complete"));
@@ -7434,9 +7638,7 @@ reasoning = "low"
         assert_eq!(state.session.turn_count, 2);
         assert!(state.session.is_streaming());
 
-        for _ in 0..3 {
-            apply_tui_key(&mut state, &TuiKey::Refresh);
-        }
+        advance_state_until_complete(&mut state);
         assert!(!state.session.is_streaming());
         assert!(state
             .session
@@ -7620,7 +7822,7 @@ reasoning = "low"
                 "--height",
                 "38",
                 "--keys",
-                "type:i,type:n,type:s,type:p,type:e,type:c,type:t,enter,r,r,r,q",
+                "type:i,type:n,type:s,type:p,type:e,type:c,type:t,enter,r,r,r,r,r,r,r,r,r,q",
             ],
             &mut output,
         )

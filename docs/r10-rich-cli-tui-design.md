@@ -287,7 +287,9 @@ Commands
 missing, invalid key, model not found, quota/rate limit, bad endpoint, network
 failure, timeout, unsupported response, or ready. It must keep secrets redacted.
 The Alpha implementation probes OpenAI-compatible HTTP/HTTPS endpoints through
-`/models/{model}` before model-backed chat is connected.
+`/models/{model}` and routes configured workbench tasks through
+`/chat/completions`. Provider replies are staged into visible chunks in the TUI;
+true provider chunk/SSE streaming remains a follow-up.
 
 ## Implementation Notes
 

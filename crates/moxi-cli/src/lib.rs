@@ -405,7 +405,7 @@ impl TuiAgentSession {
         self.push_system_message(
             "config",
             format!(
-                "Model/API config: provider={}, endpoint={}, model={}, config={} ({}) key={}. API chat adapter is not connected yet; this read-only Alpha step only detects and redacts configuration.",
+                "Model/API config: provider={}, endpoint={}, model={}, config={} ({}) key={}. Configured sessions use the read-only OpenAI-compatible chat adapter; failures fall back to local analysis without secrets.",
                 self.model_config.provider.label(),
                 self.model_config.endpoint,
                 self.model_config.model,
@@ -555,7 +555,7 @@ impl TuiAgentSession {
             agent: "moxi-agent".to_owned(),
             role: "orchestrator".to_owned(),
             body: format!(
-                "Turn {turn} is streaming: reading workspace facts and preparing a safe plan..."
+                "Turn {turn} is streaming: reading workspace facts and preparing a read-only model response..."
             ),
             task: Some(task.to_owned()),
             metadata: self.agent_meta("moxi-agent", ["task.plan"], "state: streaming"),
@@ -569,13 +569,13 @@ impl TuiAgentSession {
         ));
         self.steps.push(TuiStep::active(
             turn,
-            "Prepare read-only plan",
-            "next step will connect project facts and agent response generation",
+            "Gather read-only context",
+            "workspace facts and conversation metadata are packaged for the adapter",
         ));
         self.steps.push(TuiStep::pending(
             turn,
-            "Await backend adapter",
-            "P2 has not executed tools or requested P0 authority",
+            "Request model response",
+            "configured OpenAI-compatible chat adapter is preferred; local fallback remains read-only",
         ));
         self.active_step_index = self.steps.len().saturating_sub(2);
         self.loading_tick = 0;
@@ -600,7 +600,7 @@ impl TuiAgentSession {
         let turn = self.turn_count;
         if self.loading_tick >= 3 {
             let task = message.task.as_deref().unwrap_or("<unknown task>");
-            let response = ReadOnlyWorkspaceBackend.respond(TuiBackendRequest {
+            let request = TuiBackendRequest {
                 turn,
                 task,
                 workspace: &workspace,
@@ -609,7 +609,10 @@ impl TuiAgentSession {
                 skills: &skills,
                 tools: &tools,
                 context_percent,
-            });
+            };
+            let response = ModelBackedReadOnlyBackend::new(&self.model_config)
+                .respond(request)
+                .unwrap_or_else(|error| ReadOnlyWorkspaceBackend.respond_with_note(request, error));
             message.agent = response.agent;
             message.role = response.role;
             message.body = response.body;
@@ -624,7 +627,7 @@ impl TuiAgentSession {
         } else {
             let frame = loading_frame(self.loading_tick);
             message.body = format!(
-                "{frame} Turn {turn} streaming: reading workspace facts, checking risk, and drafting response..."
+                "{frame} Turn {turn} streaming: reading workspace facts, checking risk, and preparing model context..."
             );
             message.metadata.status = format!("stream tick {}", self.loading_tick);
         }
@@ -746,6 +749,14 @@ struct TuiBackendRequest<'a> {
     context_percent: u8,
 }
 
+impl<'a> Copy for TuiBackendRequest<'a> {}
+
+impl<'a> Clone for TuiBackendRequest<'a> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TuiBackendResponse {
     agent: String,
@@ -776,6 +787,31 @@ trait TuiAgentBackend {
 }
 
 struct ReadOnlyWorkspaceBackend;
+
+impl ReadOnlyWorkspaceBackend {
+    fn respond_with_note(
+        &self,
+        request: TuiBackendRequest<'_>,
+        adapter_note: String,
+    ) -> TuiBackendResponse {
+        let mut response = self.respond(request);
+        response.body = format!(
+            "{} Model adapter fallback: {}",
+            response.body,
+            redacted_preview(&adapter_note, 180)
+        );
+        let status = response.metadata.status.clone();
+        response.metadata.status = format!("{status} | model fallback");
+        response.plan.steps.insert(
+            2,
+            TuiBackendPlanStep {
+                label: "Model adapter fallback".to_owned(),
+                detail: redacted_preview(&adapter_note, 180),
+            },
+        );
+        response
+    }
+}
 
 impl TuiAgentBackend for ReadOnlyWorkspaceBackend {
     fn respond(&self, request: TuiBackendRequest<'_>) -> TuiBackendResponse {
@@ -825,6 +861,79 @@ impl TuiAgentBackend for ReadOnlyWorkspaceBackend {
             next_step_detail: "waiting for a real P1/P0 backend adapter or owner command"
                 .to_owned(),
         }
+    }
+}
+
+struct ModelBackedReadOnlyBackend<'a> {
+    config: &'a TuiModelConfig,
+}
+
+impl<'a> ModelBackedReadOnlyBackend<'a> {
+    fn new(config: &'a TuiModelConfig) -> Self {
+        Self { config }
+    }
+
+    fn respond(&self, request: TuiBackendRequest<'_>) -> Result<TuiBackendResponse, String> {
+        if self.config.needs_setup() {
+            return Err(format!(
+                "model/API config is {}; run /config or /doctor before API-backed chat",
+                self.config.config_state
+            ));
+        }
+        if self.config.endpoint == "not-configured" || !self.config.endpoint.starts_with("http") {
+            return Err(
+                "model endpoint must be an http:// or https:// OpenAI-compatible /v1 base URL"
+                    .to_owned(),
+            );
+        }
+        let Some(secret) = self.config.secret() else {
+            return Err(format!(
+                "{} is redacted but not available to this process",
+                self.config.api_key_source.summary()
+            ));
+        };
+
+        let prompt = build_read_only_chat_prompt(request);
+        let reply = post_openai_chat_completion(
+            &self.config.endpoint,
+            &self.config.model,
+            &secret,
+            &prompt,
+        )?;
+        let agent = request
+            .agents
+            .iter()
+            .find(|agent| agent.name == "moxi-agent")
+            .or_else(|| request.agents.first());
+        let agent_name = agent
+            .map(|agent| agent.name.clone())
+            .unwrap_or_else(|| "moxi-agent".to_owned());
+        let role = agent
+            .map(|agent| agent.role.clone())
+            .unwrap_or_else(|| "orchestrator".to_owned());
+        let reasoning = agent
+            .map(|agent| agent.reasoning.as_str())
+            .unwrap_or("medium");
+        let plan = read_only_model_plan(request, self.config.provider.label());
+
+        Ok(TuiBackendResponse {
+            agent: agent_name,
+            role,
+            body: reply,
+            metadata: TuiMessageMeta::new(
+                &self.config.model,
+                reasoning,
+                ["model.chat", "context.pack", "risk.boundary"],
+                "state: complete | backend: read-only model",
+            ),
+            plan,
+            completed_step_detail:
+                "read-only context packaged; no file write, shell, Git/GitHub, ticket, proof, or ledger authority was used"
+                    .to_owned(),
+            next_step_detail:
+                "model replied in read-only mode; wait for owner intent or trusted P0 adapter"
+                    .to_owned(),
+        })
     }
 }
 
@@ -974,6 +1083,40 @@ fn read_only_backend_plan(request: &TuiBackendRequest<'_>) -> TuiBackendPlan {
     }
 }
 
+fn read_only_model_plan(request: TuiBackendRequest<'_>, provider: &str) -> TuiBackendPlan {
+    TuiBackendPlan {
+        plan_id: format!("model-chat-turn-{}", request.turn),
+        source: format!("openai-compatible-chat:{provider}"),
+        steps: vec![
+            TuiBackendPlanStep {
+                label: "Package read-only context".to_owned(),
+                detail: format!(
+                    "Use cwd={}, git={}, cargo={}, docs={}, trust={}, context={}%",
+                    request.workspace.short_path,
+                    request.workspace.git_state,
+                    request.workspace.cargo_state,
+                    request.workspace.docs_state,
+                    request.trust.label(),
+                    request.context_percent
+                ),
+            },
+            TuiBackendPlanStep {
+                label: "Request model response".to_owned(),
+                detail:
+                    "POST /chat/completions with owner task and safe workspace facts; no tools are exposed"
+                        .to_owned(),
+            },
+            TuiBackendPlanStep {
+                label: "Render model reply".to_owned(),
+                detail:
+                    "Append the provider response to the conversation with model/reasoning metadata"
+                        .to_owned(),
+            },
+        ],
+        blocked_authority: blocked_p2_authority(),
+    }
+}
+
 fn blocked_p2_authority() -> Vec<String> {
     vec![
         "write".to_owned(),
@@ -983,6 +1126,33 @@ fn blocked_p2_authority() -> Vec<String> {
         "proof.verify".to_owned(),
         "ledger.commit".to_owned(),
     ]
+}
+
+fn build_read_only_chat_prompt(request: TuiBackendRequest<'_>) -> String {
+    format!(
+        "You are moxi-agent, a guarded read-only CLI assistant.\n\
+         Answer the owner in Chinese unless they clearly request another language.\n\
+         You may use only the facts below. Do not claim you wrote files, executed shell commands, committed Git/GitHub changes, issued tickets, verified proofs, or wrote ledger events.\n\
+         If the task needs those effects, say they require the trusted P0 path.\n\n\
+         Owner task:\n{}\n\n\
+         Workspace facts:\n- cwd: {}\n- git: {}\n- cargo: {}\n- docs/status.md: {}\n- agent config: {}\n- trust: {}\n- context meter: {}%\n- active agents: {}\n- loaded skills: {}\n- available read-only tools: {}",
+        request.task,
+        request.workspace.cwd,
+        request.workspace.git_state,
+        request.workspace.cargo_state,
+        request.workspace.docs_state,
+        request.workspace.config_state,
+        request.trust.label(),
+        request.context_percent,
+        request
+            .agents
+            .iter()
+            .map(TuiAgentProfile::summary)
+            .collect::<Vec<_>>()
+            .join("; "),
+        request.skills.join(", "),
+        request.tools.join(", ")
+    )
 }
 
 fn read_only_project_analysis(request: &TuiBackendRequest<'_>, plan: &TuiBackendPlan) -> String {
@@ -1376,6 +1546,17 @@ impl TuiModelConfig {
         !self.is_configured()
     }
 
+    fn secret(&self) -> Option<String> {
+        match &self.api_key_source {
+            TuiApiKeySource::Missing => None,
+            TuiApiKeySource::Env { name, .. } => env::var(name).ok(),
+            TuiApiKeySource::Config { .. } => fs::read_to_string(&self.config_path)
+                .ok()
+                .and_then(|text| ParsedModelConfig::from_toml(&text).api_key)
+                .filter(|secret| !secret.trim().is_empty()),
+        }
+    }
+
     fn setup_sample(&self) -> String {
         let model = if self.model == "not-configured" {
             "gpt-4o-mini"
@@ -1481,14 +1662,6 @@ impl TuiApiKeySource {
             Self::Config { redacted } => format!("config:{redacted}"),
         }
     }
-
-    fn secret(&self) -> Option<String> {
-        match self {
-            Self::Missing => None,
-            Self::Env { name, .. } => env::var(name).ok(),
-            Self::Config { .. } => None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1575,7 +1748,7 @@ impl TuiModelDoctor {
             };
         }
 
-        let Some(secret) = config.api_key_source.secret() else {
+        let Some(secret) = config.secret() else {
             return TuiDoctorReport {
                 status: TuiDoctorStatus::NeedsSetup,
                 provider: config.provider,
@@ -1639,7 +1812,7 @@ fn classify_doctor_response(
         _ => TuiDoctorStatus::UnsupportedResponse,
     };
     let action = match status {
-        TuiDoctorStatus::Ready => "configuration is ready for the next read-only chat adapter step",
+        TuiDoctorStatus::Ready => "configuration is ready for read-only model chat",
         TuiDoctorStatus::InvalidKey => {
             "check the api_key_env value; the key is not printed by MOXI"
         }
@@ -1695,13 +1868,134 @@ fn http_get_openai_model(
     Ok(HttpProbeResponse { status, body })
 }
 
+fn post_openai_chat_completion(
+    endpoint: &str,
+    model: &str,
+    secret: &str,
+    prompt: &str,
+) -> Result<String, String> {
+    let url = format!("{}/chat/completions", endpoint.trim_end_matches('/'));
+    let body = serde_json::json!({
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": "You are moxi-agent inside a guarded read-only CLI shell. Never claim to write files, run shell commands, mutate Git/GitHub, issue tickets, verify proofs, or commit ledger events."
+            },
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+        "temperature": 0.2,
+        "stream": false
+    });
+    let response = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|error| format!("chat client setup failed: {error}"))?
+        .post(url)
+        .bearer_auth(secret)
+        .header(reqwest::header::ACCEPT, "application/json")
+        .json(&body)
+        .send()
+        .map_err(|error| {
+            if error.is_timeout() {
+                format!("model chat request timed out: {error}")
+            } else {
+                format!("model chat request failed: {error}")
+            }
+        })?;
+    let status = response.status().as_u16();
+    let body = response
+        .text()
+        .map_err(|error| format!("model chat response read failed: {error}"))?;
+    if !(200..300).contains(&status) {
+        return Err(classify_chat_error(status, &body));
+    }
+    parse_openai_chat_content(&body)
+}
+
+fn classify_chat_error(status: u16, body: &str) -> String {
+    let normalized_body = normalize_token(body);
+    let category = match status {
+        401 | 403 => "invalid key",
+        404 => "model or endpoint not found",
+        402 | 429 => "quota or rate limit",
+        400 => {
+            if normalized_body.contains("model") || normalized_body.contains("not_found") {
+                "model not found"
+            } else {
+                "bad request"
+            }
+        }
+        500..=599 => "provider/server error",
+        _ => "unsupported provider response",
+    };
+    format!(
+        "model chat failed: {category}; HTTP {status}; body preview: {}",
+        redacted_preview(body, 160)
+    )
+}
+
+fn parse_openai_chat_content(body: &str) -> Result<String, String> {
+    let json: serde_json::Value = serde_json::from_str(body)
+        .map_err(|error| format!("model chat response was not JSON: {error}"))?;
+    let content = json
+        .get("choices")
+        .and_then(|choices| choices.as_array())
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("message"))
+        .and_then(|message| message.get("content"))
+        .and_then(|content| content.as_str())
+        .map(str::trim)
+        .filter(|content| !content.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "unsupported chat response shape; body preview: {}",
+                redacted_preview(body, 160)
+            )
+        })?;
+    Ok(content.to_owned())
+}
+
 fn redacted_preview(value: &str, max_chars: usize) -> String {
-    let compact = value
+    let compact = redact_inline_secrets(value)
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
         .replace("Bearer ", "Bearer <redacted> ");
     compact.chars().take(max_chars).collect()
+}
+
+fn redact_inline_secrets(value: &str) -> String {
+    value
+        .split_inclusive(|ch: char| {
+            ch.is_whitespace() || matches!(ch, '"' | '\'' | ',' | ':' | '}')
+        })
+        .map(|token| {
+            let secret_chars = token
+                .chars()
+                .filter(|ch| ch.is_ascii_alphanumeric() || matches!(*ch, '-' | '_' | '.'))
+                .collect::<String>();
+            if looks_like_secret(&secret_chars) {
+                token.replace(&secret_chars, &redact_secret(&secret_chars))
+            } else {
+                token.to_owned()
+            }
+        })
+        .collect()
+}
+
+fn looks_like_secret(value: &str) -> bool {
+    let value = value.trim();
+    value.len() >= 16
+        && (value.starts_with("sk-")
+            || value.starts_with("sk_")
+            || value.starts_with("pk-")
+            || value.starts_with("key-")
+            || value.contains("secret")
+            || value.contains("token"))
 }
 
 #[derive(Default)]
@@ -4136,7 +4430,7 @@ fn render_tui_setup(frame: &mut ratatui::Frame<'_>, area: Rect, state: &TuiState
         Line::from(vec![Span::styled("Next Alpha steps", style_warning())]),
         Line::from("* /config shows redacted config state"),
         Line::from("o /doctor will test endpoint, key, model, quota, and response shape"),
-        Line::from("o model-backed read-only chat will connect after doctor passes"),
+        Line::from("o configured sessions use read-only model chat after setup"),
         Line::from(""),
         Line::from(vec![
             Span::styled("Enter", style_focus()),
@@ -5289,7 +5583,7 @@ fn percent(value: f32) -> String {
 }
 
 fn help_text() -> &'static str {
-    "moxi\n\nDefault:\n  moxi\n    Opens the resident branded read-only TUI workbench. Startup pages wait for owner input instead of flashing through onboarding.\n\nCommands:\n  admit --goal <text> [--tenant <id>] [--user <id>] [--workspace <path>] [--capability <id>] [--risk low|medium|high|critical]\n  manifest [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human]\n  boundary [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--text]\n  status [--feed|--query] [--input <snapshot.json>] [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--text|--panel] [--limit <n>]\n  watch [--feed|--query] --input <snapshot.json> [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--text|--panel] [--limit <n>] [--ticks <n>] [--interval-ms <n>]\n  tui [--feed|--query] [--input <snapshot.json>] [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--width <n>] [--height <n>] [--keys tab,o,g,t,a,b,?,j,k,/filter,r,q] [--interactive] [--poll-ms <n>]\n  repl\n\nTUI startup: Enter advances Boot -> Trust -> First-run Setup when model/API config is missing -> Agent Core -> Workspace; 5 jumps to the workbench.\nTUI commands: /help, /status, /tasks, /agents, /skills, /context, /config, /doctor, /boundary, /trust, /approve, /deny, /details, /save, /resume, /clear, /quit.\n\nModel/API config: /config reads .moxi/config.toml or MOXI_/OPENAI_/OPENROUTER_ environment variables and always redacts API keys. /doctor tests OpenAI-compatible endpoint readiness and reports invalid key, model not found, quota/rate limit, timeout, network, bad endpoint, and unsupported response categories. Model chat is still not connected here.\n\nBoundary: this CLI submits requests and renders shell contracts only; it can watch snapshot files and render a read-only TUI preview, but it cannot execute, authorize, issue tickets, verify, or commit ledger events."
+    "moxi\n\nDefault:\n  moxi\n    Opens the resident branded read-only TUI workbench. Startup pages wait for owner input instead of flashing through onboarding.\n\nCommands:\n  admit --goal <text> [--tenant <id>] [--user <id>] [--workspace <path>] [--capability <id>] [--risk low|medium|high|critical]\n  manifest [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human]\n  boundary [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--text]\n  status [--feed|--query] [--input <snapshot.json>] [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--text|--panel] [--limit <n>]\n  watch [--feed|--query] --input <snapshot.json> [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--text|--panel] [--limit <n>] [--ticks <n>] [--interval-ms <n>]\n  tui [--feed|--query] [--input <snapshot.json>] [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--width <n>] [--height <n>] [--keys tab,o,g,t,a,b,?,j,k,/filter,r,q] [--interactive] [--poll-ms <n>]\n  repl\n\nTUI startup: Enter advances Boot -> Trust -> First-run Setup when model/API config is missing -> Agent Core -> Workspace; 5 jumps to the workbench.\nTUI commands: /help, /status, /tasks, /agents, /skills, /context, /config, /doctor, /boundary, /trust, /approve, /deny, /details, /save, /resume, /clear, /quit.\n\nModel/API config: /config reads .moxi/config.toml or MOXI_/OPENAI_/OPENROUTER_ environment variables and always redacts API keys. /doctor tests OpenAI-compatible endpoint readiness and reports invalid key, model not found, quota/rate limit, timeout, network, bad endpoint, and unsupported response categories. Configured TUI tasks use read-only OpenAI-compatible /chat/completions; failures fall back to local analysis.\n\nBoundary: this CLI submits requests and renders shell contracts only; it can watch snapshot files and render a read-only TUI preview, but it cannot execute, authorize, issue tickets, verify, or commit ledger events."
 }
 
 #[cfg(test)]
@@ -5393,12 +5687,28 @@ mod tests {
     }
 
     fn mock_http_once(status: u16, body: &'static str) -> String {
+        mock_http_once_with_path(status, body, None)
+    }
+
+    fn mock_http_once_with_path(
+        status: u16,
+        body: &'static str,
+        expected_path: Option<&'static str>,
+    ) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             let mut request = [0_u8; 2048];
-            let _ = stream.read(&mut request);
+            let read = stream.read(&mut request).unwrap_or(0);
+            let request_text = String::from_utf8_lossy(&request[..read]);
+            if let Some(path) = expected_path {
+                assert!(
+                    request_text.starts_with(&format!("POST {path} "))
+                        || request_text.starts_with(&format!("GET {path} ")),
+                    "unexpected request path: {request_text}"
+                );
+            }
             let response = format!(
                 "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 body.len(),
@@ -6434,6 +6744,36 @@ mod tests {
         assert!(response.body.contains("gpt-demo"));
     }
 
+    #[test]
+    fn model_chat_adapter_posts_read_only_prompt() {
+        let endpoint = mock_http_once_with_path(
+            200,
+            r#"{"choices":[{"message":{"role":"assistant","content":"主人，MOXI 已进入只读模型聊天。"}}]}"#,
+            Some("/v1/chat/completions"),
+        );
+        let reply =
+            post_openai_chat_completion(&endpoint, "gpt-demo", "secret", "检查当前项目状态")
+                .unwrap();
+
+        assert_eq!(reply, "主人，MOXI 已进入只读模型聊天。");
+    }
+
+    #[test]
+    fn model_chat_adapter_redacts_error_preview() {
+        let endpoint = mock_http_once_with_path(
+            401,
+            r#"{"error":{"message":"invalid key sk-visible-never-0000"}}"#,
+            Some("/v1/chat/completions"),
+        );
+        let error =
+            post_openai_chat_completion(&endpoint, "gpt-demo", "secret", "检查当前项目状态")
+                .unwrap_err();
+
+        assert!(error.contains("invalid key"));
+        assert!(!error.contains("sk-visible-never-0000"));
+        assert!(error.contains("sk-v...0000"));
+    }
+
     fn test_doctor_config(endpoint: &str) -> TuiModelConfig {
         TuiModelConfig {
             provider: TuiModelProvider::Custom,
@@ -6525,6 +6865,51 @@ mod tests {
         assert!(message.body.contains("check the api_key_env value"));
         assert!(!message.body.contains(raw_secret));
         assert!(state.command_status.contains("invalid-key"));
+    }
+
+    #[test]
+    fn tui_configured_task_uses_model_chat_adapter() {
+        let temp = tempfile::tempdir().unwrap();
+        let moxi_dir = temp.path().join(".moxi");
+        fs::create_dir_all(&moxi_dir).unwrap();
+        let endpoint = mock_http_once_with_path(
+            200,
+            r#"{"choices":[{"message":{"role":"assistant","content":"主人，模型已读取只读上下文并回复。"}}]}"#,
+            Some("/v1/chat/completions"),
+        );
+        let env_name = "MOXI_TEST_CHAT_KEY";
+        let raw_secret = "chat-secret-123456";
+        fs::write(
+            moxi_dir.join("config.toml"),
+            format!(
+                "provider = \"custom\"\nendpoint = \"{endpoint}\"\nmodel = \"gpt-demo\"\napi_key_env = \"{env_name}\"\n"
+            ),
+        )
+        .unwrap();
+        env::set_var(env_name, raw_secret);
+        let workspace = WorkspaceFacts::detect_at(temp.path());
+        let mut session = TuiAgentSession {
+            model_config: TuiModelConfig::load_for_workspace(&workspace),
+            workspace,
+            ..TuiAgentSession::default()
+        };
+
+        session.submit_user_task("检查当前项目状态");
+        session.advance_loading();
+        session.advance_loading();
+        session.advance_loading();
+        env::remove_var(env_name);
+
+        let message = session.messages.last().unwrap();
+        assert_eq!(message.state, TuiMessageState::Complete);
+        assert_eq!(message.body, "主人，模型已读取只读上下文并回复。");
+        assert_eq!(message.metadata.model, "gpt-demo");
+        assert!(message.metadata.status.contains("read-only model"));
+        assert!(session
+            .steps
+            .iter()
+            .any(|step| step.label == "Plan: Request model response"));
+        assert!(!message.body.contains(raw_secret));
     }
 
     #[test]
@@ -6696,7 +7081,7 @@ reasoning = "low"
         assert_eq!(state.session.steps.len(), 6);
         assert_eq!(
             state.session.steps[state.session.active_step_index].label,
-            "Prepare read-only plan"
+            "Gather read-only context"
         );
         assert_eq!(state.selected_task_index, state.session.active_step_index);
         assert!(state.follow_active_step);
@@ -6809,10 +7194,11 @@ reasoning = "low"
         assert!(completed_reply.body.contains("git="));
         assert!(completed_reply.body.contains("cargo="));
         assert!(completed_reply.body.contains("P0 remains required"));
-        assert_eq!(
-            completed_reply.metadata.status,
-            "state: complete | backend: read-only workspace"
-        );
+        assert!(completed_reply
+            .metadata
+            .status
+            .contains("backend: read-only workspace"));
+        assert!(completed_reply.metadata.status.contains("model fallback"));
         assert!(completed_reply
             .metadata
             .tools
@@ -7218,7 +7604,7 @@ reasoning = "low"
         assert!(text.contains("selected:"));
         assert!(text.contains("detail:"));
         assert!(text.contains("Capture user task"));
-        assert!(text.contains("Prepare read-only plan"));
+        assert!(text.contains("Gather read-only context"));
     }
 
     #[test]
@@ -7273,7 +7659,8 @@ reasoning = "low"
         assert_eq!(code, 0);
         assert!(text.contains("streaming"));
         assert!(text.contains("stream tick 1"));
-        assert!(text.contains("drafting response"));
+        assert!(text.contains("preparing model"));
+        assert!(text.contains("context..."));
     }
 
     #[test]

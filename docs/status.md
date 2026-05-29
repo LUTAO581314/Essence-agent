@@ -547,8 +547,11 @@ setup action, OpenAI-compatible HTTP/HTTPS endpoints can be probed via
 `/models/{model}` using a blocking `reqwest` client with `rustls` TLS, and
 responses are classified as ready, invalid key, model not found, quota/rate
 limit, bad endpoint, network, timeout, or unsupported response while keeping
-secrets redacted. Model-backed streaming chat remains next-step work, and the
-shell remains read-only/P2.
+secrets redacted. Configured TUI task submissions now prefer a read-only
+OpenAI-compatible `/chat/completions` adapter that packages workspace facts,
+trust state, active agents, skills, and the owner task; provider/config errors
+fall back to local read-only analysis with redacted previews. Token streaming
+remains next-step work, and the shell remains read-only/P2.
 Task Tracking now prioritizes the active turn before older turns, so the latest
 backend plan steps stay visible after a response completes. The right pane shows
 the backend plan id, local plan steps, and final P1/P0-adapter wait state before

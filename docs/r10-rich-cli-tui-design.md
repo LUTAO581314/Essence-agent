@@ -150,7 +150,8 @@ Model/API config source:
 or `api_key`. Environment fallback may use `MOXI_PROVIDER`, `MOXI_ENDPOINT`,
 `MOXI_MODEL`, `MOXI_API_KEY`, `OPENAI_API_KEY`, or `OPENROUTER_API_KEY`.
 The UI must never print full API keys; `/config` only shows redacted key
-sources until a real connectivity check and chat adapter are connected.
+sources. `/doctor` checks connectivity, and configured tasks route through the
+read-only OpenAI-compatible chat adapter with local fallback on provider errors.
 
 Available Tools
 file.read | repo.inspect | git.status | test.run
@@ -170,9 +171,9 @@ redacted API-key source. It should offer a copyable `.moxi/config.toml` shape
 and environment variable alternatives without ever printing a full key.
 
 ```text
-MOXI CLI Alpha setup                  read-only model chat preparation
+MOXI CLI Alpha setup                  read-only model chat
 
-Model/API configuration is required before real chat is connected.
+Model/API configuration is required before read-only model chat is available.
 This page is a guide only: it does not write files, print full keys, or call the network.
 
 Detected configuration

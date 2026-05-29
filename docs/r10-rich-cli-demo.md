@@ -76,13 +76,16 @@ The default entry opens the resident workbench. Use `q` to quit.
 - Read-only workspace facts are collected locally: cwd, Git status, Cargo state,
   docs/config presence, active agents, messages, and task steps.
 - First-run setup is guidance-only. It shows `.moxi/config.toml` and environment
-  variable options, but does not save secrets, print full API keys, or call a
-  provider.
+  variable options, but does not save secrets or print full API keys.
 - `/doctor` classifies model/API readiness without printing secrets. It probes
   OpenAI-compatible HTTP/HTTPS endpoints through the configured
   `/models/{model}` route and reports setup gaps, invalid keys, missing models,
   quota/rate limits, bad endpoints, network failures, timeouts, and unsupported
-  response shapes. Read-only model chat is still follow-up work.
+  response shapes.
+- Configured workbench tasks now use the OpenAI-compatible `/chat/completions`
+  adapter in read-only mode. If config, network, provider, or response parsing
+  fails, the TUI falls back to local read-only analysis and redacts error
+  previews.
 - Risk prompts are local intent capture only.
 - `/approve` inside the TUI does not grant write, shell, Git/GitHub, ticket,
   proof, or ledger authority.

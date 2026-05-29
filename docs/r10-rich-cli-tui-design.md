@@ -139,6 +139,13 @@ Agent config source:
 If config is missing or incomplete, it may fall back to a small documented
 local demo set; the product must not assume a permanent five-agent roster.
 
+Model/API config source:
+`.moxi/config.toml` may define `provider`, `endpoint`, `model`, `api_key_env`,
+or `api_key`. Environment fallback may use `MOXI_PROVIDER`, `MOXI_ENDPOINT`,
+`MOXI_MODEL`, `MOXI_API_KEY`, `OPENAI_API_KEY`, or `OPENROUTER_API_KEY`.
+The UI must never print full API keys; `/config` only shows redacted key
+sources until a real connectivity check and chat adapter are connected.
+
 Available Tools
 file.read | repo.inspect | git.status | test.run
 shell.preview | context.trace | command.palette
@@ -218,6 +225,8 @@ Commands
 /tasks     open task tracking
 /agents    inspect Agent Core
 /skills    inspect loaded skills
+/context   show context sources
+/config    inspect redacted model/API config
 /approve   confirm current risk intent
 /deny      reject current risk
 /trust     open workspace trust gate

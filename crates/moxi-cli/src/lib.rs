@@ -221,6 +221,7 @@ struct TuiAgentSession {
     workspace: WorkspaceFacts,
     trust: TuiTrustState,
     agents: Vec<TuiAgentProfile>,
+    model_config: TuiModelConfig,
     skills: Vec<String>,
     tools: Vec<String>,
     messages: Vec<TuiMessage>,
@@ -234,12 +235,15 @@ impl Default for TuiAgentSession {
     fn default() -> Self {
         let workspace = WorkspaceFacts::detect();
         let agents = TuiAgentProfile::load_for_workspace(&workspace);
+        let model_config = TuiModelConfig::load_for_workspace(&workspace);
+        let model_config_state = model_config.config_state.clone();
         Self {
             id: "local-r10-demo-session".to_owned(),
             mode: TuiSessionMode::ReadOnly,
             workspace: workspace.clone(),
             trust: TuiTrustState::from_workspace(&workspace),
             agents,
+            model_config,
             skills: vec![
                 "tui.design".to_owned(),
                 "risk.review".to_owned(),
@@ -272,8 +276,10 @@ impl Default for TuiAgentSession {
                 TuiMessage {
                     agent: "guard-agent".to_owned(),
                     role: "risk".to_owned(),
-                    body: "Startup is waiting for owner-controlled handoff before workbench use."
-                        .to_owned(),
+                    body: format!(
+                        "Startup is waiting for owner-controlled handoff before workbench use. Model/API config is {}.",
+                        model_config_state
+                    ),
                     task: None,
                     metadata: TuiMessageMeta::new(
                         "guard",
@@ -394,6 +400,22 @@ impl TuiAgentSession {
         );
     }
 
+    fn push_config_message(&mut self) {
+        self.model_config = TuiModelConfig::load_for_workspace(&self.workspace);
+        self.push_system_message(
+            "config",
+            format!(
+                "Model/API config: provider={}, endpoint={}, model={}, config={} ({}) key={}. API chat adapter is not connected yet; this read-only Alpha step only detects and redacts configuration.",
+                self.model_config.provider.label(),
+                self.model_config.endpoint,
+                self.model_config.model,
+                self.model_config.config_path,
+                self.model_config.config_state,
+                self.model_config.api_key_source.summary()
+            ),
+        );
+    }
+
     fn push_resume_message(&mut self, snapshot: &TuiSessionSnapshot) {
         self.push_system_message(
             "resume",
@@ -471,6 +493,13 @@ impl TuiAgentSession {
                 "agent configuration source",
                 self.workspace.config_state == "present",
                 12,
+            ),
+            TuiContextSource::new(
+                ".moxi/config.toml",
+                &self.model_config.config_state,
+                "model/API configuration source",
+                self.model_config.is_configured(),
+                8,
             ),
             TuiContextSource::available(
                 "active agents",
@@ -1249,6 +1278,227 @@ impl ParsedAgentProfile {
             reasoning: self.reasoning.unwrap_or_else(|| "medium".to_owned()),
             name,
         })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct TuiModelConfig {
+    provider: TuiModelProvider,
+    endpoint: String,
+    model: String,
+    api_key_source: TuiApiKeySource,
+    config_path: String,
+    config_state: String,
+}
+
+impl TuiModelConfig {
+    fn load_for_workspace(workspace: &WorkspaceFacts) -> Self {
+        let path = Path::new(&workspace.cwd).join(".moxi").join("config.toml");
+        Self::load_at(&path)
+    }
+
+    fn load_at(path: &Path) -> Self {
+        Self::load_at_with_env(path, |name| env::var(name).ok())
+    }
+
+    fn load_at_with_env(path: &Path, get_env: impl Fn(&str) -> Option<String>) -> Self {
+        let config_path = path.display().to_string();
+        let parsed = fs::read_to_string(path)
+            .ok()
+            .map(|text| ParsedModelConfig::from_toml(&text))
+            .unwrap_or_default();
+        let env_provider = get_env("MOXI_PROVIDER");
+        let env_endpoint = get_env("MOXI_ENDPOINT");
+        let env_model = get_env("MOXI_MODEL");
+
+        let provider = parsed
+            .provider
+            .as_deref()
+            .or(env_provider.as_deref())
+            .map(TuiModelProvider::parse)
+            .unwrap_or(TuiModelProvider::OpenAi);
+        let endpoint = parsed
+            .endpoint
+            .or(env_endpoint)
+            .unwrap_or_else(|| provider.default_endpoint().to_owned());
+        let model = parsed
+            .model
+            .or(env_model)
+            .unwrap_or_else(|| "not-configured".to_owned());
+        let api_key_source = TuiApiKeySource::resolve(
+            parsed.api_key_env.as_deref(),
+            parsed.api_key.as_deref(),
+            provider.default_key_env(),
+            &get_env,
+        );
+        let config_state = if path.is_file() {
+            if model == "not-configured" || matches!(api_key_source, TuiApiKeySource::Missing) {
+                "present-incomplete"
+            } else {
+                "present"
+            }
+        } else if get_env("MOXI_API_KEY").is_some()
+            || get_env("OPENAI_API_KEY").is_some()
+            || get_env("OPENROUTER_API_KEY").is_some()
+            || get_env("MOXI_MODEL").is_some()
+            || get_env("MOXI_ENDPOINT").is_some()
+        {
+            "env-only"
+        } else {
+            "missing"
+        }
+        .to_owned();
+
+        Self {
+            provider,
+            endpoint,
+            model,
+            api_key_source,
+            config_path,
+            config_state,
+        }
+    }
+
+    fn is_configured(&self) -> bool {
+        self.model != "not-configured"
+            && !matches!(self.api_key_source, TuiApiKeySource::Missing)
+            && self.config_state != "missing"
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+enum TuiModelProvider {
+    OpenAi,
+    OpenRouter,
+    Custom,
+    Local,
+}
+
+impl TuiModelProvider {
+    fn parse(value: &str) -> Self {
+        match normalize_token(value).as_str() {
+            "openrouter" => Self::OpenRouter,
+            "custom" => Self::Custom,
+            "local" | "ollama" | "lmstudio" => Self::Local,
+            _ => Self::OpenAi,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::OpenAi => "openai",
+            Self::OpenRouter => "openrouter",
+            Self::Custom => "custom",
+            Self::Local => "local",
+        }
+    }
+
+    fn default_endpoint(self) -> &'static str {
+        match self {
+            Self::OpenAi => "https://api.openai.com/v1",
+            Self::OpenRouter => "https://openrouter.ai/api/v1",
+            Self::Custom => "not-configured",
+            Self::Local => "http://localhost:11434/v1",
+        }
+    }
+
+    fn default_key_env(self) -> &'static str {
+        match self {
+            Self::OpenAi => "OPENAI_API_KEY",
+            Self::OpenRouter => "OPENROUTER_API_KEY",
+            Self::Custom | Self::Local => "MOXI_API_KEY",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+enum TuiApiKeySource {
+    Missing,
+    Env { name: String, redacted: String },
+    Config { redacted: String },
+}
+
+impl TuiApiKeySource {
+    fn resolve(
+        config_env: Option<&str>,
+        config_key: Option<&str>,
+        default_env: &str,
+        get_env: &impl Fn(&str) -> Option<String>,
+    ) -> Self {
+        if let Some(secret) = config_key.filter(|value| !value.trim().is_empty()) {
+            return Self::Config {
+                redacted: redact_secret(secret),
+            };
+        }
+
+        for name in [config_env, Some("MOXI_API_KEY"), Some(default_env)]
+            .into_iter()
+            .flatten()
+        {
+            if let Some(secret) = get_env(name) {
+                if !secret.trim().is_empty() {
+                    return Self::Env {
+                        name: name.to_owned(),
+                        redacted: redact_secret(&secret),
+                    };
+                }
+            }
+        }
+
+        Self::Missing
+    }
+
+    fn summary(&self) -> String {
+        match self {
+            Self::Missing => "missing".to_owned(),
+            Self::Env { name, redacted } => format!("env:{name}={redacted}"),
+            Self::Config { redacted } => format!("config:{redacted}"),
+        }
+    }
+}
+
+#[derive(Default)]
+struct ParsedModelConfig {
+    provider: Option<String>,
+    endpoint: Option<String>,
+    model: Option<String>,
+    api_key_env: Option<String>,
+    api_key: Option<String>,
+}
+
+impl ParsedModelConfig {
+    fn from_toml(text: &str) -> Self {
+        let mut parsed = Self::default();
+        for raw_line in text.lines() {
+            let line = raw_line.split('#').next().unwrap_or("").trim();
+            if line.is_empty() || line.starts_with('[') {
+                continue;
+            }
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            let Some(value) = parse_toml_string(value.trim()) else {
+                continue;
+            };
+            match key.trim() {
+                "provider" => parsed.provider = Some(value),
+                "endpoint" => parsed.endpoint = Some(value),
+                "model" => parsed.model = Some(value),
+                "api_key_env" => parsed.api_key_env = Some(value),
+                "api_key" => parsed.api_key = Some(value),
+                _ => {}
+            }
+        }
+        parsed
+    }
+}
+
+fn redact_secret(value: &str) -> String {
+    let value = value.trim();
+    if value.len() <= 8 {
+        "****".to_owned()
+    } else {
+        format!("{}...{}", &value[..4], &value[value.len() - 4..])
     }
 }
 
@@ -2127,6 +2377,14 @@ fn submit_tui_command(state: &mut TuiState) {
                 snapshot.sources.len(),
                 snapshot.percent
             );
+        }
+        "config" => {
+            state.active_pane = TuiPane::Overview;
+            state.screen = TuiScreen::Workspace;
+            state.session.push_config_message();
+            state.follow_latest_message = true;
+            state.conversation_scroll = 0;
+            state.command_status = "showing model/API configuration; secrets are redacted".into();
         }
         "save" | "persist" => match state.session.save_persistence_snapshot() {
             Ok(path) => {
@@ -3825,6 +4083,10 @@ const COMMAND_PALETTE_ENTRIES: &[CommandPaletteEntry] = &[
         description: "show context meter sources",
     },
     CommandPaletteEntry {
+        command: "/config",
+        description: "inspect redacted model/API config",
+    },
+    CommandPaletteEntry {
         command: "/save",
         description: "write local TUI session snapshot",
     },
@@ -4661,7 +4923,7 @@ fn percent(value: f32) -> String {
 }
 
 fn help_text() -> &'static str {
-    "moxi\n\nDefault:\n  moxi\n    Opens the resident branded read-only TUI workbench. Startup pages wait for owner input instead of flashing through onboarding.\n\nCommands:\n  admit --goal <text> [--tenant <id>] [--user <id>] [--workspace <path>] [--capability <id>] [--risk low|medium|high|critical]\n  manifest [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human]\n  boundary [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--text]\n  status [--feed|--query] [--input <snapshot.json>] [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--text|--panel] [--limit <n>]\n  watch [--feed|--query] --input <snapshot.json> [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--text|--panel] [--limit <n>] [--ticks <n>] [--interval-ms <n>]\n  tui [--feed|--query] [--input <snapshot.json>] [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--width <n>] [--height <n>] [--keys tab,o,g,t,a,b,?,j,k,/filter,r,q] [--interactive] [--poll-ms <n>]\n  repl\n\nTUI startup: Enter advances Boot -> Trust -> Agent Core -> Workspace; 4 jumps to the workbench.\nTUI commands: /help, /status, /boundary, /demo, /filter <text>, /clear, /quit.\n\nBoundary: this CLI submits requests and renders shell contracts only; it can watch snapshot files and render a read-only TUI preview, but it cannot execute, authorize, issue tickets, verify, or commit ledger events."
+    "moxi\n\nDefault:\n  moxi\n    Opens the resident branded read-only TUI workbench. Startup pages wait for owner input instead of flashing through onboarding.\n\nCommands:\n  admit --goal <text> [--tenant <id>] [--user <id>] [--workspace <path>] [--capability <id>] [--risk low|medium|high|critical]\n  manifest [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human]\n  boundary [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--text]\n  status [--feed|--query] [--input <snapshot.json>] [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--text|--panel] [--limit <n>]\n  watch [--feed|--query] --input <snapshot.json> [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--text|--panel] [--limit <n>] [--ticks <n>] [--interval-ms <n>]\n  tui [--feed|--query] [--input <snapshot.json>] [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--width <n>] [--height <n>] [--keys tab,o,g,t,a,b,?,j,k,/filter,r,q] [--interactive] [--poll-ms <n>]\n  repl\n\nTUI startup: Enter advances Boot -> Trust -> Agent Core -> Workspace; 4 jumps to the workbench.\nTUI commands: /help, /status, /tasks, /agents, /skills, /context, /config, /boundary, /trust, /approve, /deny, /details, /save, /resume, /clear, /quit.\n\nModel/API config: /config reads .moxi/config.toml or MOXI_/OPENAI_/OPENROUTER_ environment variables and always redacts API keys. It is detection-only in this Alpha step; model chat is still not connected here.\n\nBoundary: this CLI submits requests and renders shell contracts only; it can watch snapshot files and render a read-only TUI preview, but it cannot execute, authorize, issue tickets, verify, or commit ledger events."
 }
 
 #[cfg(test)]
@@ -5620,7 +5882,7 @@ mod tests {
 
         let snapshot = session.context_snapshot();
 
-        assert_eq!(snapshot.sources.len(), 8);
+        assert_eq!(snapshot.sources.len(), 9);
         assert!(snapshot.percent > 50);
         assert!(snapshot
             .sources
@@ -5633,10 +5895,124 @@ mod tests {
     }
 
     #[test]
+    fn model_config_reports_missing_local_config() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = TuiModelConfig::load_at_with_env(
+            &temp.path().join(".moxi").join("config.toml"),
+            |_| None,
+        );
+
+        assert_eq!(config.provider, TuiModelProvider::OpenAi);
+        assert_eq!(config.endpoint, "https://api.openai.com/v1");
+        assert_eq!(config.model, "not-configured");
+        assert_eq!(config.config_state, "missing");
+        assert_eq!(config.api_key_source, TuiApiKeySource::Missing);
+        assert!(!config.is_configured());
+    }
+
+    #[test]
+    fn model_config_loads_config_toml_with_redacted_key() {
+        let temp = tempfile::tempdir().unwrap();
+        let moxi_dir = temp.path().join(".moxi");
+        fs::create_dir_all(&moxi_dir).unwrap();
+        let path = moxi_dir.join("config.toml");
+        let raw_secret = "sk-test-secret-123456";
+        fs::write(
+            &path,
+            format!(
+                "[model]\nprovider = \"openrouter\"\nendpoint = \"https://openrouter.ai/api/v1\"\nmodel = \"openai/gpt-4o-mini\"\napi_key = \"{raw_secret}\"\n"
+            ),
+        )
+        .unwrap();
+
+        let config = TuiModelConfig::load_at(&path);
+
+        assert_eq!(config.provider, TuiModelProvider::OpenRouter);
+        assert_eq!(config.endpoint, "https://openrouter.ai/api/v1");
+        assert_eq!(config.model, "openai/gpt-4o-mini");
+        assert_eq!(config.config_state, "present");
+        assert_eq!(
+            config.api_key_source,
+            TuiApiKeySource::Config {
+                redacted: "sk-t...3456".to_owned()
+            }
+        );
+        assert!(!config.api_key_source.summary().contains(raw_secret));
+        assert!(config.is_configured());
+    }
+
+    #[test]
+    fn model_config_uses_env_key_without_printing_secret() {
+        let temp = tempfile::tempdir().unwrap();
+        let moxi_dir = temp.path().join(".moxi");
+        fs::create_dir_all(&moxi_dir).unwrap();
+        let path = moxi_dir.join("config.toml");
+        let env_name = "MOXI_TEST_API_KEY_FOR_CONFIG";
+        let raw_secret = "env-secret-abcdef";
+        fs::write(
+            &path,
+            format!(
+                "provider = \"custom\"\nendpoint = \"https://models.example.test/v1\"\nmodel = \"demo-model\"\napi_key_env = \"{env_name}\"\n"
+            ),
+        )
+        .unwrap();
+        let config = TuiModelConfig::load_at_with_env(&path, |name| {
+            (name == env_name).then(|| raw_secret.to_owned())
+        });
+        assert_eq!(config.provider, TuiModelProvider::Custom);
+        assert_eq!(
+            config.api_key_source,
+            TuiApiKeySource::Env {
+                name: env_name.to_owned(),
+                redacted: "env-...cdef".to_owned()
+            }
+        );
+        assert!(!config.api_key_source.summary().contains(raw_secret));
+    }
+
+    #[test]
+    fn tui_config_command_pushes_redacted_message() {
+        let temp = tempfile::tempdir().unwrap();
+        let moxi_dir = temp.path().join(".moxi");
+        fs::create_dir_all(&moxi_dir).unwrap();
+        let raw_secret = "sk-visible-never-9999";
+        fs::write(
+            moxi_dir.join("config.toml"),
+            format!("provider = \"openai\"\nmodel = \"gpt-demo\"\napi_key = \"{raw_secret}\"\n"),
+        )
+        .unwrap();
+        let workspace = WorkspaceFacts::detect_at(temp.path());
+        let mut state = TuiState {
+            session: TuiAgentSession {
+                model_config: TuiModelConfig::load_for_workspace(&workspace),
+                workspace,
+                ..TuiAgentSession::default()
+            },
+            command_input: "/config".to_owned(),
+            ..TuiState::default()
+        };
+
+        submit_tui_command(&mut state);
+
+        let message = state
+            .session
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == "config")
+            .unwrap();
+        assert!(message.body.contains("provider=openai"));
+        assert!(message.body.contains("key=config:sk-v...9999"));
+        assert!(!message.body.contains(raw_secret));
+        assert!(state.command_status.contains("secrets are redacted"));
+    }
+
+    #[test]
     fn tui_session_persistence_snapshot_roundtrips_as_local_json() {
         let temp = tempfile::tempdir().unwrap();
         let workspace = WorkspaceFacts::detect_at(temp.path());
         let mut session = TuiAgentSession {
+            model_config: TuiModelConfig::load_for_workspace(&workspace),
             workspace,
             ..TuiAgentSession::default()
         };
@@ -6080,6 +6456,7 @@ reasoning = "low"
         let workspace = WorkspaceFacts::detect_at(temp.path());
         let mut state = TuiState {
             session: TuiAgentSession {
+                model_config: TuiModelConfig::load_for_workspace(&workspace),
                 workspace,
                 ..TuiAgentSession::default()
             },
@@ -6128,6 +6505,7 @@ reasoning = "low"
         let mut state = TuiState {
             screen: TuiScreen::Boot,
             session: TuiAgentSession {
+                model_config: TuiModelConfig::load_for_workspace(&workspace),
                 workspace,
                 ..TuiAgentSession::default()
             },
@@ -6749,8 +7127,9 @@ reasoning = "low"
         };
 
         let entries = filtered_command_palette_entries(&state.command_input);
-        assert_eq!(entries.len(), 1);
+        assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].command, "/context");
+        assert_eq!(entries[1].command, "/config");
 
         apply_tui_key(&mut state, &TuiKey::SubmitCommand);
 
@@ -6817,7 +7196,7 @@ reasoning = "low"
 
         assert_eq!(code, 0);
         assert!(text.contains("earlier commands"));
-        assert!(text.contains("/boundary"));
+        assert!(text.contains("/follow"));
         assert!(text.contains("more commands"));
         assert!(!text.contains("/status  current session"));
     }

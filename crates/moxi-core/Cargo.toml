@@ -1,0 +1,18 @@
+[package]
+name = "moxi-core"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+chrono.workspace = true
+jsonschema.workspace = true
+moxi-contracts = { path = "../moxi-contracts" }
+moxi-sandbox = { path = "../moxi-sandbox" }
+moxi-store = { path = "../moxi-store" }
+serde_json.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

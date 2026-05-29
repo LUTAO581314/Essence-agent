@@ -1,0 +1,24 @@
+[package]
+name = "moxi-cli"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "moxi"
+path = "src/main.rs"
+
+[dependencies]
+moxi-contracts = { path = "../moxi-contracts" }
+moxi-core = { path = "../moxi-core" }
+moxi-runtime = { path = "../moxi-runtime" }
+moxi-shells = { path = "../moxi-shells" }
+crossterm = "0.29"
+ratatui = "0.30"
+reqwest = { version = "=0.12.28", default-features = false, features = ["blocking", "rustls-tls"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

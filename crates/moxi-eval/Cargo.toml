@@ -1,0 +1,13 @@
+[package]
+name = "moxi-eval"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+chrono.workspace = true
+moxi-observability = { path = "../moxi-observability" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true

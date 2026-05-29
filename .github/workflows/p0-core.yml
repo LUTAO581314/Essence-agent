@@ -1,0 +1,53 @@
+name: P0 Core CI
+
+on:
+  push:
+    branches: ["main", "v*", "v0.2.0"]
+  pull_request:
+    branches: ["main", "v*", "v0.2.0"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  p0-core:
+    name: P0 core checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+          rustup default stable
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Run P0/P1 boundary tests
+        run: >
+          cargo test
+          -p moxi-contracts
+          -p moxi-core
+          -p moxi-sandbox
+          -p moxi-store
+          -p moxi-vault
+          -p moxi-runtime
+          --locked
+
+      - name: Run P0/P1 boundary clippy
+        run: >
+          cargo clippy
+          -p moxi-contracts
+          -p moxi-core
+          -p moxi-sandbox
+          -p moxi-store
+          -p moxi-vault
+          -p moxi-runtime
+          --all-targets
+          --locked
+          --
+          -D warnings

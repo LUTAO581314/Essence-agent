@@ -1,0 +1,15 @@
+[package]
+name = "moxi-model-gateway"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+chrono.workspace = true
+jsonschema.workspace = true
+moxi-contracts = { path = "../moxi-contracts" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+thiserror.workspace = true

@@ -2,9 +2,10 @@ name: Rust
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "v*" ]
   pull_request:
     branches: [ "main" ]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -23,7 +24,7 @@ jobs:
         - macos-latest
 
     steps:
-    - uses: actions/checkout@v6.0.2
+    - uses: actions/checkout@v4
     - name: Check formatting
       run: cargo fmt --check
     - name: Run clippy

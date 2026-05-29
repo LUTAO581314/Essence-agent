@@ -1,0 +1,15 @@
+[package]
+name = "moxi-adaptive"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+chrono.workspace = true
+hex.workspace = true
+moxi-contracts = { path = "../moxi-contracts" }
+moxi-eval = { path = "../moxi-eval" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true

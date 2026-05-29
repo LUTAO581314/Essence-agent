@@ -1,0 +1,21 @@
+[package]
+name = "moxi-runtime"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+chrono.workspace = true
+hex.workspace = true
+moxi-contracts = { path = "../moxi-contracts" }
+moxi-core = { path = "../moxi-core" }
+moxi-vault = { path = "../moxi-vault" }
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,0 +1,16 @@
+[package]
+name = "moxi-sandbox"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+chrono.workspace = true
+hex.workspace = true
+moxi-contracts = { path = "../moxi-contracts" }
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

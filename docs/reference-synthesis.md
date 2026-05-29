@@ -19,6 +19,9 @@ pull the kernel away from this small auditable loop.
 Reference projects inform the shape of the system, but the Rust kernel remains
 small, auditable, and replayable.
 
+This document is the canonical repository-level reference synthesis. The older
+`competitive-research.md` page now redirects here.
+
 ## References To Keep
 
 | Reference | Take | Do not take |
@@ -34,36 +37,72 @@ small, auditable, and replayable.
 | Star Office UI | Presence/status projection and multi-agent office shell | Identity or auth kernel |
 | TrendRadar | Source adapters, normalized items, scheduler, radar query surface | Research sources hard-coded into the kernel |
 
-## Current Essence Mapping
+## Reference Groups
 
-- `protocol`: durable session, run, event, task, approval, subagent, and memory
-  records.
-- `wal`: append-only JSONL session source of truth.
-- `projection`: replay views for UI, tasks, approvals, artifacts, messages, and
-  subagents.
-- `control`: file-backed control plane for session/run/tool/task/subagent
-  lifecycle.
-- `policy` and `registry`: deterministic tool metadata and permission decisions.
-- `subagent`: native sidechain transcript helper for delegated lanes.
-- `plugin` and `harness`: manifest and external CLI adapter boundary.
-- `gitnexus`: first code-intelligence harness plugin.
+| Group | Useful references | What to absorb |
+| --- | --- | --- |
+| Agent runtime shell | Claude Code-style runtimes, Hermes, OpenClaw | streaming loop, tool registry, permissions, approvals, bridge boundaries |
+| Workflow platform | AutoGPT Platform, DeerFlow, Paperclip | graph/block execution, heartbeat runs, scheduler, webhooks, visible task streams |
+| Multi-agent orchestration | AutoGen, MetaGPT, Magentic-One, MultiAgentBench | typed handoffs, role contracts, parent orchestrator, topology benchmarks, review gates |
+| Code context substrate | GitNexus, Graphify, Sonic | code graph, BM25/semantic retrieval, impact analysis, MCP query surfaces |
+| Memory substrate | MemPalace and related local-first memory systems | drawers for verbatim facts, hybrid retrieval, graph memory, source tracking |
+| Skill/prompt OS | Superpowers, skills-main, agency-agent style role packs | skill triggering discipline, reusable role packets, quality gates |
+| Product shell | Star Office UI, visual status surfaces | agent presence, queues, approvals, memory writes, and risk states as readable projections |
+| Evolution loop | Evolver-style systems | gene/capsule/event assets, validation before adoption, rollbackable evolution |
+
+## Implementation Implications
+
+- Keep `moxi-core` focused on trust, state, policy, ticketing, execution
+  orchestration, verification, and ledger commits.
+- Express outer capabilities through contracts, manifests, schemas, budgets,
+  proofs, and approval policies.
+- Treat CLI, desktop, MCP, web, plugins, memory, workflow, and swarm surfaces
+  as replaceable shells over the same contracts.
+- Treat swarm as a P1 verifiable-collaboration runtime: bounded subagents,
+  typed messages, sidechains, review/inspector gates, merge evidence, and
+  topology/fault/security eval.
+- Use reference research to shape interfaces and tests, not to import
+  incompatible upstream code.
+
+## Current Crate Mapping
+
+- `moxi-entry`: inbound adapter primitives for CLI, desktop, web, HTTP API,
+  SDK, MCP server, and automation channel normalization.
+- `moxi-contracts`: protocol structs and JSON schema generation for intents,
+  runs, capabilities, deltas, policy decisions, tickets, sandbox results,
+  proofs, ledger events, and structured errors.
+- `moxi-core`: trusted kernel orchestration for admission, policy checks,
+  approvals, artifact/manifest-bound ticket issuing, registered executor
+  dispatch, verification, and ledger commits.
+- `moxi-sandbox`: first local read-only file sandbox.
+- `moxi-store`: SQLite-backed run state, budgets, tickets, approvals,
+  append-only hash-chained ledger events, and schema migrations.
 
 ## Build Order
 
-1. Keep the JSONL WAL and projection layer as canonical source of truth.
-2. Grow the control plane into adapters: CLI, TUI, API, ACP, MCP, and gateway.
-3. Add richer subagent spawn, steer, cancel, result, and budget semantics.
-4. Add memory store projections with provenance from ledger events.
-5. Add plugin-hosted research radar, browser daemon, and external app harnesses.
-6. Add Star Office style visual shells over the UI event stream.
-7. Add evolution assets after kernel behavior is stable and auditable.
+1. Keep the current artifact-bound, manifest-bound, proof-bound kernel path
+   stable and hash-chained.
+2. Revisit JSONL transcript/WAL and projection layers as explicit future
+   source-of-truth work, not as current implementation.
+3. Implement `moxi-gateway` for authentication, tenant/session trust, rate
+   limiting, input risk scanning, and redaction.
+4. Grow concrete Entry adapters: CLI, API, SDK, MCP, desktop, and web.
+5. Add richer control-plane, projection, subagent, memory, plugin, browser, and
+   workflow surfaces only after the trusted path stays small and auditable.
+6. Add swarm contracts and eval before broad multi-agent autonomy:
+   `SwarmPlan`, typed `AgentMessage`, sidechains, review gates, merge evidence,
+   faulty-agent injection, and malicious-input regression.
+7. Add Star Office style visual shells over event/projection streams.
+8. Add evolution assets after kernel behavior is stable and auditable.
 
 ## Guardrails
 
-- Do not make SQLite/Postgres canonical before the WAL is stable; use databases
-  as projections.
+- Do not let the current SQLite ledger grow into a product database without a
+  deliberate source-of-truth decision.
 - Do not put fast-changing product integrations inside the Rust kernel.
 - Do not let plugins bypass approvals, budgets, auth, checkout, or storage
   contracts.
+- Do not let subagents self-expand authority, memory scope, budget, or parent
+  merge rights.
 - Do not copy incompatible upstream code; reimplement only the needed ideas.
 - Keep private memory local and opt-in for external lookup.

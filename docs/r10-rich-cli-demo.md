@@ -83,6 +83,8 @@ The default entry opens the resident workbench. Use `q` to quit.
   `/models/{model}` route and reports setup gaps, invalid keys, missing models,
   quota/rate limits, bad endpoints, network failures, timeouts, and unsupported
   response shapes.
+- `/models` lists OpenAI-compatible provider model ids through `/models` when
+  the configured endpoint supports catalog listing.
 - Configured workbench tasks now use the OpenAI-compatible `/chat/completions`
   adapter in read-only mode. If config, network, provider, or response parsing
   fails, the TUI falls back to local read-only analysis and redacts error

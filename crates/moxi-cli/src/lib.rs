@@ -426,6 +426,13 @@ impl TuiAgentSession {
         report.status
     }
 
+    fn push_models_message(&mut self) -> TuiModelCatalogStatus {
+        self.model_config = TuiModelConfig::load_for_workspace(&self.workspace);
+        let report = TuiModelCatalog::list(&self.model_config);
+        self.push_system_message("models", report.message());
+        report.status
+    }
+
     fn push_resume_message(&mut self, snapshot: &TuiSessionSnapshot) {
         self.push_system_message(
             "resume",
@@ -1801,6 +1808,132 @@ impl TuiDoctorStatus {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TuiModelCatalogStatus {
+    Ready,
+    NeedsSetup,
+    InvalidKey,
+    BadEndpoint,
+    Quota,
+    Network,
+    Timeout,
+    UnsupportedResponse,
+}
+
+impl TuiModelCatalogStatus {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::NeedsSetup => "needs-setup",
+            Self::InvalidKey => "invalid-key",
+            Self::BadEndpoint => "bad-endpoint",
+            Self::Quota => "quota",
+            Self::Network => "network",
+            Self::Timeout => "timeout",
+            Self::UnsupportedResponse => "unsupported-response",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TuiModelCatalogReport {
+    status: TuiModelCatalogStatus,
+    provider: TuiModelProvider,
+    endpoint: String,
+    configured_model: String,
+    models: Vec<String>,
+    detail: String,
+    action: String,
+}
+
+impl TuiModelCatalogReport {
+    fn message(&self) -> String {
+        let models = if self.models.is_empty() {
+            "<none>".to_owned()
+        } else {
+            self.models.join(", ")
+        };
+        format!(
+            "Models: status={} provider={} endpoint={} configured_model={}. Available: {}. Detail: {} Action: {}",
+            self.status.label(),
+            self.provider.label(),
+            self.endpoint,
+            self.configured_model,
+            models,
+            self.detail,
+            self.action
+        )
+    }
+}
+
+struct TuiModelCatalog;
+
+impl TuiModelCatalog {
+    fn list(config: &TuiModelConfig) -> TuiModelCatalogReport {
+        if config.needs_setup() {
+            return TuiModelCatalogReport {
+                status: TuiModelCatalogStatus::NeedsSetup,
+                provider: config.provider,
+                endpoint: config.endpoint.clone(),
+                configured_model: config.model.clone(),
+                models: Vec::new(),
+                detail: format!(
+                    "configuration is {}; key source is {}",
+                    config.config_state,
+                    config.api_key_source.summary()
+                ),
+                action: "open First-run Setup or create .moxi/config.toml before listing models"
+                    .to_owned(),
+            };
+        }
+        if config.endpoint == "not-configured" || !config.endpoint.starts_with("http") {
+            return TuiModelCatalogReport {
+                status: TuiModelCatalogStatus::BadEndpoint,
+                provider: config.provider,
+                endpoint: config.endpoint.clone(),
+                configured_model: config.model.clone(),
+                models: Vec::new(),
+                detail: "endpoint must be an http:// or https:// OpenAI-compatible base URL"
+                    .to_owned(),
+                action: "set endpoint to an OpenAI-compatible /v1 endpoint".to_owned(),
+            };
+        }
+        let Some(secret) = config.secret() else {
+            return TuiModelCatalogReport {
+                status: TuiModelCatalogStatus::NeedsSetup,
+                provider: config.provider,
+                endpoint: config.endpoint.clone(),
+                configured_model: config.model.clone(),
+                models: Vec::new(),
+                detail: format!(
+                    "{} is redacted but not available to this process",
+                    config.api_key_source.summary()
+                ),
+                action: "export the configured api_key_env before launching moxi".to_owned(),
+            };
+        };
+
+        match http_list_openai_models(&config.endpoint, &secret) {
+            Ok(response) => classify_model_catalog_response(config, response),
+            Err(error) => TuiModelCatalogReport {
+                status: if error.contains("timed out") {
+                    TuiModelCatalogStatus::Timeout
+                } else {
+                    TuiModelCatalogStatus::Network
+                },
+                provider: config.provider,
+                endpoint: config.endpoint.clone(),
+                configured_model: config.model.clone(),
+                models: Vec::new(),
+                detail: error,
+                action:
+                    "check network access, endpoint URL, local server state, proxy, or firewall"
+                        .to_owned(),
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TuiDoctorReport {
     status: TuiDoctorStatus,
@@ -1948,6 +2081,86 @@ fn classify_doctor_response(
     }
 }
 
+fn classify_model_catalog_response(
+    config: &TuiModelConfig,
+    response: HttpProbeResponse,
+) -> TuiModelCatalogReport {
+    let status = match response.status {
+        200 => TuiModelCatalogStatus::Ready,
+        401 | 403 => TuiModelCatalogStatus::InvalidKey,
+        402 | 429 => TuiModelCatalogStatus::Quota,
+        400 | 404 | 500..=599 => TuiModelCatalogStatus::BadEndpoint,
+        _ => TuiModelCatalogStatus::UnsupportedResponse,
+    };
+    let (status, models, detail) = if status == TuiModelCatalogStatus::Ready {
+        match parse_openai_model_ids(&response.body) {
+            Ok(models) if !models.is_empty() => {
+                let shown = models.into_iter().take(20).collect::<Vec<_>>();
+                let detail = format!(
+                    "HTTP {} from provider; showing up to 20 model ids",
+                    response.status
+                );
+                (TuiModelCatalogStatus::Ready, shown, detail)
+            }
+            Ok(_) => (
+                TuiModelCatalogStatus::UnsupportedResponse,
+                Vec::new(),
+                format!(
+                    "HTTP {} from provider; no model ids found in body preview: {}",
+                    response.status,
+                    redacted_preview(&response.body, 120)
+                ),
+            ),
+            Err(error) => (
+                TuiModelCatalogStatus::UnsupportedResponse,
+                Vec::new(),
+                format!(
+                    "HTTP {} from provider; {error}; body preview: {}",
+                    response.status,
+                    redacted_preview(&response.body, 120)
+                ),
+            ),
+        }
+    } else {
+        (
+            status,
+            Vec::new(),
+            format!(
+                "HTTP {} from provider; body preview: {}",
+                response.status,
+                redacted_preview(&response.body, 120)
+            ),
+        )
+    };
+    let action = match status {
+        TuiModelCatalogStatus::Ready => {
+            "choose one model id and set it as model in .moxi/config.toml"
+        }
+        TuiModelCatalogStatus::InvalidKey => {
+            "check the api_key_env value; the key is not printed by MOXI"
+        }
+        TuiModelCatalogStatus::Quota => "check quota, billing, or rate limits for the provider",
+        TuiModelCatalogStatus::BadEndpoint => {
+            "check endpoint base URL and OpenAI-compatible /v1 routing"
+        }
+        TuiModelCatalogStatus::UnsupportedResponse => {
+            "provider responded, but /models did not match the OpenAI-compatible catalog shape"
+        }
+        TuiModelCatalogStatus::NeedsSetup
+        | TuiModelCatalogStatus::Network
+        | TuiModelCatalogStatus::Timeout => "review setup and retry /models",
+    };
+    TuiModelCatalogReport {
+        status,
+        provider: config.provider,
+        endpoint: config.endpoint.clone(),
+        configured_model: config.model.clone(),
+        models,
+        detail,
+        action: action.to_owned(),
+    }
+}
+
 fn http_get_openai_model(
     endpoint: &str,
     model: &str,
@@ -1973,6 +2186,30 @@ fn http_get_openai_model(
     let body = response
         .text()
         .map_err(|error| format!("network response read failed: {error}"))?;
+    Ok(HttpProbeResponse { status, body })
+}
+
+fn http_list_openai_models(endpoint: &str, secret: &str) -> Result<HttpProbeResponse, String> {
+    let url = format!("{}/models", endpoint.trim_end_matches('/'));
+    let response = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|error| format!("models client setup failed: {error}"))?
+        .get(url)
+        .bearer_auth(secret)
+        .header(reqwest::header::ACCEPT, "application/json")
+        .send()
+        .map_err(|error| {
+            if error.is_timeout() {
+                format!("model catalog request timed out: {error}")
+            } else {
+                format!("model catalog request failed: {error}")
+            }
+        })?;
+    let status = response.status().as_u16();
+    let body = response
+        .text()
+        .map_err(|error| format!("model catalog response read failed: {error}"))?;
     Ok(HttpProbeResponse { status, body })
 }
 
@@ -2065,6 +2302,25 @@ fn parse_openai_chat_content(body: &str) -> Result<String, String> {
             )
         })?;
     Ok(content.to_owned())
+}
+
+fn parse_openai_model_ids(body: &str) -> Result<Vec<String>, String> {
+    let json: serde_json::Value = serde_json::from_str(body)
+        .map_err(|error| format!("model catalog response was not JSON: {error}"))?;
+    let data = json
+        .get("data")
+        .and_then(|data| data.as_array())
+        .ok_or_else(|| "unsupported model catalog shape: missing data array".to_owned())?;
+    let mut ids = data
+        .iter()
+        .filter_map(|item| item.get("id").and_then(|id| id.as_str()))
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    ids.sort();
+    ids.dedup();
+    Ok(ids)
 }
 
 fn redacted_preview(value: &str, max_chars: usize) -> String {
@@ -3056,6 +3312,14 @@ fn submit_tui_command(state: &mut TuiState) {
             state.follow_latest_message = true;
             state.conversation_scroll = 0;
             state.command_status = format!("doctor completed: {}", status.label());
+        }
+        "models" => {
+            state.active_pane = TuiPane::Overview;
+            state.screen = TuiScreen::Workspace;
+            let status = state.session.push_models_message();
+            state.follow_latest_message = true;
+            state.conversation_scroll = 0;
+            state.command_status = format!("models completed: {}", status.label());
         }
         "save" | "persist" => match state.session.save_persistence_snapshot() {
             Ok(path) => {
@@ -4538,6 +4802,7 @@ fn render_tui_setup(frame: &mut ratatui::Frame<'_>, area: Rect, state: &TuiState
         Line::from(vec![Span::styled("Next Alpha steps", style_warning())]),
         Line::from("* /config shows redacted config state"),
         Line::from("o /doctor will test endpoint, key, model, quota, and response shape"),
+        Line::from("o /models lists provider model ids when the endpoint supports it"),
         Line::from("o configured sessions use read-only model chat after setup"),
         Line::from(""),
         Line::from(vec![
@@ -4853,6 +5118,10 @@ const COMMAND_PALETTE_ENTRIES: &[CommandPaletteEntry] = &[
     CommandPaletteEntry {
         command: "/doctor",
         description: "test model/API endpoint readiness",
+    },
+    CommandPaletteEntry {
+        command: "/models",
+        description: "list provider model ids",
     },
     CommandPaletteEntry {
         command: "/save",
@@ -5691,7 +5960,7 @@ fn percent(value: f32) -> String {
 }
 
 fn help_text() -> &'static str {
-    "moxi\n\nDefault:\n  moxi\n    Opens the resident branded read-only TUI workbench. Startup pages wait for owner input instead of flashing through onboarding.\n\nCommands:\n  admit --goal <text> [--tenant <id>] [--user <id>] [--workspace <path>] [--capability <id>] [--risk low|medium|high|critical]\n  manifest [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human]\n  boundary [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--text]\n  status [--feed|--query] [--input <snapshot.json>] [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--text|--panel] [--limit <n>]\n  watch [--feed|--query] --input <snapshot.json> [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--text|--panel] [--limit <n>] [--ticks <n>] [--interval-ms <n>]\n  tui [--feed|--query] [--input <snapshot.json>] [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--width <n>] [--height <n>] [--keys tab,o,g,t,a,b,?,j,k,/filter,r,q] [--interactive] [--poll-ms <n>]\n  repl\n\nTUI startup: Enter advances Boot -> Trust -> First-run Setup when model/API config is missing -> Agent Core -> Workspace; 5 jumps to the workbench.\nTUI commands: /help, /status, /tasks, /agents, /skills, /context, /config, /doctor, /boundary, /trust, /approve, /deny, /details, /save, /resume, /clear, /quit.\n\nModel/API config: /config reads .moxi/config.toml or MOXI_/OPENAI_/OPENROUTER_ environment variables and always redacts API keys. /doctor tests OpenAI-compatible endpoint readiness and reports invalid key, model not found, quota/rate limit, timeout, network, bad endpoint, and unsupported response categories. Configured TUI tasks use read-only OpenAI-compatible /chat/completions; failures fall back to local analysis.\n\nBoundary: this CLI submits requests and renders shell contracts only; it can watch snapshot files and render a read-only TUI preview, but it cannot execute, authorize, issue tickets, verify, or commit ledger events."
+    "moxi\n\nDefault:\n  moxi\n    Opens the resident branded read-only TUI workbench. Startup pages wait for owner input instead of flashing through onboarding.\n\nCommands:\n  admit --goal <text> [--tenant <id>] [--user <id>] [--workspace <path>] [--capability <id>] [--risk low|medium|high|critical]\n  manifest [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human]\n  boundary [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--text]\n  status [--feed|--query] [--input <snapshot.json>] [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--text|--panel] [--limit <n>]\n  watch [--feed|--query] --input <snapshot.json> [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--text|--panel] [--limit <n>] [--ticks <n>] [--interval-ms <n>]\n  tui [--feed|--query] [--input <snapshot.json>] [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--width <n>] [--height <n>] [--keys tab,o,g,t,a,b,?,j,k,/filter,r,q] [--interactive] [--poll-ms <n>]\n  repl\n\nTUI startup: Enter advances Boot -> Trust -> First-run Setup when model/API config is missing -> Agent Core -> Workspace; 5 jumps to the workbench.\nTUI commands: /help, /status, /tasks, /agents, /skills, /context, /config, /doctor, /models, /boundary, /trust, /approve, /deny, /details, /save, /resume, /clear, /quit.\n\nModel/API config: /config reads .moxi/config.toml or MOXI_/OPENAI_/OPENROUTER_ environment variables and always redacts API keys. /doctor tests OpenAI-compatible endpoint readiness and reports invalid key, model not found, quota/rate limit, timeout, network, bad endpoint, and unsupported response categories. /models lists OpenAI-compatible provider model ids when available. Configured TUI tasks use read-only OpenAI-compatible /chat/completions; failures fall back to local analysis.\n\nBoundary: this CLI submits requests and renders shell contracts only; it can watch snapshot files and render a read-only TUI preview, but it cannot execute, authorize, issue tickets, verify, or commit ledger events."
 }
 
 #[cfg(test)]
@@ -6853,6 +7122,34 @@ mod tests {
     }
 
     #[test]
+    fn model_catalog_parses_openai_model_ids() {
+        let models = parse_openai_model_ids(
+            r#"{"object":"list","data":[{"id":"gpt-b"},{"id":"gpt-a"},{"id":"gpt-a"}]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(models, vec!["gpt-a".to_owned(), "gpt-b".to_owned()]);
+    }
+
+    #[test]
+    fn model_catalog_lists_local_openai_compatible_endpoint() {
+        let endpoint = mock_http_once_with_path(
+            200,
+            r#"{"object":"list","data":[{"id":"gpt-demo"},{"id":"gpt-mini"}]}"#,
+            Some("/v1/models"),
+        );
+        let response = http_list_openai_models(&endpoint, "secret").unwrap();
+        let report = classify_model_catalog_response(&test_doctor_config(&endpoint), response);
+
+        assert_eq!(report.status, TuiModelCatalogStatus::Ready);
+        assert_eq!(
+            report.models,
+            vec!["gpt-demo".to_owned(), "gpt-mini".to_owned()]
+        );
+        assert!(report.message().contains("gpt-demo"));
+    }
+
+    #[test]
     fn model_chat_adapter_posts_read_only_prompt() {
         let endpoint = mock_http_once_with_path(
             200,
@@ -7062,6 +7359,54 @@ mod tests {
         assert!(message.body.contains("check the api_key_env value"));
         assert!(!message.body.contains(raw_secret));
         assert!(state.command_status.contains("invalid-key"));
+    }
+
+    #[test]
+    fn tui_models_command_lists_provider_models_without_secret() {
+        let temp = tempfile::tempdir().unwrap();
+        let moxi_dir = temp.path().join(".moxi");
+        fs::create_dir_all(&moxi_dir).unwrap();
+        let endpoint = mock_http_once_with_path(
+            200,
+            r#"{"object":"list","data":[{"id":"gpt-demo"},{"id":"gpt-mini"}]}"#,
+            Some("/v1/models"),
+        );
+        let env_name = "MOXI_TEST_MODELS_KEY";
+        let raw_secret = "models-secret-123456";
+        fs::write(
+            moxi_dir.join("config.toml"),
+            format!(
+                "provider = \"custom\"\nendpoint = \"{endpoint}\"\nmodel = \"gpt-demo\"\napi_key_env = \"{env_name}\"\n"
+            ),
+        )
+        .unwrap();
+        env::set_var(env_name, raw_secret);
+        let workspace = WorkspaceFacts::detect_at(temp.path());
+        let mut state = TuiState {
+            session: TuiAgentSession {
+                model_config: TuiModelConfig::load_for_workspace(&workspace),
+                workspace,
+                ..TuiAgentSession::default()
+            },
+            command_input: "/models".to_owned(),
+            ..TuiState::default()
+        };
+
+        submit_tui_command(&mut state);
+
+        env::remove_var(env_name);
+        let message = state
+            .session
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == "models")
+            .unwrap();
+        assert!(message.body.contains("status=ready"));
+        assert!(message.body.contains("gpt-demo"));
+        assert!(message.body.contains("gpt-mini"));
+        assert!(!message.body.contains(raw_secret));
+        assert!(state.command_status.contains("ready"));
     }
 
     #[test]
@@ -8364,7 +8709,7 @@ reasoning = "low"
 
         assert_eq!(code, 0);
         assert!(text.contains("earlier commands"));
-        assert!(text.contains("/details"));
+        assert!(text.contains("/deny"));
         assert!(text.contains("more commands"));
         assert!(!text.contains("/status  current session"));
     }

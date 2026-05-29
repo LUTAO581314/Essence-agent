@@ -277,6 +277,7 @@ Commands
 /context   show context sources
 /config    inspect redacted model/API config
 /doctor    test model/API readiness
+/models    list provider model ids
 /approve   confirm current risk intent
 /deny      reject current risk
 /trust     open workspace trust gate
@@ -285,9 +286,11 @@ Commands
 
 `/doctor` should classify provider readiness in owner-facing language: setup
 missing, invalid key, model not found, quota/rate limit, bad endpoint, network
-failure, timeout, unsupported response, or ready. It must keep secrets redacted.
-The Alpha implementation probes OpenAI-compatible HTTP/HTTPS endpoints through
-`/models/{model}` and routes configured workbench tasks through
+failure, timeout, unsupported response, or ready. `/models` should list
+OpenAI-compatible provider model ids when `/models` is supported. Both commands
+must keep secrets redacted. The Alpha implementation probes
+OpenAI-compatible HTTP/HTTPS endpoints through `/models/{model}`, lists catalogs
+through `/models`, and routes configured workbench tasks through
 `/chat/completions`. Provider replies are staged into visible chunks in the TUI;
 true provider chunk/SSE streaming remains a follow-up.
 

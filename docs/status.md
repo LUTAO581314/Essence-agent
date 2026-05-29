@@ -547,7 +547,9 @@ setup action, OpenAI-compatible HTTP/HTTPS endpoints can be probed via
 `/models/{model}` using a blocking `reqwest` client with `rustls` TLS, and
 responses are classified as ready, invalid key, model not found, quota/rate
 limit, bad endpoint, network, timeout, or unsupported response while keeping
-secrets redacted. Configured TUI task submissions now prefer a read-only
+secrets redacted. `/models` lists OpenAI-compatible provider model ids through
+the configured `/models` catalog endpoint, showing up to 20 ids and redacting
+errors. Configured TUI task submissions now prefer a read-only
 OpenAI-compatible `/chat/completions` adapter that packages workspace facts,
 trust state, active agents, skills, and the owner task; provider/config errors
 fall back to local read-only analysis with redacted previews. The TUI now stages
@@ -567,8 +569,8 @@ PowerShell helper script at `scripts/demo-r10-rich-cli.ps1`. The script supports
 CLI can be shown live or rendered deterministically for review.
 The footer is now a command pane with safe display-only commands including
 `/help`, `/status`, `/tasks`, `/agents`, `/skills`, `/context`, `/config`,
-`/doctor`, `/boundary`, `/trust`, `/approve`, `/deny`, `/details`, `/save`,
-`/resume`, and `/quit`.
+`/doctor`, `/models`, `/boundary`, `/trust`, `/approve`, `/deny`, `/details`,
+`/save`, `/resume`, and `/quit`.
 After visual review against Claude-style agent CLIs, the TUI has shifted from a
 large dashboard grid to a chat-first surface: the main area is an AI
 conversation/status stream, and graph/task/approval/boundary facts are reduced

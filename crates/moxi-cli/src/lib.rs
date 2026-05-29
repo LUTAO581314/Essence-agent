@@ -3289,7 +3289,7 @@ fn render_tui_workspace(
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(5),
+            Constraint::Length(3),
             Constraint::Min(12),
             Constraint::Length(4),
             Constraint::Length(1),
@@ -3299,10 +3299,14 @@ fn render_tui_workspace(
     frame.render_widget(tui_header(projection, state), vertical[0]);
     let body = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
+        .constraints([
+            Constraint::Min(64),
+            Constraint::Length(1),
+            Constraint::Length(42),
+        ])
         .split(vertical[1]);
     frame.render_widget(tui_chat_stream(projection, state), body[0]);
-    frame.render_widget(tui_task_tracker(projection, state), body[1]);
+    frame.render_widget(tui_task_tracker(projection, state), body[2]);
     frame.render_widget(tui_input_box(state), vertical[2]);
     frame.render_widget(tui_status_bar(projection, state), vertical[3]);
     if state.show_command_palette {
@@ -3898,7 +3902,6 @@ fn workspace_display_path() -> String {
 }
 
 fn tui_header(projection: &moxi_shells::ShellProjection, state: &TuiState) -> Paragraph<'static> {
-    let context = state.session.context_snapshot();
     Paragraph::new(vec![
         Line::from(vec![
             Span::styled("moxi-agent", style_brand()),
@@ -3934,33 +3937,7 @@ fn tui_header(projection: &moxi_shells::ShellProjection, state: &TuiState) -> Pa
                 style_value(),
             ),
         ]),
-        Line::from(vec![
-            Span::styled("git: ", style_label()),
-            Span::styled(state.session.workspace.git_state.clone(), style_value()),
-            Span::styled(" | cargo: ", style_label()),
-            Span::styled(state.session.workspace.cargo_state.clone(), style_value()),
-            Span::styled(" | docs: ", style_label()),
-            Span::styled(state.session.workspace.docs_state.clone(), style_value()),
-            Span::styled(" | context: ", style_label()),
-            progress_bar(context.ratio(), 8),
-            Span::styled(format!("{}%", context.percent), style_focus()),
-        ]),
-        Line::from(vec![
-            Span::styled("screen: ", style_label()),
-            Span::styled(format!("{:?}", state.screen), style_dim()),
-            Span::styled(" | pane=", style_label()),
-            Span::styled(state.active_pane.label(), style_dim()),
-            Span::styled(" | refresh: ", style_label()),
-            Span::styled(state.refresh_count.to_string(), style_dim()),
-            Span::styled(" | session: ", style_label()),
-            Span::styled(state.session.id.clone(), style_dim()),
-        ]),
     ])
-    .block(tui_panel_block(
-        "moxi-agent control plane",
-        Color::Cyan,
-        BorderType::Plain,
-    ))
     .style(style_value())
 }
 
@@ -3975,6 +3952,11 @@ fn tui_chat_stream(
         .filter(|blocker| blocker.blocker == ResumeBlocker::AwaitingApproval)
         .count();
     let mut lines = vec![Line::from(vec![
+        Span::styled("Conversation", style_label()),
+        Span::styled(
+            format!(" 路 {} messages  ", state.session.messages.len()),
+            style_dim(),
+        ),
         Span::styled("Session ", style_label()),
         Span::styled(state.session.id.clone(), style_value()),
         Span::raw(" "),
@@ -4116,9 +4098,8 @@ fn tui_chat_stream(
 
     let title = format!("Conversation · {} messages", state.session.messages.len());
     let visible_lines = visible_conversation_lines(lines, state);
-    Paragraph::new(visible_lines)
-        .block(tui_panel_block(title, Color::Cyan, BorderType::Rounded))
-        .wrap(Wrap { trim: true })
+    let _title = title;
+    Paragraph::new(visible_lines).wrap(Wrap { trim: true })
 }
 
 fn visible_conversation_lines(lines: Vec<Line<'static>>, state: &TuiState) -> Vec<Line<'static>> {
@@ -4193,7 +4174,7 @@ fn tui_input_box(state: &TuiState) -> Paragraph<'static> {
         .block(tui_panel_block(
             "Input Task",
             Color::Yellow,
-            BorderType::Double,
+            BorderType::Plain,
         ))
         .wrap(Wrap { trim: true })
 }
@@ -4204,22 +4185,26 @@ fn tui_status_bar(
 ) -> Paragraph<'static> {
     let context = state.session.context_snapshot();
     Paragraph::new(Line::from(vec![
-        Span::raw(format!(
-            "graph={} pane={} active={} selected_task={} filter={} refresh={} quit={} | context ",
-            projection.graph_id.as_deref().unwrap_or("<none>"),
-            state.active_pane.label(),
-            state.active_pane.label(),
-            state.selected_task_index,
-            state.filter.as_deref().unwrap_or("<none>"),
-            state.refresh_count,
-            state.should_quit
-        )),
+        Span::styled(
+            format!(
+                "graph={} pane={} active={} selected_task={} filter={} refresh={} quit={} | ",
+                projection.graph_id.as_deref().unwrap_or("<none>"),
+                state.active_pane.label(),
+                state.active_pane.label(),
+                state.selected_task_index,
+                state.filter.as_deref().unwrap_or("<none>"),
+                state.refresh_count,
+                state.should_quit
+            ),
+            style_dim(),
+        ),
+        Span::styled("/context | ? command menu | ", style_dim()),
+        Span::styled("mode ", style_label()),
+        Span::styled(state.session.mode.label(), style_dim()),
+        Span::styled(" | model session-local | reasoning medium | ", style_dim()),
+        Span::styled("context ", style_label()),
         progress_bar(context.ratio(), 10),
         Span::styled(format!("{}%", context.percent), style_focus()),
-        Span::styled(" /context", style_dim()),
-        Span::styled(" | ? shortcuts | profile ", style_label()),
-        Span::styled(projection.profile_id.clone(), style_dim()),
-        Span::styled(" | ", style_label()),
         Span::styled(state.command_status.clone(), style_value()),
     ]))
 }

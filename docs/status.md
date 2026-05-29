@@ -541,6 +541,10 @@ Task Tracking now prioritizes the active turn before older turns, so the latest
 backend plan steps stay visible after a response completes. The right pane shows
 the backend plan id, local plan steps, and final P1/P0-adapter wait state before
 falling back to older session turns and runtime projection facts.
+The workspace layout now follows the sticky-sidebar target from the Rich CLI
+design doc: the global dashboard frame is removed, the conversation renders as
+an unframed stream, Task Tracking stays pinned in a fixed-width right sidebar,
+and the bottom rail carries the input plus mode/model/reasoning/context status.
 The local demo runbook is now documented in `docs/r10-rich-cli-demo.md`, with a
 PowerShell helper script at `scripts/demo-r10-rich-cli.ps1`. The script supports
 `interactive`, `boot`, `core`, `flow`, and `status` modes so the Rich CLI can be

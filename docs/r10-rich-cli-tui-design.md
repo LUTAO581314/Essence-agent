@@ -151,17 +151,17 @@ tui.design | risk.review | docs.prepare | github.prepare
 
 Purpose: daily usability.
 
-The main UI should be cleaner than the startup/core pages. It should show the
-current directory and configuration at the top, conversation in the center,
-task tracking to the right, a strong input box at the bottom, and context usage
-under the input on the bottom-right.
+The main UI should be cleaner than the startup/core pages. It should behave
+like a chat-first reading surface: a light fact header at the top, a flowing
+conversation body, a sticky task sidebar on the right, and a bottom input/status
+rail. Avoid wrapping the whole workspace in a dashboard frame.
 
 ```text
 moxi-agent                                      guarded | read-only
 cwd: C:\MOXI-Essence-agent\MOXI-Essence-agent
 config: .moxi\agents.toml | core: Silver Core | trust: pending
 
-Conversation                                   Task Tracking
+Conversation stream                           Sticky Task Tracking
 
 * moxi-agent [orchestrator]                    Turn 1
 I will inspect the workspace first,            * Detect workspace
@@ -187,8 +187,14 @@ Input Task
 - Top header shows hard session facts: `cwd`, config source, core, trust, mode.
 - Do not put `context [bar]` in the top header. It belongs under the input box,
   bottom-right.
-- The input box must use a visually strong border and be separate from the
-  conversation area.
+- The workspace should not have one large enclosing border. Conversation text
+  is an unframed stream so the user feels they are talking, not reading a
+  dashboard.
+- Task Tracking is a sticky sidebar: it stays fixed on the right while the
+  conversation scrolls independently. Keep a narrow gap between chat and the
+  sidebar so the sidebar feels pinned rather than crowded into the chat.
+- The input box is fixed at the bottom. Use a simple bottom rail and keep
+  context/mode/model/reasoning metadata in the thin line below it.
 - Shortcut commands should not be permanently listed. Default footer is only:
   `? shortcuts | / command menu`.
 - Full commands appear only in a popup or command palette.

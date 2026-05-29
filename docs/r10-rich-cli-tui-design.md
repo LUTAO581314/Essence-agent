@@ -32,8 +32,10 @@ The setup page should not appear after configuration is complete. It appears
 when `.moxi/config.toml` and supported environment variables do not provide a
 provider, endpoint, model, and API-key source. The top-level `moxi init` command
 now provides the explicit setup flow: dry-run preview by default, and
-`.moxi/config.toml` creation only with `--write`. `/doctor` provides the
-connectivity check after config exists.
+`.moxi/config.toml` creation only with `--write`. Top-level `moxi config`,
+`moxi doctor`, and `moxi models` provide the same redacted inspection,
+connectivity, and catalog checks that the TUI exposes as `/config`, `/doctor`,
+and `/models`.
 
 ## Page 1: Logo Impact
 
@@ -206,6 +208,9 @@ CLI setup command:
 ```powershell
 moxi init --provider openai --model gpt-4o-mini
 moxi init --provider openai --model gpt-4o-mini --write
+moxi config
+moxi doctor
+moxi models
 ```
 
 `moxi init` must store only `api_key_env`, never raw `api_key`, unless a later

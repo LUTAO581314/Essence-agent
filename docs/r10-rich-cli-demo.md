@@ -26,6 +26,15 @@ Create `.moxi/config.toml` only when you explicitly pass `--write`:
 cargo run -p moxi-cli --bin moxi --locked -- init --provider openai --model gpt-4o-mini --write
 ```
 
+Inspect the redacted model/API config and run read-only provider checks without
+opening the TUI:
+
+```powershell
+cargo run -p moxi-cli --bin moxi --locked -- config
+cargo run -p moxi-cli --bin moxi --locked -- doctor
+cargo run -p moxi-cli --bin moxi --locked -- models
+```
+
 Or use the helper script:
 
 ```powershell
@@ -92,13 +101,15 @@ The default entry opens the resident workbench. Use `q` to quit.
   but does not save secrets or print full API keys. The top-level `moxi init`
   command previews the same env-only config by default, and writes it only when
   `--write` is explicit.
-- `/doctor` classifies model/API readiness without printing secrets. It probes
-  OpenAI-compatible HTTP/HTTPS endpoints through the configured
+- `moxi config` and `/config` inspect the same model/API config state with
+  redacted key display. `moxi doctor` and `/doctor` classify model/API readiness
+  without printing secrets. They probe OpenAI-compatible HTTP/HTTPS endpoints
+  through the configured
   `/models/{model}` route and reports setup gaps, invalid keys, missing models,
   quota/rate limits, bad endpoints, network failures, timeouts, and unsupported
   response shapes.
-- `/models` lists OpenAI-compatible provider model ids through `/models` when
-  the configured endpoint supports catalog listing.
+- `moxi models` and `/models` list OpenAI-compatible provider model ids through
+  `/models` when the configured endpoint supports catalog listing.
 - Configured workbench tasks now use the OpenAI-compatible `/chat/completions`
   adapter in read-only mode. If config, network, provider, or response parsing
   fails, the TUI falls back to local read-only analysis and redacts error

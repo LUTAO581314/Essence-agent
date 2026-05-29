@@ -179,6 +179,11 @@ struct InitOptions {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct ModelConfigCommandOptions {
+    config_path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct TuiOptions {
     status: StatusOptions,
     width: u16,
@@ -1700,6 +1705,18 @@ impl TuiModelConfig {
             self.provider.default_key_env(),
         )
     }
+
+    fn redacted_summary(&self) -> String {
+        format!(
+            "provider={} endpoint={} model={} config={} ({}) key={}",
+            self.provider.label(),
+            self.endpoint,
+            self.model,
+            self.config_path,
+            self.config_state,
+            self.api_key_source.summary()
+        )
+    }
 }
 
 fn render_model_config_template(
@@ -1903,6 +1920,24 @@ impl TuiModelCatalogReport {
             self.action
         )
     }
+
+    fn cli_text(&self) -> String {
+        let models = if self.models.is_empty() {
+            "<none>".to_owned()
+        } else {
+            self.models.join("\n- ")
+        };
+        format!(
+            "MOXI models\nstatus: {}\nprovider: {}\nendpoint: {}\nconfigured_model: {}\nmodels:\n- {}\ndetail: {}\naction: {}",
+            self.status.label(),
+            self.provider.label(),
+            self.endpoint,
+            self.configured_model,
+            models,
+            self.detail,
+            self.action
+        )
+    }
 }
 
 struct TuiModelCatalog;
@@ -1987,6 +2022,18 @@ impl TuiDoctorReport {
     fn message(&self) -> String {
         format!(
             "Doctor: status={} provider={} endpoint={} model={}. Detail: {} Action: {}",
+            self.status.label(),
+            self.provider.label(),
+            self.endpoint,
+            self.model,
+            self.detail,
+            self.action
+        )
+    }
+
+    fn cli_text(&self) -> String {
+        format!(
+            "MOXI doctor\nstatus: {}\nprovider: {}\nendpoint: {}\nmodel: {}\ndetail: {}\naction: {}",
             self.status.label(),
             self.provider.label(),
             self.endpoint,
@@ -2910,6 +2957,18 @@ where
             let options = parse_init(rest)?;
             run_init(options, writer)?;
         }
+        "config" => {
+            let options = parse_model_config_command(rest)?;
+            run_config(options, writer)?;
+        }
+        "doctor" => {
+            let options = parse_model_config_command(rest)?;
+            run_doctor(options, writer)?;
+        }
+        "models" => {
+            let options = parse_model_config_command(rest)?;
+            run_models(options, writer)?;
+        }
         "tui" => {
             let options = parse_tui(rest)?;
             run_tui(options, writer)?;
@@ -3025,6 +3084,39 @@ fn run_init(options: InitOptions, writer: &mut impl Write) -> CliResult<()> {
             options.api_key_env
         )?;
     }
+    Ok(())
+}
+
+fn run_config(options: ModelConfigCommandOptions, writer: &mut impl Write) -> CliResult<()> {
+    let config = TuiModelConfig::load_at(&options.config_path);
+    writeln!(writer, "MOXI model config")?;
+    writeln!(writer, "{}", config.redacted_summary())?;
+    writeln!(
+        writer,
+        "boundary: read-only config inspection; secrets are redacted"
+    )?;
+    Ok(())
+}
+
+fn run_doctor(options: ModelConfigCommandOptions, writer: &mut impl Write) -> CliResult<()> {
+    let config = TuiModelConfig::load_at(&options.config_path);
+    let report = TuiModelDoctor::check(&config);
+    writeln!(writer, "{}", report.cli_text())?;
+    writeln!(
+        writer,
+        "boundary: read-only connectivity probe; no execution or mutation authority"
+    )?;
+    Ok(())
+}
+
+fn run_models(options: ModelConfigCommandOptions, writer: &mut impl Write) -> CliResult<()> {
+    let config = TuiModelConfig::load_at(&options.config_path);
+    let report = TuiModelCatalog::list(&config);
+    writeln!(writer, "{}", report.cli_text())?;
+    writeln!(
+        writer,
+        "boundary: read-only model catalog probe; no execution or mutation authority"
+    )?;
     Ok(())
 }
 
@@ -4079,6 +4171,26 @@ fn parse_init(args: &[String]) -> CliResult<InitOptions> {
     })
 }
 
+fn parse_model_config_command(args: &[String]) -> CliResult<ModelConfigCommandOptions> {
+    let mut config_path: Option<PathBuf> = None;
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--config" => {
+                config_path = Some(PathBuf::from(value_after(args, &mut index, "--config")?));
+            }
+            flag if flag.starts_with('-') => return Err(CliError::UnknownFlag(flag.to_owned())),
+            value => return Err(CliError::UnknownFlag(value.to_owned())),
+        }
+        index += 1;
+    }
+
+    Ok(ModelConfigCommandOptions {
+        config_path: config_path.unwrap_or_else(default_model_config_path),
+    })
+}
+
 fn parse_tui(args: &[String]) -> CliResult<TuiOptions> {
     let mut status_args = Vec::new();
     let mut width = 100;
@@ -4288,7 +4400,8 @@ fn boundary_report(surface: ShellSurface) -> BoundaryReport {
         surface,
         adapter_manifest: adapter_manifest(surface),
         supported_commands: vec![
-            "admit", "manifest", "status", "watch", "tui", "boundary", "help", "repl",
+            "admit", "manifest", "status", "watch", "tui", "init", "config", "doctor", "models",
+            "boundary", "help", "repl",
         ],
         forbidden_commands: vec![
             "execute",
@@ -6119,7 +6232,7 @@ fn percent(value: f32) -> String {
 }
 
 fn help_text() -> &'static str {
-    "moxi\n\nDefault:\n  moxi\n    Opens the resident branded read-only TUI workbench. Startup pages wait for owner input instead of flashing through onboarding.\n\nCommands:\n  init [--provider openai|openrouter|custom|local] [--endpoint <url>] [--model <id>] [--api-key-env <name>] [--write] [--force] [--config <path>]\n  admit --goal <text> [--tenant <id>] [--user <id>] [--workspace <path>] [--capability <id>] [--risk low|medium|high|critical]\n  manifest [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human]\n  boundary [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--text]\n  status [--feed|--query] [--input <snapshot.json>] [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--text|--panel] [--limit <n>]\n  watch [--feed|--query] --input <snapshot.json> [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--text|--panel] [--limit <n>] [--ticks <n>] [--interval-ms <n>]\n  tui [--feed|--query] [--input <snapshot.json>] [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--width <n>] [--height <n>] [--keys tab,o,g,t,a,b,?,j,k,/filter,r,q] [--interactive] [--poll-ms <n>]\n  repl\n\nTUI startup: Enter advances Boot -> Trust -> First-run Setup when model/API config is missing -> Agent Core -> Workspace; 5 jumps to the workbench.\nTUI commands: /help, /status, /tasks, /agents, /skills, /context, /config, /doctor, /models, /boundary, /trust, /approve, /deny, /details, /save, /resume, /clear, /quit.\n\nModel/API config: init previews or writes .moxi/config.toml with provider, endpoint, model, and api_key_env only; it never writes raw API keys. /config reads .moxi/config.toml or MOXI_/OPENAI_/OPENROUTER_ environment variables and always redacts API keys. /doctor tests OpenAI-compatible endpoint readiness and reports invalid key, model not found, quota/rate limit, timeout, network, bad endpoint, and unsupported response categories. /models lists OpenAI-compatible provider model ids when available. Configured TUI tasks use read-only OpenAI-compatible /chat/completions; failures fall back to local analysis.\n\nBoundary: this CLI submits requests and renders shell contracts only; it can watch snapshot files and render a read-only TUI preview, but it cannot execute, authorize, issue tickets, verify, or commit ledger events."
+    "moxi\n\nDefault:\n  moxi\n    Opens the resident branded read-only TUI workbench. Startup pages wait for owner input instead of flashing through onboarding.\n\nCommands:\n  init [--provider openai|openrouter|custom|local] [--endpoint <url>] [--model <id>] [--api-key-env <name>] [--write] [--force] [--config <path>]\n  config [--config <path>]\n  doctor [--config <path>]\n  models [--config <path>]\n  admit --goal <text> [--tenant <id>] [--user <id>] [--workspace <path>] [--capability <id>] [--risk low|medium|high|critical]\n  manifest [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human]\n  boundary [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--text]\n  status [--feed|--query] [--input <snapshot.json>] [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--text|--panel] [--limit <n>]\n  watch [--feed|--query] --input <snapshot.json> [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--text|--panel] [--limit <n>] [--ticks <n>] [--interval-ms <n>]\n  tui [--feed|--query] [--input <snapshot.json>] [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--width <n>] [--height <n>] [--keys tab,o,g,t,a,b,?,j,k,/filter,r,q] [--interactive] [--poll-ms <n>]\n  repl\n\nTUI startup: Enter advances Boot -> Trust -> First-run Setup when model/API config is missing -> Agent Core -> Workspace; 5 jumps to the workbench.\nTUI commands: /help, /status, /tasks, /agents, /skills, /context, /config, /doctor, /models, /boundary, /trust, /approve, /deny, /details, /save, /resume, /clear, /quit.\n\nModel/API config: init previews or writes .moxi/config.toml with provider, endpoint, model, and api_key_env only; it never writes raw API keys. config reads .moxi/config.toml or MOXI_/OPENAI_/OPENROUTER_ environment variables and always redacts API keys. doctor tests OpenAI-compatible endpoint readiness and reports invalid key, model not found, quota/rate limit, timeout, network, bad endpoint, and unsupported response categories. models lists OpenAI-compatible provider model ids when available. Configured TUI tasks use read-only OpenAI-compatible /chat/completions; failures fall back to local analysis.\n\nBoundary: this CLI submits requests and renders shell contracts only; it can watch snapshot files and render a read-only TUI preview, but it cannot execute, authorize, issue tickets, verify, or commit ledger events."
 }
 
 #[cfg(test)]
@@ -7394,6 +7507,126 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(error, CliError::ModelConfigExists(path) if path.contains("config.toml")));
+    }
+
+    #[test]
+    fn top_level_config_prints_redacted_model_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let moxi_dir = temp.path().join(".moxi");
+        fs::create_dir_all(&moxi_dir).unwrap();
+        let config_path = moxi_dir.join("config.toml");
+        let raw_secret = "sk-visible-never-1111";
+        fs::write(
+            &config_path,
+            format!("provider = \"openai\"\nmodel = \"gpt-demo\"\napi_key = \"{raw_secret}\"\n"),
+        )
+        .unwrap();
+        let mut output = Vec::new();
+
+        let code = run(
+            [
+                "moxi-cli",
+                "config",
+                "--config",
+                config_path.to_str().unwrap(),
+            ],
+            &mut output,
+        )
+        .unwrap();
+        let text = String::from_utf8(output).unwrap();
+
+        assert_eq!(code, 0);
+        assert!(text.contains("MOXI model config"));
+        assert!(text.contains("provider=openai"));
+        assert!(text.contains("model=gpt-demo"));
+        assert!(text.contains("key=config:sk-v...1111"));
+        assert!(text.contains("secrets are redacted"));
+        assert!(!text.contains(raw_secret));
+    }
+
+    #[test]
+    fn top_level_doctor_reports_actionable_status_without_secret() {
+        let temp = tempfile::tempdir().unwrap();
+        let moxi_dir = temp.path().join(".moxi");
+        fs::create_dir_all(&moxi_dir).unwrap();
+        let endpoint = mock_http_once(401, r#"{"error":{"message":"invalid api key"}}"#);
+        let env_name = "MOXI_TEST_TOP_LEVEL_DOCTOR_KEY";
+        let raw_secret = "doctor-secret-top-level-123456";
+        let config_path = moxi_dir.join("config.toml");
+        fs::write(
+            &config_path,
+            format!(
+                "provider = \"custom\"\nendpoint = \"{endpoint}\"\nmodel = \"gpt-demo\"\napi_key_env = \"{env_name}\"\n"
+            ),
+        )
+        .unwrap();
+        env::set_var(env_name, raw_secret);
+        let mut output = Vec::new();
+
+        let code = run(
+            [
+                "moxi-cli",
+                "doctor",
+                "--config",
+                config_path.to_str().unwrap(),
+            ],
+            &mut output,
+        )
+        .unwrap();
+        env::remove_var(env_name);
+        let text = String::from_utf8(output).unwrap();
+
+        assert_eq!(code, 0);
+        assert!(text.contains("MOXI doctor"));
+        assert!(text.contains("status: invalid-key"));
+        assert!(text.contains("check the api_key_env value"));
+        assert!(text.contains("read-only connectivity probe"));
+        assert!(!text.contains(raw_secret));
+    }
+
+    #[test]
+    fn top_level_models_lists_catalog_without_secret() {
+        let temp = tempfile::tempdir().unwrap();
+        let moxi_dir = temp.path().join(".moxi");
+        fs::create_dir_all(&moxi_dir).unwrap();
+        let endpoint = mock_http_once_with_path(
+            200,
+            r#"{"object":"list","data":[{"id":"gpt-demo"},{"id":"gpt-mini"}]}"#,
+            Some("/v1/models"),
+        );
+        let env_name = "MOXI_TEST_TOP_LEVEL_MODELS_KEY";
+        let raw_secret = "models-secret-top-level-123456";
+        let config_path = moxi_dir.join("config.toml");
+        fs::write(
+            &config_path,
+            format!(
+                "provider = \"custom\"\nendpoint = \"{endpoint}\"\nmodel = \"gpt-demo\"\napi_key_env = \"{env_name}\"\n"
+            ),
+        )
+        .unwrap();
+        env::set_var(env_name, raw_secret);
+        let mut output = Vec::new();
+
+        let code = run(
+            [
+                "moxi-cli",
+                "models",
+                "--config",
+                config_path.to_str().unwrap(),
+            ],
+            &mut output,
+        )
+        .unwrap();
+        env::remove_var(env_name);
+        let text = String::from_utf8(output).unwrap();
+
+        assert_eq!(code, 0);
+        assert!(text.contains("MOXI models"));
+        assert!(text.contains("status: ready"));
+        assert!(text.contains("- gpt-demo"));
+        assert!(text.contains("- gpt-mini"));
+        assert!(text.contains("read-only model catalog probe"));
+        assert!(!text.contains(raw_secret));
     }
 
     #[test]

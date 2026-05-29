@@ -543,11 +543,12 @@ session now detects `.moxi/config.toml` plus `MOXI_*`, `OPENAI_API_KEY`, and
 API-key source, stores only redacted key display state, adds `.moxi/config.toml`
 to the context meter, and exposes `/config` through the command palette. `/doctor`
 now adds the first configuration readiness diagnostic: missing config returns a
-setup action, local/custom OpenAI-compatible HTTP endpoints can be probed via
-`/models/{model}`, and responses are classified as ready, invalid key, model
-not found, quota/rate limit, bad endpoint, network, timeout, or unsupported
-response while keeping secrets redacted. Cloud HTTPS probing and model-backed
-streaming chat remain next-step work, and the shell remains read-only/P2.
+setup action, OpenAI-compatible HTTP/HTTPS endpoints can be probed via
+`/models/{model}` using a blocking `reqwest` client with `rustls` TLS, and
+responses are classified as ready, invalid key, model not found, quota/rate
+limit, bad endpoint, network, timeout, or unsupported response while keeping
+secrets redacted. Model-backed streaming chat remains next-step work, and the
+shell remains read-only/P2.
 Task Tracking now prioritizes the active turn before older turns, so the latest
 backend plan steps stay visible after a response completes. The right pane shows
 the backend plan id, local plan steps, and final P1/P0-adapter wait state before

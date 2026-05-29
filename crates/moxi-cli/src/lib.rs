@@ -20,8 +20,7 @@ use ratatui::{
 };
 use std::{
     env, fs,
-    io::{BufRead, Read, Stdout, Write},
-    net::{TcpStream, ToSocketAddrs},
+    io::{BufRead, Stdout, Write},
     path::{Path, PathBuf},
     process::Command,
     thread,
@@ -1674,99 +1673,26 @@ fn http_get_openai_model(
     secret: &str,
 ) -> Result<HttpProbeResponse, String> {
     let url = format!("{}/models/{}", endpoint.trim_end_matches('/'), model);
-    let parsed = ParsedHttpUrl::parse(&url)?;
-    if parsed.scheme != "http" {
-        return Err("https doctor adapter is not linked in this alpha; use /config to inspect cloud settings or test through a local OpenAI-compatible http proxy".to_owned());
-    }
-    let address = format!("{}:{}", parsed.host, parsed.port);
-    let mut addrs = address
-        .to_socket_addrs()
-        .map_err(|error| format!("network resolution failed for {address}: {error}"))?;
-    let addr = addrs
-        .next()
-        .ok_or_else(|| format!("network resolution returned no address for {address}"))?;
-    let timeout = Duration::from_secs(5);
-    let mut stream = TcpStream::connect_timeout(&addr, timeout)
-        .map_err(|error| format!("network connection failed for {address}: {error}"))?;
-    stream
-        .set_read_timeout(Some(timeout))
-        .map_err(|error| format!("read timeout setup failed: {error}"))?;
-    stream
-        .set_write_timeout(Some(timeout))
-        .map_err(|error| format!("write timeout setup failed: {error}"))?;
-    let request = format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nAccept: application/json\r\nConnection: close\r\n\r\n",
-        parsed.path, parsed.host_header, secret
-    );
-    stream
-        .write_all(request.as_bytes())
-        .map_err(|error| format!("network write failed: {error}"))?;
-    let mut response = String::new();
-    stream
-        .read_to_string(&mut response)
-        .map_err(|error| format!("network read failed or timed out: {error}"))?;
-    parse_http_response(&response)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ParsedHttpUrl {
-    scheme: String,
-    host: String,
-    host_header: String,
-    port: u16,
-    path: String,
-}
-
-impl ParsedHttpUrl {
-    fn parse(url: &str) -> Result<Self, String> {
-        let Some((scheme, rest)) = url.split_once("://") else {
-            return Err("endpoint URL is missing http:// or https:// scheme".to_owned());
-        };
-        let (authority, path) = rest
-            .split_once('/')
-            .map(|(authority, path)| (authority, format!("/{path}")))
-            .unwrap_or((rest, "/".to_owned()));
-        if authority.is_empty() {
-            return Err("endpoint URL is missing host".to_owned());
-        }
-        let (host, port) = if let Some((host, port)) = authority.rsplit_once(':') {
-            let port = port
-                .parse::<u16>()
-                .map_err(|_| format!("endpoint URL has invalid port: {port}"))?;
-            (host.to_owned(), port)
-        } else {
-            let port = match scheme {
-                "http" => 80,
-                "https" => 443,
-                _ => return Err(format!("unsupported endpoint scheme: {scheme}")),
-            };
-            (authority.to_owned(), port)
-        };
-        Ok(Self {
-            scheme: scheme.to_owned(),
-            host,
-            host_header: authority.to_owned(),
-            port,
-            path,
-        })
-    }
-}
-
-fn parse_http_response(response: &str) -> Result<HttpProbeResponse, String> {
-    let Some((head, body)) = response.split_once("\r\n\r\n") else {
-        return Err("unsupported response shape: missing HTTP headers".to_owned());
-    };
-    let status_line = head.lines().next().unwrap_or_default();
-    let status = status_line
-        .split_whitespace()
-        .nth(1)
-        .ok_or_else(|| "unsupported response shape: missing status code".to_owned())?
-        .parse::<u16>()
-        .map_err(|_| "unsupported response shape: invalid status code".to_owned())?;
-    Ok(HttpProbeResponse {
-        status,
-        body: body.to_owned(),
-    })
+    let response = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(8))
+        .build()
+        .map_err(|error| format!("doctor client setup failed: {error}"))?
+        .get(url)
+        .bearer_auth(secret)
+        .header(reqwest::header::ACCEPT, "application/json")
+        .send()
+        .map_err(|error| {
+            if error.is_timeout() {
+                format!("network request timed out: {error}")
+            } else {
+                format!("network request failed: {error}")
+            }
+        })?;
+    let status = response.status().as_u16();
+    let body = response
+        .text()
+        .map_err(|error| format!("network response read failed: {error}"))?;
+    Ok(HttpProbeResponse { status, body })
 }
 
 fn redacted_preview(value: &str, max_chars: usize) -> String {

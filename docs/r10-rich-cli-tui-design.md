@@ -285,8 +285,8 @@ Commands
 `/doctor` should classify provider readiness in owner-facing language: setup
 missing, invalid key, model not found, quota/rate limit, bad endpoint, network
 failure, timeout, unsupported response, or ready. It must keep secrets redacted.
-The first Alpha implementation may probe local/custom OpenAI-compatible HTTP
-endpoints before cloud HTTPS probing and model-backed chat are connected.
+The Alpha implementation probes OpenAI-compatible HTTP/HTTPS endpoints through
+`/models/{model}` before model-backed chat is connected.
 
 ## Implementation Notes
 

@@ -48,6 +48,10 @@ pub enum CliError {
     InvalidWatchTicks(String),
     #[error("invalid watch interval milliseconds: {0}")]
     InvalidWatchInterval(String),
+    #[error("invalid model provider: {0}")]
+    InvalidModelProvider(String),
+    #[error("model config already exists: {0}; pass --force to overwrite")]
+    ModelConfigExists(String),
     #[error("invalid tui dimension for {flag}: {value}")]
     InvalidTuiDimension { flag: &'static str, value: String },
     #[error("invalid tui key token: {0}")]
@@ -161,6 +165,17 @@ struct WatchOptions {
     status: StatusOptions,
     ticks: usize,
     interval: Duration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InitOptions {
+    provider: TuiModelProvider,
+    endpoint: String,
+    model: String,
+    api_key_env: String,
+    write: bool,
+    force: bool,
+    config_path: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1678,14 +1693,28 @@ impl TuiModelConfig {
         } else {
             &self.model
         };
-        format!(
-            "provider = \"{}\"\nendpoint = \"{}\"\nmodel = \"{}\"\napi_key_env = \"{}\"",
-            self.provider.label(),
-            self.endpoint,
+        render_model_config_template(
+            self.provider,
+            &self.endpoint,
             model,
-            self.provider.default_key_env()
+            self.provider.default_key_env(),
         )
     }
+}
+
+fn render_model_config_template(
+    provider: TuiModelProvider,
+    endpoint: &str,
+    model: &str,
+    api_key_env: &str,
+) -> String {
+    format!(
+        "provider = \"{}\"\nendpoint = \"{}\"\nmodel = \"{}\"\napi_key_env = \"{}\"\n",
+        provider.label(),
+        escape_toml_string(endpoint),
+        escape_toml_string(model),
+        escape_toml_string(api_key_env)
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1703,6 +1732,16 @@ impl TuiModelProvider {
             "custom" => Self::Custom,
             "local" | "ollama" | "lmstudio" => Self::Local,
             _ => Self::OpenAi,
+        }
+    }
+
+    fn try_parse(value: &str) -> CliResult<Self> {
+        match normalize_token(value).as_str() {
+            "openai" => Ok(Self::OpenAi),
+            "openrouter" => Ok(Self::OpenRouter),
+            "custom" => Ok(Self::Custom),
+            "local" | "ollama" | "lmstudio" => Ok(Self::Local),
+            _ => Err(CliError::InvalidModelProvider(value.to_owned())),
         }
     }
 
@@ -2407,6 +2446,10 @@ fn redact_secret(value: &str) -> String {
     }
 }
 
+fn escape_toml_string(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 fn parse_toml_string(value: &str) -> Option<String> {
     let value = value.trim();
     if value.len() < 2 || !value.starts_with('"') || !value.ends_with('"') {
@@ -2863,6 +2906,10 @@ where
             let options = parse_watch(rest)?;
             run_watch(options, writer)?;
         }
+        "init" => {
+            let options = parse_init(rest)?;
+            run_init(options, writer)?;
+        }
         "tui" => {
             let options = parse_tui(rest)?;
             run_tui(options, writer)?;
@@ -2929,6 +2976,54 @@ fn run_watch(options: WatchOptions, writer: &mut impl Write) -> CliResult<()> {
         if tick + 1 < options.ticks {
             thread::sleep(options.interval);
         }
+    }
+    Ok(())
+}
+
+fn run_init(options: InitOptions, writer: &mut impl Write) -> CliResult<()> {
+    let template = render_model_config_template(
+        options.provider,
+        &options.endpoint,
+        &options.model,
+        &options.api_key_env,
+    );
+    if options.write {
+        if options.config_path.exists() && !options.force {
+            return Err(CliError::ModelConfigExists(
+                options.config_path.display().to_string(),
+            ));
+        }
+        if let Some(parent) = options.config_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&options.config_path, template.as_bytes())?;
+        writeln!(writer, "MOXI model config written")?;
+        writeln!(writer, "path: {}", options.config_path.display())?;
+        writeln!(writer, "provider: {}", options.provider.label())?;
+        writeln!(writer, "endpoint: {}", options.endpoint)?;
+        writeln!(writer, "model: {}", options.model)?;
+        writeln!(writer, "api_key_env: {}", options.api_key_env)?;
+        writeln!(
+            writer,
+            "next: set ${} in your shell, then run moxi and use /doctor",
+            options.api_key_env
+        )?;
+    } else {
+        writeln!(writer, "MOXI model config preview")?;
+        writeln!(writer, "path: {}", options.config_path.display())?;
+        writeln!(writer, "mode: dry-run; pass --write to create the file")?;
+        writeln!(
+            writer,
+            "secret rule: this template stores only api_key_env, never a raw API key"
+        )?;
+        writeln!(writer)?;
+        write!(writer, "{template}")?;
+        writeln!(writer)?;
+        writeln!(
+            writer,
+            "next: set ${} in your shell, then run moxi init --write",
+            options.api_key_env
+        )?;
     }
     Ok(())
 }
@@ -3933,6 +4028,57 @@ fn parse_watch(args: &[String]) -> CliResult<WatchOptions> {
     })
 }
 
+fn parse_init(args: &[String]) -> CliResult<InitOptions> {
+    let mut provider = TuiModelProvider::OpenAi;
+    let mut endpoint: Option<String> = None;
+    let mut model: Option<String> = None;
+    let mut api_key_env: Option<String> = None;
+    let mut write = false;
+    let mut force = false;
+    let mut config_path: Option<PathBuf> = None;
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--provider" | "-p" => {
+                provider =
+                    TuiModelProvider::try_parse(&value_after(args, &mut index, "--provider")?)?;
+            }
+            "--endpoint" | "-e" => {
+                endpoint = Some(value_after(args, &mut index, "--endpoint")?);
+            }
+            "--model" | "-m" => {
+                model = Some(value_after(args, &mut index, "--model")?);
+            }
+            "--api-key-env" => {
+                api_key_env = Some(value_after(args, &mut index, "--api-key-env")?);
+            }
+            "--config" => {
+                config_path = Some(PathBuf::from(value_after(args, &mut index, "--config")?));
+            }
+            "--write" => {
+                write = true;
+            }
+            "--force" => {
+                force = true;
+            }
+            flag if flag.starts_with('-') => return Err(CliError::UnknownFlag(flag.to_owned())),
+            value => return Err(CliError::UnknownFlag(value.to_owned())),
+        }
+        index += 1;
+    }
+
+    Ok(InitOptions {
+        provider,
+        endpoint: endpoint.unwrap_or_else(|| provider.default_endpoint().to_owned()),
+        model: model.unwrap_or_else(|| default_init_model(provider).to_owned()),
+        api_key_env: api_key_env.unwrap_or_else(|| provider.default_key_env().to_owned()),
+        write,
+        force,
+        config_path: config_path.unwrap_or_else(default_model_config_path),
+    })
+}
+
 fn parse_tui(args: &[String]) -> CliResult<TuiOptions> {
     let mut status_args = Vec::new();
     let mut width = 100;
@@ -3999,6 +4145,19 @@ fn default_status_profile(surface: ShellSurface) -> &'static str {
         | ShellSurface::Api
         | ShellSurface::Mcp => "shell.ide.readonly",
     }
+}
+
+fn default_init_model(provider: TuiModelProvider) -> &'static str {
+    match provider {
+        TuiModelProvider::OpenAi => "gpt-4o-mini",
+        TuiModelProvider::OpenRouter => "openai/gpt-4o-mini",
+        TuiModelProvider::Custom => "gpt-demo",
+        TuiModelProvider::Local => "llama3.1",
+    }
+}
+
+fn default_model_config_path() -> PathBuf {
+    PathBuf::from(".moxi").join("config.toml")
 }
 
 fn value_after(args: &[String], index: &mut usize, flag: &'static str) -> CliResult<String> {
@@ -5960,7 +6119,7 @@ fn percent(value: f32) -> String {
 }
 
 fn help_text() -> &'static str {
-    "moxi\n\nDefault:\n  moxi\n    Opens the resident branded read-only TUI workbench. Startup pages wait for owner input instead of flashing through onboarding.\n\nCommands:\n  admit --goal <text> [--tenant <id>] [--user <id>] [--workspace <path>] [--capability <id>] [--risk low|medium|high|critical]\n  manifest [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human]\n  boundary [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--text]\n  status [--feed|--query] [--input <snapshot.json>] [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--text|--panel] [--limit <n>]\n  watch [--feed|--query] --input <snapshot.json> [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--text|--panel] [--limit <n>] [--ticks <n>] [--interval-ms <n>]\n  tui [--feed|--query] [--input <snapshot.json>] [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--width <n>] [--height <n>] [--keys tab,o,g,t,a,b,?,j,k,/filter,r,q] [--interactive] [--poll-ms <n>]\n  repl\n\nTUI startup: Enter advances Boot -> Trust -> First-run Setup when model/API config is missing -> Agent Core -> Workspace; 5 jumps to the workbench.\nTUI commands: /help, /status, /tasks, /agents, /skills, /context, /config, /doctor, /models, /boundary, /trust, /approve, /deny, /details, /save, /resume, /clear, /quit.\n\nModel/API config: /config reads .moxi/config.toml or MOXI_/OPENAI_/OPENROUTER_ environment variables and always redacts API keys. /doctor tests OpenAI-compatible endpoint readiness and reports invalid key, model not found, quota/rate limit, timeout, network, bad endpoint, and unsupported response categories. /models lists OpenAI-compatible provider model ids when available. Configured TUI tasks use read-only OpenAI-compatible /chat/completions; failures fall back to local analysis.\n\nBoundary: this CLI submits requests and renders shell contracts only; it can watch snapshot files and render a read-only TUI preview, but it cannot execute, authorize, issue tickets, verify, or commit ledger events."
+    "moxi\n\nDefault:\n  moxi\n    Opens the resident branded read-only TUI workbench. Startup pages wait for owner input instead of flashing through onboarding.\n\nCommands:\n  init [--provider openai|openrouter|custom|local] [--endpoint <url>] [--model <id>] [--api-key-env <name>] [--write] [--force] [--config <path>]\n  admit --goal <text> [--tenant <id>] [--user <id>] [--workspace <path>] [--capability <id>] [--risk low|medium|high|critical]\n  manifest [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human]\n  boundary [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--text]\n  status [--feed|--query] [--input <snapshot.json>] [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--text|--panel] [--limit <n>]\n  watch [--feed|--query] --input <snapshot.json> [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--text|--panel] [--limit <n>] [--ticks <n>] [--interval-ms <n>]\n  tui [--feed|--query] [--input <snapshot.json>] [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--width <n>] [--height <n>] [--keys tab,o,g,t,a,b,?,j,k,/filter,r,q] [--interactive] [--poll-ms <n>]\n  repl\n\nTUI startup: Enter advances Boot -> Trust -> First-run Setup when model/API config is missing -> Agent Core -> Workspace; 5 jumps to the workbench.\nTUI commands: /help, /status, /tasks, /agents, /skills, /context, /config, /doctor, /models, /boundary, /trust, /approve, /deny, /details, /save, /resume, /clear, /quit.\n\nModel/API config: init previews or writes .moxi/config.toml with provider, endpoint, model, and api_key_env only; it never writes raw API keys. /config reads .moxi/config.toml or MOXI_/OPENAI_/OPENROUTER_ environment variables and always redacts API keys. /doctor tests OpenAI-compatible endpoint readiness and reports invalid key, model not found, quota/rate limit, timeout, network, bad endpoint, and unsupported response categories. /models lists OpenAI-compatible provider model ids when available. Configured TUI tasks use read-only OpenAI-compatible /chat/completions; failures fall back to local analysis.\n\nBoundary: this CLI submits requests and renders shell contracts only; it can watch snapshot files and render a read-only TUI preview, but it cannot execute, authorize, issue tickets, verify, or commit ledger events."
 }
 
 #[cfg(test)]
@@ -7147,6 +7306,94 @@ mod tests {
             vec!["gpt-demo".to_owned(), "gpt-mini".to_owned()]
         );
         assert!(report.message().contains("gpt-demo"));
+    }
+
+    #[test]
+    fn init_previews_model_config_without_writing_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let config_path = temp.path().join(".moxi").join("config.toml");
+        let mut output = Vec::new();
+
+        let code = run(
+            [
+                "moxi-cli",
+                "init",
+                "--provider",
+                "openrouter",
+                "--model",
+                "anthropic/claude-sonnet-4",
+                "--config",
+                config_path.to_str().unwrap(),
+            ],
+            &mut output,
+        )
+        .unwrap();
+        let text = String::from_utf8(output).unwrap();
+
+        assert_eq!(code, 0);
+        assert!(!config_path.exists());
+        assert!(text.contains("MOXI model config preview"));
+        assert!(text.contains("mode: dry-run"));
+        assert!(text.contains("provider = \"openrouter\""));
+        assert!(text.contains("endpoint = \"https://openrouter.ai/api/v1\""));
+        assert!(text.contains("model = \"anthropic/claude-sonnet-4\""));
+        assert!(text.contains("api_key_env = \"OPENROUTER_API_KEY\""));
+        assert!(text.contains("never a raw API key"));
+    }
+
+    #[test]
+    fn init_writes_env_only_model_config_and_refuses_overwrite() {
+        let temp = tempfile::tempdir().unwrap();
+        let config_path = temp.path().join(".moxi").join("config.toml");
+        let raw_secret = "sk-visible-never-0000";
+        let mut output = Vec::new();
+
+        let code = run(
+            [
+                "moxi-cli",
+                "init",
+                "--provider",
+                "custom",
+                "--endpoint",
+                "https://models.example.test/v1",
+                "--model",
+                "gpt-demo",
+                "--api-key-env",
+                "MOXI_EXAMPLE_KEY",
+                "--config",
+                config_path.to_str().unwrap(),
+                "--write",
+            ],
+            &mut output,
+        )
+        .unwrap();
+        let text = String::from_utf8(output).unwrap();
+        let written = fs::read_to_string(&config_path).unwrap();
+
+        assert_eq!(code, 0);
+        assert!(text.contains("MOXI model config written"));
+        assert!(text.contains("api_key_env: MOXI_EXAMPLE_KEY"));
+        assert!(!text.contains(raw_secret));
+        assert!(written.contains("provider = \"custom\""));
+        assert!(written.contains("endpoint = \"https://models.example.test/v1\""));
+        assert!(written.contains("model = \"gpt-demo\""));
+        assert!(written.contains("api_key_env = \"MOXI_EXAMPLE_KEY\""));
+        assert!(!written.contains("api_key ="));
+        assert!(!written.contains(raw_secret));
+
+        let error = run(
+            [
+                "moxi-cli",
+                "init",
+                "--config",
+                config_path.to_str().unwrap(),
+                "--write",
+            ],
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, CliError::ModelConfigExists(path) if path.contains("config.toml")));
     }
 
     #[test]

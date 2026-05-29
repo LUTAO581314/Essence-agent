@@ -14,6 +14,18 @@ From the repository root:
 cargo run -p moxi-cli --bin moxi --locked
 ```
 
+Preview a safe model/API config:
+
+```powershell
+cargo run -p moxi-cli --bin moxi --locked -- init --provider openai --model gpt-4o-mini
+```
+
+Create `.moxi/config.toml` only when you explicitly pass `--write`:
+
+```powershell
+cargo run -p moxi-cli --bin moxi --locked -- init --provider openai --model gpt-4o-mini --write
+```
+
 Or use the helper script:
 
 ```powershell
@@ -76,8 +88,10 @@ The default entry opens the resident workbench. Use `q` to quit.
   visible before older session turns.
 - Read-only workspace facts are collected locally: cwd, Git status, Cargo state,
   docs/config presence, active agents, messages, and task steps.
-- First-run setup is guidance-only. It shows `.moxi/config.toml` and environment
-  variable options, but does not save secrets or print full API keys.
+- First-run setup shows `.moxi/config.toml` and environment variable options,
+  but does not save secrets or print full API keys. The top-level `moxi init`
+  command previews the same env-only config by default, and writes it only when
+  `--write` is explicit.
 - `/doctor` classifies model/API readiness without printing secrets. It probes
   OpenAI-compatible HTTP/HTTPS endpoints through the configured
   `/models/{model}` route and reports setup gaps, invalid keys, missing models,

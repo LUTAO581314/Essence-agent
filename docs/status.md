@@ -541,15 +541,18 @@ The API-backed CLI Alpha track has started at the configuration layer. The TUI
 session now detects `.moxi/config.toml` plus `MOXI_*`, `OPENAI_API_KEY`, and
 `OPENROUTER_API_KEY` environment variables for provider, endpoint, model, and
 API-key source, stores only redacted key display state, adds `.moxi/config.toml`
-to the context meter, and exposes `/config` through the command palette. `/doctor`
-now adds the first configuration readiness diagnostic: missing config returns a
-setup action, OpenAI-compatible HTTP/HTTPS endpoints can be probed via
-`/models/{model}` using a blocking `reqwest` client with `rustls` TLS, and
-responses are classified as ready, invalid key, model not found, quota/rate
-limit, bad endpoint, network, timeout, or unsupported response while keeping
-secrets redacted. `/models` lists OpenAI-compatible provider model ids through
-the configured `/models` catalog endpoint, showing up to 20 ids and redacting
-errors. Configured TUI task submissions now prefer a read-only
+to the context meter, and exposes `/config` through the command palette. The
+top-level `moxi init` command now previews an env-only `.moxi/config.toml` by
+default and writes it only when `--write` is explicit; generated config stores
+`api_key_env`, not raw API keys. `/doctor` now adds the first configuration
+readiness diagnostic: missing config returns a setup action, OpenAI-compatible
+HTTP/HTTPS endpoints can be probed via `/models/{model}` using a blocking
+`reqwest` client with `rustls` TLS, and responses are classified as ready,
+invalid key, model not found, quota/rate limit, bad endpoint, network, timeout,
+or unsupported response while keeping secrets redacted. `/models` lists
+OpenAI-compatible provider model ids through the configured `/models` catalog
+endpoint, showing up to 20 ids and redacting errors. Configured TUI task
+submissions now prefer a read-only
 OpenAI-compatible `/chat/completions` adapter that packages workspace facts,
 trust state, active agents, skills, and the owner task; provider/config errors
 fall back to local read-only analysis with redacted previews. The TUI now stages

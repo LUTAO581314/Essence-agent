@@ -78,6 +78,11 @@ The default entry opens the resident workbench. Use `q` to quit.
 - First-run setup is guidance-only. It shows `.moxi/config.toml` and environment
   variable options, but does not save secrets, print full API keys, or call a
   provider.
+- `/doctor` classifies model/API readiness without printing secrets. In this
+  Alpha step it can probe local/custom OpenAI-compatible HTTP endpoints and
+  reports setup gaps, invalid keys, missing models, quota/rate limits, bad
+  endpoints, network failures, timeouts, and unsupported response shapes.
+  Cloud HTTPS probing and read-only model chat are still follow-up work.
 - Risk prompts are local intent capture only.
 - `/approve` inside the TUI does not grant write, shell, Git/GitHub, ticket,
   proof, or ledger authority.

@@ -275,11 +275,18 @@ Commands
 /skills    inspect loaded skills
 /context   show context sources
 /config    inspect redacted model/API config
+/doctor    test model/API readiness
 /approve   confirm current risk intent
 /deny      reject current risk
 /trust     open workspace trust gate
 /help      show this menu
 ```
+
+`/doctor` should classify provider readiness in owner-facing language: setup
+missing, invalid key, model not found, quota/rate limit, bad endpoint, network
+failure, timeout, unsupported response, or ready. It must keep secrets redacted.
+The first Alpha implementation may probe local/custom OpenAI-compatible HTTP
+endpoints before cloud HTTPS probing and model-backed chat are connected.
 
 ## Implementation Notes
 

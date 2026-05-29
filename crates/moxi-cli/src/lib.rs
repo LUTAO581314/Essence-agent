@@ -20,7 +20,8 @@ use ratatui::{
 };
 use std::{
     env, fs,
-    io::{BufRead, Stdout, Write},
+    io::{BufRead, Read, Stdout, Write},
+    net::{TcpStream, ToSocketAddrs},
     path::{Path, PathBuf},
     process::Command,
     thread,
@@ -414,6 +415,13 @@ impl TuiAgentSession {
                 self.model_config.api_key_source.summary()
             ),
         );
+    }
+
+    fn push_doctor_message(&mut self) -> TuiDoctorStatus {
+        self.model_config = TuiModelConfig::load_for_workspace(&self.workspace);
+        let report = TuiModelDoctor::check(&self.model_config);
+        self.push_system_message("doctor", report.message());
+        report.status
     }
 
     fn push_resume_message(&mut self, snapshot: &TuiSessionSnapshot) {
@@ -1474,6 +1482,300 @@ impl TuiApiKeySource {
             Self::Config { redacted } => format!("config:{redacted}"),
         }
     }
+
+    fn secret(&self) -> Option<String> {
+        match self {
+            Self::Missing => None,
+            Self::Env { name, .. } => env::var(name).ok(),
+            Self::Config { .. } => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TuiDoctorStatus {
+    Ready,
+    NeedsSetup,
+    InvalidKey,
+    ModelNotFound,
+    BadEndpoint,
+    Quota,
+    Network,
+    Timeout,
+    UnsupportedResponse,
+}
+
+impl TuiDoctorStatus {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::NeedsSetup => "needs-setup",
+            Self::InvalidKey => "invalid-key",
+            Self::ModelNotFound => "model-not-found",
+            Self::BadEndpoint => "bad-endpoint",
+            Self::Quota => "quota",
+            Self::Network => "network",
+            Self::Timeout => "timeout",
+            Self::UnsupportedResponse => "unsupported-response",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TuiDoctorReport {
+    status: TuiDoctorStatus,
+    provider: TuiModelProvider,
+    endpoint: String,
+    model: String,
+    detail: String,
+    action: String,
+}
+
+impl TuiDoctorReport {
+    fn message(&self) -> String {
+        format!(
+            "Doctor: status={} provider={} endpoint={} model={}. Detail: {} Action: {}",
+            self.status.label(),
+            self.provider.label(),
+            self.endpoint,
+            self.model,
+            self.detail,
+            self.action
+        )
+    }
+}
+
+struct TuiModelDoctor;
+
+impl TuiModelDoctor {
+    fn check(config: &TuiModelConfig) -> TuiDoctorReport {
+        if config.needs_setup() {
+            return TuiDoctorReport {
+                status: TuiDoctorStatus::NeedsSetup,
+                provider: config.provider,
+                endpoint: config.endpoint.clone(),
+                model: config.model.clone(),
+                detail: format!(
+                    "configuration is {}; key source is {}",
+                    config.config_state,
+                    config.api_key_source.summary()
+                ),
+                action: "open First-run Setup or create .moxi/config.toml with provider, endpoint, model, and api_key_env".to_owned(),
+            };
+        }
+
+        if config.endpoint == "not-configured" || !config.endpoint.starts_with("http") {
+            return TuiDoctorReport {
+                status: TuiDoctorStatus::BadEndpoint,
+                provider: config.provider,
+                endpoint: config.endpoint.clone(),
+                model: config.model.clone(),
+                detail: "endpoint must be an http:// or https:// OpenAI-compatible base URL"
+                    .to_owned(),
+                action: "set endpoint to https://api.openai.com/v1, https://openrouter.ai/api/v1, or a local-compatible /v1 endpoint".to_owned(),
+            };
+        }
+
+        let Some(secret) = config.api_key_source.secret() else {
+            return TuiDoctorReport {
+                status: TuiDoctorStatus::NeedsSetup,
+                provider: config.provider,
+                endpoint: config.endpoint.clone(),
+                model: config.model.clone(),
+                detail: format!("{} is redacted but not available to this process", config.api_key_source.summary()),
+                action: "export the configured api_key_env before launching moxi, or use a local provider that accepts your key policy".to_owned(),
+            };
+        };
+
+        match http_get_openai_model(&config.endpoint, &config.model, &secret) {
+            Ok(response) => classify_doctor_response(config, response),
+            Err(error) => TuiDoctorReport {
+                status: if error.contains("timed out") {
+                    TuiDoctorStatus::Timeout
+                } else {
+                    TuiDoctorStatus::Network
+                },
+                provider: config.provider,
+                endpoint: config.endpoint.clone(),
+                model: config.model.clone(),
+                detail: error,
+                action:
+                    "check network access, endpoint URL, local server state, proxy, or firewall"
+                        .to_owned(),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HttpProbeResponse {
+    status: u16,
+    body: String,
+}
+
+fn classify_doctor_response(
+    config: &TuiModelConfig,
+    response: HttpProbeResponse,
+) -> TuiDoctorReport {
+    let normalized_body = normalize_token(&response.body);
+    let status = match response.status {
+        200 => {
+            if normalized_body.contains("id") || normalized_body.contains("object") {
+                TuiDoctorStatus::Ready
+            } else {
+                TuiDoctorStatus::UnsupportedResponse
+            }
+        }
+        401 | 403 => TuiDoctorStatus::InvalidKey,
+        404 => TuiDoctorStatus::ModelNotFound,
+        402 | 429 => TuiDoctorStatus::Quota,
+        400 => {
+            if normalized_body.contains("model") || normalized_body.contains("not_found") {
+                TuiDoctorStatus::ModelNotFound
+            } else {
+                TuiDoctorStatus::BadEndpoint
+            }
+        }
+        500..=599 => TuiDoctorStatus::BadEndpoint,
+        _ => TuiDoctorStatus::UnsupportedResponse,
+    };
+    let action = match status {
+        TuiDoctorStatus::Ready => "configuration is ready for the next read-only chat adapter step",
+        TuiDoctorStatus::InvalidKey => {
+            "check the api_key_env value; the key is not printed by MOXI"
+        }
+        TuiDoctorStatus::ModelNotFound => "check the model name or provider catalog",
+        TuiDoctorStatus::Quota => "check quota, billing, or rate limits for the provider",
+        TuiDoctorStatus::BadEndpoint => "check endpoint base URL and OpenAI-compatible /v1 routing",
+        TuiDoctorStatus::UnsupportedResponse => {
+            "provider responded, but response shape is not recognized as OpenAI-compatible"
+        }
+        TuiDoctorStatus::NeedsSetup | TuiDoctorStatus::Network | TuiDoctorStatus::Timeout => {
+            "review setup and retry /doctor"
+        }
+    };
+    TuiDoctorReport {
+        status,
+        provider: config.provider,
+        endpoint: config.endpoint.clone(),
+        model: config.model.clone(),
+        detail: format!(
+            "HTTP {} from provider; body preview: {}",
+            response.status,
+            redacted_preview(&response.body, 120)
+        ),
+        action: action.to_owned(),
+    }
+}
+
+fn http_get_openai_model(
+    endpoint: &str,
+    model: &str,
+    secret: &str,
+) -> Result<HttpProbeResponse, String> {
+    let url = format!("{}/models/{}", endpoint.trim_end_matches('/'), model);
+    let parsed = ParsedHttpUrl::parse(&url)?;
+    if parsed.scheme != "http" {
+        return Err("https doctor adapter is not linked in this alpha; use /config to inspect cloud settings or test through a local OpenAI-compatible http proxy".to_owned());
+    }
+    let address = format!("{}:{}", parsed.host, parsed.port);
+    let mut addrs = address
+        .to_socket_addrs()
+        .map_err(|error| format!("network resolution failed for {address}: {error}"))?;
+    let addr = addrs
+        .next()
+        .ok_or_else(|| format!("network resolution returned no address for {address}"))?;
+    let timeout = Duration::from_secs(5);
+    let mut stream = TcpStream::connect_timeout(&addr, timeout)
+        .map_err(|error| format!("network connection failed for {address}: {error}"))?;
+    stream
+        .set_read_timeout(Some(timeout))
+        .map_err(|error| format!("read timeout setup failed: {error}"))?;
+    stream
+        .set_write_timeout(Some(timeout))
+        .map_err(|error| format!("write timeout setup failed: {error}"))?;
+    let request = format!(
+        "GET {} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nAccept: application/json\r\nConnection: close\r\n\r\n",
+        parsed.path, parsed.host_header, secret
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|error| format!("network write failed: {error}"))?;
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .map_err(|error| format!("network read failed or timed out: {error}"))?;
+    parse_http_response(&response)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedHttpUrl {
+    scheme: String,
+    host: String,
+    host_header: String,
+    port: u16,
+    path: String,
+}
+
+impl ParsedHttpUrl {
+    fn parse(url: &str) -> Result<Self, String> {
+        let Some((scheme, rest)) = url.split_once("://") else {
+            return Err("endpoint URL is missing http:// or https:// scheme".to_owned());
+        };
+        let (authority, path) = rest
+            .split_once('/')
+            .map(|(authority, path)| (authority, format!("/{path}")))
+            .unwrap_or((rest, "/".to_owned()));
+        if authority.is_empty() {
+            return Err("endpoint URL is missing host".to_owned());
+        }
+        let (host, port) = if let Some((host, port)) = authority.rsplit_once(':') {
+            let port = port
+                .parse::<u16>()
+                .map_err(|_| format!("endpoint URL has invalid port: {port}"))?;
+            (host.to_owned(), port)
+        } else {
+            let port = match scheme {
+                "http" => 80,
+                "https" => 443,
+                _ => return Err(format!("unsupported endpoint scheme: {scheme}")),
+            };
+            (authority.to_owned(), port)
+        };
+        Ok(Self {
+            scheme: scheme.to_owned(),
+            host,
+            host_header: authority.to_owned(),
+            port,
+            path,
+        })
+    }
+}
+
+fn parse_http_response(response: &str) -> Result<HttpProbeResponse, String> {
+    let Some((head, body)) = response.split_once("\r\n\r\n") else {
+        return Err("unsupported response shape: missing HTTP headers".to_owned());
+    };
+    let status_line = head.lines().next().unwrap_or_default();
+    let status = status_line
+        .split_whitespace()
+        .nth(1)
+        .ok_or_else(|| "unsupported response shape: missing status code".to_owned())?
+        .parse::<u16>()
+        .map_err(|_| "unsupported response shape: invalid status code".to_owned())?;
+    Ok(HttpProbeResponse {
+        status,
+        body: body.to_owned(),
+    })
+}
+
+fn redacted_preview(value: &str, max_chars: usize) -> String {
+    let compact = value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace("Bearer ", "Bearer <redacted> ");
+    compact.chars().take(max_chars).collect()
 }
 
 #[derive(Default)]
@@ -2418,6 +2720,14 @@ fn submit_tui_command(state: &mut TuiState) {
             state.follow_latest_message = true;
             state.conversation_scroll = 0;
             state.command_status = "showing model/API configuration; secrets are redacted".into();
+        }
+        "doctor" => {
+            state.active_pane = TuiPane::Overview;
+            state.screen = TuiScreen::Workspace;
+            let status = state.session.push_doctor_message();
+            state.follow_latest_message = true;
+            state.conversation_scroll = 0;
+            state.command_status = format!("doctor completed: {}", status.label());
         }
         "save" | "persist" => match state.session.save_persistence_snapshot() {
             Ok(path) => {
@@ -4213,6 +4523,10 @@ const COMMAND_PALETTE_ENTRIES: &[CommandPaletteEntry] = &[
         description: "inspect redacted model/API config",
     },
     CommandPaletteEntry {
+        command: "/doctor",
+        description: "test model/API endpoint readiness",
+    },
+    CommandPaletteEntry {
         command: "/save",
         description: "write local TUI session snapshot",
     },
@@ -5049,13 +5363,15 @@ fn percent(value: f32) -> String {
 }
 
 fn help_text() -> &'static str {
-    "moxi\n\nDefault:\n  moxi\n    Opens the resident branded read-only TUI workbench. Startup pages wait for owner input instead of flashing through onboarding.\n\nCommands:\n  admit --goal <text> [--tenant <id>] [--user <id>] [--workspace <path>] [--capability <id>] [--risk low|medium|high|critical]\n  manifest [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human]\n  boundary [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--text]\n  status [--feed|--query] [--input <snapshot.json>] [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--text|--panel] [--limit <n>]\n  watch [--feed|--query] --input <snapshot.json> [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--text|--panel] [--limit <n>] [--ticks <n>] [--interval-ms <n>]\n  tui [--feed|--query] [--input <snapshot.json>] [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--width <n>] [--height <n>] [--keys tab,o,g,t,a,b,?,j,k,/filter,r,q] [--interactive] [--poll-ms <n>]\n  repl\n\nTUI startup: Enter advances Boot -> Trust -> First-run Setup when model/API config is missing -> Agent Core -> Workspace; 5 jumps to the workbench.\nTUI commands: /help, /status, /tasks, /agents, /skills, /context, /config, /boundary, /trust, /approve, /deny, /details, /save, /resume, /clear, /quit.\n\nModel/API config: /config reads .moxi/config.toml or MOXI_/OPENAI_/OPENROUTER_ environment variables and always redacts API keys. The first-run setup page shows provider, endpoint, model, and api_key_env guidance. It is detection-only in this Alpha step; model chat is still not connected here.\n\nBoundary: this CLI submits requests and renders shell contracts only; it can watch snapshot files and render a read-only TUI preview, but it cannot execute, authorize, issue tickets, verify, or commit ledger events."
+    "moxi\n\nDefault:\n  moxi\n    Opens the resident branded read-only TUI workbench. Startup pages wait for owner input instead of flashing through onboarding.\n\nCommands:\n  admit --goal <text> [--tenant <id>] [--user <id>] [--workspace <path>] [--capability <id>] [--risk low|medium|high|critical]\n  manifest [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human]\n  boundary [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--text]\n  status [--feed|--query] [--input <snapshot.json>] [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--text|--panel] [--limit <n>]\n  watch [--feed|--query] --input <snapshot.json> [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--text|--panel] [--limit <n>] [--ticks <n>] [--interval-ms <n>]\n  tui [--feed|--query] [--input <snapshot.json>] [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--width <n>] [--height <n>] [--keys tab,o,g,t,a,b,?,j,k,/filter,r,q] [--interactive] [--poll-ms <n>]\n  repl\n\nTUI startup: Enter advances Boot -> Trust -> First-run Setup when model/API config is missing -> Agent Core -> Workspace; 5 jumps to the workbench.\nTUI commands: /help, /status, /tasks, /agents, /skills, /context, /config, /doctor, /boundary, /trust, /approve, /deny, /details, /save, /resume, /clear, /quit.\n\nModel/API config: /config reads .moxi/config.toml or MOXI_/OPENAI_/OPENROUTER_ environment variables and always redacts API keys. /doctor tests OpenAI-compatible endpoint readiness and reports invalid key, model not found, quota/rate limit, timeout, network, bad endpoint, and unsupported response categories. Model chat is still not connected here.\n\nBoundary: this CLI submits requests and renders shell contracts only; it can watch snapshot files and render a read-only TUI preview, but it cannot execute, authorize, issue tickets, verify, or commit ledger events."
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::Value;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
 
     fn event_feed_json() -> String {
         serde_json::json!({
@@ -5148,6 +5464,23 @@ mod tests {
             }
         })
         .to_string()
+    }
+
+    fn mock_http_once(status: u16, body: &'static str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 2048];
+            let _ = stream.read(&mut request);
+            let response = format!(
+                "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        format!("http://{addr}/v1")
     }
 
     fn multi_task_query_snapshot_json() -> String {
@@ -6110,6 +6443,85 @@ mod tests {
     }
 
     #[test]
+    fn doctor_reports_setup_gap_without_network() {
+        let config = TuiModelConfig {
+            provider: TuiModelProvider::OpenAi,
+            endpoint: "https://api.openai.com/v1".to_owned(),
+            model: "not-configured".to_owned(),
+            api_key_source: TuiApiKeySource::Missing,
+            config_path: ".moxi\\config.toml".to_owned(),
+            config_state: "missing".to_owned(),
+        };
+
+        let report = TuiModelDoctor::check(&config);
+
+        assert_eq!(report.status, TuiDoctorStatus::NeedsSetup);
+        assert!(report.message().contains("needs-setup"));
+        assert!(report.message().contains(".moxi/config.toml"));
+    }
+
+    #[test]
+    fn doctor_classifies_openai_compatible_statuses() {
+        let ready = classify_doctor_response(
+            &test_doctor_config("http://127.0.0.1:1/v1"),
+            HttpProbeResponse {
+                status: 200,
+                body: r#"{"id":"gpt-demo","object":"model"}"#.to_owned(),
+            },
+        );
+        assert_eq!(ready.status, TuiDoctorStatus::Ready);
+
+        let invalid = classify_doctor_response(
+            &test_doctor_config("http://127.0.0.1:1/v1"),
+            HttpProbeResponse {
+                status: 401,
+                body: r#"{"error":{"message":"invalid api key"}}"#.to_owned(),
+            },
+        );
+        assert_eq!(invalid.status, TuiDoctorStatus::InvalidKey);
+
+        let missing_model = classify_doctor_response(
+            &test_doctor_config("http://127.0.0.1:1/v1"),
+            HttpProbeResponse {
+                status: 404,
+                body: r#"{"error":{"message":"model not found"}}"#.to_owned(),
+            },
+        );
+        assert_eq!(missing_model.status, TuiDoctorStatus::ModelNotFound);
+
+        let quota = classify_doctor_response(
+            &test_doctor_config("http://127.0.0.1:1/v1"),
+            HttpProbeResponse {
+                status: 429,
+                body: r#"{"error":{"message":"rate limit"}}"#.to_owned(),
+            },
+        );
+        assert_eq!(quota.status, TuiDoctorStatus::Quota);
+    }
+
+    #[test]
+    fn doctor_probe_reaches_local_openai_compatible_endpoint() {
+        let endpoint = mock_http_once(200, r#"{"id":"gpt-demo","object":"model"}"#);
+        let response = http_get_openai_model(&endpoint, "gpt-demo", "secret").unwrap();
+
+        assert_eq!(response.status, 200);
+        assert!(response.body.contains("gpt-demo"));
+    }
+
+    fn test_doctor_config(endpoint: &str) -> TuiModelConfig {
+        TuiModelConfig {
+            provider: TuiModelProvider::Custom,
+            endpoint: endpoint.to_owned(),
+            model: "gpt-demo".to_owned(),
+            api_key_source: TuiApiKeySource::Config {
+                redacted: "sk-t...test".to_owned(),
+            },
+            config_path: ".moxi\\config.toml".to_owned(),
+            config_state: "present".to_owned(),
+        }
+    }
+
+    #[test]
     fn tui_config_command_pushes_redacted_message() {
         let temp = tempfile::tempdir().unwrap();
         let moxi_dir = temp.path().join(".moxi");
@@ -6144,6 +6556,49 @@ mod tests {
         assert!(message.body.contains("key=config:sk-v...9999"));
         assert!(!message.body.contains(raw_secret));
         assert!(state.command_status.contains("secrets are redacted"));
+    }
+
+    #[test]
+    fn tui_doctor_command_pushes_actionable_message_without_secret() {
+        let temp = tempfile::tempdir().unwrap();
+        let moxi_dir = temp.path().join(".moxi");
+        fs::create_dir_all(&moxi_dir).unwrap();
+        let endpoint = mock_http_once(401, r#"{"error":{"message":"invalid api key"}}"#);
+        let env_name = "MOXI_TEST_DOCTOR_KEY";
+        let raw_secret = "doctor-secret-123456";
+        fs::write(
+            moxi_dir.join("config.toml"),
+            format!(
+                "provider = \"custom\"\nendpoint = \"{endpoint}\"\nmodel = \"gpt-demo\"\napi_key_env = \"{env_name}\"\n"
+            ),
+        )
+        .unwrap();
+        env::set_var(env_name, raw_secret);
+        let workspace = WorkspaceFacts::detect_at(temp.path());
+        let mut state = TuiState {
+            session: TuiAgentSession {
+                model_config: TuiModelConfig::load_for_workspace(&workspace),
+                workspace,
+                ..TuiAgentSession::default()
+            },
+            command_input: "/doctor".to_owned(),
+            ..TuiState::default()
+        };
+
+        submit_tui_command(&mut state);
+
+        env::remove_var(env_name);
+        let message = state
+            .session
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == "doctor")
+            .unwrap();
+        assert!(message.body.contains("status=invalid-key"));
+        assert!(message.body.contains("check the api_key_env value"));
+        assert!(!message.body.contains(raw_secret));
+        assert!(state.command_status.contains("invalid-key"));
     }
 
     #[test]
@@ -7394,7 +7849,7 @@ reasoning = "low"
 
         assert_eq!(code, 0);
         assert!(text.contains("earlier commands"));
-        assert!(text.contains("/follow"));
+        assert!(text.contains("/details"));
         assert!(text.contains("more commands"));
         assert!(!text.contains("/status  current session"));
     }

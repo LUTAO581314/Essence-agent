@@ -208,6 +208,7 @@ struct TuiState {
     follow_active_step: bool,
     show_command_palette: bool,
     command_palette_index: usize,
+    setup_notice: Option<String>,
     refresh_count: usize,
     should_quit: bool,
 }
@@ -228,6 +229,7 @@ impl Default for TuiState {
             follow_active_step: true,
             show_command_palette: false,
             command_palette_index: 0,
+            setup_notice: None,
             refresh_count: 0,
             should_quit: false,
         }
@@ -439,6 +441,19 @@ impl TuiAgentSession {
         );
     }
 
+    fn setup_config_notice(&mut self) -> String {
+        self.model_config = TuiModelConfig::load_for_workspace(&self.workspace);
+        format!(
+            "config: provider={} endpoint={} model={} config={} ({}) key={}",
+            self.model_config.provider.label(),
+            self.model_config.endpoint,
+            self.model_config.model,
+            self.model_config.config_path,
+            self.model_config.config_state,
+            self.model_config.api_key_source.summary()
+        )
+    }
+
     fn push_doctor_message(&mut self) -> TuiDoctorStatus {
         self.model_config = TuiModelConfig::load_for_workspace(&self.workspace);
         let report = TuiModelDoctor::check(&self.model_config);
@@ -446,11 +461,39 @@ impl TuiAgentSession {
         report.status
     }
 
+    fn setup_doctor_notice(&mut self) -> String {
+        self.model_config = TuiModelConfig::load_for_workspace(&self.workspace);
+        let report = TuiModelDoctor::check(&self.model_config);
+        format!(
+            "doctor: status={} detail={} action={}",
+            report.status.label(),
+            report.detail,
+            report.action
+        )
+    }
+
     fn push_models_message(&mut self) -> TuiModelCatalogStatus {
         self.model_config = TuiModelConfig::load_for_workspace(&self.workspace);
         let report = TuiModelCatalog::list(&self.model_config);
         self.push_system_message("models", report.message());
         report.status
+    }
+
+    fn setup_models_notice(&mut self) -> String {
+        self.model_config = TuiModelConfig::load_for_workspace(&self.workspace);
+        let report = TuiModelCatalog::list(&self.model_config);
+        let models = if report.models.is_empty() {
+            "<none>".to_owned()
+        } else {
+            report.models.join(", ")
+        };
+        format!(
+            "models: status={} available={} detail={} action={}",
+            report.status.label(),
+            models,
+            report.detail,
+            report.action
+        )
     }
 
     fn push_resume_message(&mut self, snapshot: &TuiSessionSnapshot) {
@@ -3227,7 +3270,12 @@ fn apply_tui_key(state: &mut TuiState, key: &TuiKey) {
     match key {
         TuiKey::Tab => state.active_pane = state.active_pane.next(),
         TuiKey::Focus(pane) => state.active_pane = *pane,
-        TuiKey::Screen(screen) => state.screen = *screen,
+        TuiKey::Screen(screen) => {
+            state.screen = *screen;
+            if state.screen != TuiScreen::Setup {
+                state.setup_notice = None;
+            }
+        }
         TuiKey::MoveConversationDown => {
             if state.show_command_palette {
                 move_command_palette_selection(state, 5);
@@ -3301,6 +3349,9 @@ fn apply_tui_key(state: &mut TuiState, key: &TuiKey) {
         TuiKey::InputChar(value) => {
             state.command_input.push(*value);
             state.active_pane = TuiPane::Keys;
+            if state.screen == TuiScreen::Setup {
+                state.setup_notice = Some("setup command input active".to_owned());
+            }
             if state.command_input.starts_with('/') {
                 state.show_command_palette = true;
                 state.command_palette_index = 0;
@@ -3311,6 +3362,9 @@ fn apply_tui_key(state: &mut TuiState, key: &TuiKey) {
         TuiKey::Backspace => {
             state.command_input.pop();
             state.active_pane = TuiPane::Keys;
+            if state.screen == TuiScreen::Setup && state.command_input.is_empty() {
+                state.setup_notice = None;
+            }
             if state.command_input.starts_with('/') {
                 state.show_command_palette = true;
                 state.command_palette_index = 0;
@@ -3394,6 +3448,7 @@ fn advance_tui_startup_screen(state: &mut TuiState) {
         }
         TuiScreen::Setup => {
             state.screen = TuiScreen::Core;
+            state.setup_notice = None;
             state.command_status = "setup guide acknowledged; Agent Core ready".into();
         }
         TuiScreen::Core => {
@@ -3409,6 +3464,7 @@ fn submit_tui_command(state: &mut TuiState) {
     let command = state.command_input.trim().to_owned();
     state.command_input.clear();
     state.show_command_palette = false;
+    let from_setup = state.screen == TuiScreen::Setup;
     if !command.starts_with('/') && !command.is_empty() {
         if let Some(prompt) = TuiRiskPrompt::detect(&command) {
             state.pending_risk = Some(prompt);
@@ -3486,27 +3542,58 @@ fn submit_tui_command(state: &mut TuiState) {
         }
         "config" => {
             state.active_pane = TuiPane::Overview;
-            state.screen = TuiScreen::Workspace;
-            state.session.push_config_message();
+            if from_setup {
+                let notice = state.session.setup_config_notice();
+                state.setup_notice = Some(notice);
+            } else {
+                state.screen = TuiScreen::Workspace;
+                state.session.push_config_message();
+            }
             state.follow_latest_message = true;
             state.conversation_scroll = 0;
-            state.command_status = "showing model/API configuration; secrets are redacted".into();
+            state.command_status = if from_setup {
+                "setup config check complete; secrets are redacted".into()
+            } else {
+                "showing model/API configuration; secrets are redacted".into()
+            };
         }
         "doctor" => {
             state.active_pane = TuiPane::Overview;
-            state.screen = TuiScreen::Workspace;
-            let status = state.session.push_doctor_message();
+            let status = if from_setup {
+                let notice = state.session.setup_doctor_notice();
+                let label = notice
+                    .split_whitespace()
+                    .find_map(|part| part.strip_prefix("status="))
+                    .unwrap_or("unknown")
+                    .to_owned();
+                state.setup_notice = Some(notice);
+                label
+            } else {
+                state.screen = TuiScreen::Workspace;
+                state.session.push_doctor_message().label().to_owned()
+            };
             state.follow_latest_message = true;
             state.conversation_scroll = 0;
-            state.command_status = format!("doctor completed: {}", status.label());
+            state.command_status = format!("doctor completed: {status}");
         }
         "models" => {
             state.active_pane = TuiPane::Overview;
-            state.screen = TuiScreen::Workspace;
-            let status = state.session.push_models_message();
+            let status = if from_setup {
+                let notice = state.session.setup_models_notice();
+                let label = notice
+                    .split_whitespace()
+                    .find_map(|part| part.strip_prefix("status="))
+                    .unwrap_or("unknown")
+                    .to_owned();
+                state.setup_notice = Some(notice);
+                label
+            } else {
+                state.screen = TuiScreen::Workspace;
+                state.session.push_models_message().label().to_owned()
+            };
             state.follow_latest_message = true;
             state.conversation_scroll = 0;
-            state.command_status = format!("models completed: {}", status.label());
+            state.command_status = format!("models completed: {status}");
         }
         "save" | "persist" => match state.session.save_persistence_snapshot() {
             Ok(path) => {
@@ -3615,6 +3702,10 @@ fn submit_tui_command(state: &mut TuiState) {
             state.command_status = "filter applied; projection remains read-only".into();
         }
         _ => {
+            if from_setup {
+                state.setup_notice =
+                    Some("setup: supported checks are /config, /doctor, and /models".to_owned());
+            }
             state.command_status =
                 "blocked: safe shell only; open / command menu for supported actions".into();
         }
@@ -5071,9 +5162,26 @@ fn render_tui_setup(frame: &mut ratatui::Frame<'_>, area: Rect, state: &TuiState
         Line::from("MOXI_PROVIDER / MOXI_ENDPOINT / MOXI_MODEL"),
         Line::from("MOXI_API_KEY / OPENAI_API_KEY / OPENROUTER_API_KEY"),
         Line::from(""),
+        Line::from(vec![Span::styled("Setup checks", style_warning())]),
+        Line::from(vec![
+            Span::styled("/config", style_focus()),
+            Span::raw(" redacted state  "),
+            Span::styled("/doctor", style_focus()),
+            Span::raw(" readiness  "),
+            Span::styled("/models", style_focus()),
+            Span::raw(" provider catalog"),
+        ]),
+        Line::from(vec![Span::styled(
+            state
+                .setup_notice
+                .clone()
+                .unwrap_or_else(|| "No setup check has run on this page yet.".to_owned()),
+            style_value(),
+        )]),
+        Line::from(""),
         Line::from(vec![Span::styled("Next Alpha steps", style_warning())]),
-        Line::from("* /config shows redacted config state"),
-        Line::from("o /doctor will test endpoint, key, model, quota, and response shape"),
+        Line::from("* Run /config, /doctor, or /models here without leaving setup"),
+        Line::from("o /doctor tests endpoint, key, model, quota, and response shape"),
         Line::from("o /models lists provider model ids when the endpoint supports it"),
         Line::from("o configured sessions use read-only model chat after setup"),
         Line::from(""),
@@ -5094,7 +5202,7 @@ fn render_tui_setup(frame: &mut ratatui::Frame<'_>, area: Rect, state: &TuiState
                 BorderType::Rounded,
             ))
             .wrap(Wrap { trim: true }),
-        centered_rect(area, 96, 28),
+        centered_rect(area, 100, 31),
     );
 }
 
@@ -8907,7 +9015,83 @@ reasoning = "low"
         assert!(text.contains("api_key_env"));
         assert!(text.contains("OPENAI_API_KEY"));
         assert!(text.contains("Environment alternative"));
+        assert!(text.contains("Setup checks"));
+        assert!(text.contains("/doctor"));
+        assert!(text.contains("/models"));
+        assert!(text.contains("No setup check has run"));
         assert!(!text.contains("sk-visible-never"));
+    }
+
+    #[test]
+    fn tui_setup_page_runs_config_check_without_leaving_setup() {
+        let temp = tempfile::tempdir().unwrap();
+        let moxi_dir = temp.path().join(".moxi");
+        fs::create_dir_all(&moxi_dir).unwrap();
+        let raw_secret = "sk-visible-never-setup-2222";
+        fs::write(
+            moxi_dir.join("config.toml"),
+            format!("provider = \"openai\"\nmodel = \"gpt-demo\"\napi_key = \"{raw_secret}\"\n"),
+        )
+        .unwrap();
+        let workspace = WorkspaceFacts::detect_at(temp.path());
+        let mut state = TuiState {
+            screen: TuiScreen::Setup,
+            session: TuiAgentSession {
+                model_config: TuiModelConfig::load_for_workspace(&workspace),
+                workspace,
+                ..TuiAgentSession::default()
+            },
+            command_input: "/config".to_owned(),
+            ..TuiState::default()
+        };
+
+        submit_tui_command(&mut state);
+
+        assert_eq!(state.screen, TuiScreen::Setup);
+        assert!(state.command_status.contains("setup config check complete"));
+        let notice = state.setup_notice.as_deref().unwrap();
+        assert!(notice.contains("provider=openai"));
+        assert!(notice.contains("key=config:sk-v...2222"));
+        assert!(!notice.contains(raw_secret));
+        assert!(!state
+            .session
+            .messages
+            .iter()
+            .any(|message| message.role == "config"));
+    }
+
+    #[test]
+    fn tui_setup_page_runs_doctor_and_models_checks_in_place() {
+        let mut state = TuiState {
+            screen: TuiScreen::Setup,
+            command_input: "/doctor".to_owned(),
+            ..TuiState::default()
+        };
+
+        submit_tui_command(&mut state);
+
+        assert_eq!(state.screen, TuiScreen::Setup);
+        assert!(state
+            .command_status
+            .contains("doctor completed: needs-setup"));
+        assert!(state
+            .setup_notice
+            .as_deref()
+            .unwrap()
+            .contains("doctor: status=needs-setup"));
+
+        state.command_input = "/models".to_owned();
+        submit_tui_command(&mut state);
+
+        assert_eq!(state.screen, TuiScreen::Setup);
+        assert!(state
+            .command_status
+            .contains("models completed: needs-setup"));
+        assert!(state
+            .setup_notice
+            .as_deref()
+            .unwrap()
+            .contains("models: status=needs-setup"));
     }
 
     #[test]

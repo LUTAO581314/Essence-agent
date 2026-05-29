@@ -555,8 +555,10 @@ with `rustls` TLS, and responses are classified as ready, invalid key, model
 not found, quota/rate limit, bad endpoint, network, timeout, or unsupported
 response while keeping secrets redacted. `/models` lists OpenAI-compatible
 provider model ids through the configured `/models` catalog endpoint, showing
-up to 20 ids and redacting errors. Configured TUI task submissions now prefer a
-read-only
+up to 20 ids and redacting errors. The First-run Setup page now also runs
+`/config`, `/doctor`, and `/models` in place, updating a setup summary line
+without printing secrets or forcing the user into the main workbench. Configured
+TUI task submissions now prefer a read-only
 OpenAI-compatible `/chat/completions` adapter that packages workspace facts,
 trust state, active agents, skills, and the owner task; provider/config errors
 fall back to local read-only analysis with redacted previews. The TUI now stages

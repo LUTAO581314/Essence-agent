@@ -56,7 +56,8 @@ The default entry opens the resident workbench. Use `q` to quit.
 
 - `interactive`: opens the normal `moxi` TUI.
 - `boot`: renders the startup wordmark and initialization waterfall.
-- `setup`: renders the first-run model/API configuration guide.
+- `setup`: renders the first-run model/API configuration guide and in-page
+  `/config`, `/doctor`, and `/models` checks.
 - `core`: renders the Agent Core information page.
 - `flow`: replays a deterministic demo path for screenshots and reviews.
 - `status`: renders a read-only status projection.
@@ -66,7 +67,8 @@ The default entry opens the resident workbench. Use `q` to quit.
 1. Start with `.\scripts\demo-r10-rich-cli.ps1 -Mode boot`.
 2. Show that startup waits for owner input instead of flashing by itself.
 3. Run `.\scripts\demo-r10-rich-cli.ps1 -Mode setup`.
-4. Point out provider, endpoint, model, `api_key_env`, and redacted key rules.
+4. Point out provider, endpoint, model, `api_key_env`, redacted key rules, and
+   the in-page setup checks.
 5. Run `.\scripts\demo-r10-rich-cli.ps1 -Mode core`.
 6. Point out `cwd`, config, trust, active agents, tools, skills, and snapshot path.
 7. Run `.\scripts\demo-r10-rich-cli.ps1`.
@@ -100,7 +102,9 @@ The default entry opens the resident workbench. Use `q` to quit.
 - First-run setup shows `.moxi/config.toml` and environment variable options,
   but does not save secrets or print full API keys. The top-level `moxi init`
   command previews the same env-only config by default, and writes it only when
-  `--write` is explicit.
+  `--write` is explicit. While on the setup page, `/config`, `/doctor`, and
+  `/models` run in place and update the setup summary instead of forcing the
+  user into the main workbench.
 - `moxi config` and `/config` inspect the same model/API config state with
   redacted key display. `moxi doctor` and `/doctor` classify model/API readiness
   without printing secrets. They probe OpenAI-compatible HTTP/HTTPS endpoints

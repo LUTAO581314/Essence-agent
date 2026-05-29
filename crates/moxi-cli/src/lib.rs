@@ -496,6 +496,47 @@ impl TuiAgentSession {
         )
     }
 
+    fn write_setup_model_config(&mut self) -> Result<String, String> {
+        self.model_config = TuiModelConfig::load_for_workspace(&self.workspace);
+        let path = PathBuf::from(&self.model_config.config_path);
+        if path.exists() {
+            return Err(format!(
+                "init: config already exists at {}; use top-level moxi init --force outside the TUI if you really want to replace it",
+                path.display()
+            ));
+        }
+        let model = if self.model_config.model == "not-configured" {
+            default_init_model(self.model_config.provider)
+        } else {
+            &self.model_config.model
+        };
+        let template = render_model_config_template(
+            self.model_config.provider,
+            &self.model_config.endpoint,
+            model,
+            self.model_config.provider.default_key_env(),
+        );
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                format!(
+                    "init: failed to create config directory {}: {error}",
+                    parent.display()
+                )
+            })?;
+        }
+        fs::write(&path, template.as_bytes())
+            .map_err(|error| format!("init: failed to write {}: {error}", path.display()))?;
+        self.model_config = TuiModelConfig::load_for_workspace(&self.workspace);
+        Ok(format!(
+            "init: wrote env-only config to {}; provider={} endpoint={} model={} api_key_env={}; set the environment variable, then run /doctor",
+            path.display(),
+            self.model_config.provider.label(),
+            self.model_config.endpoint,
+            self.model_config.model,
+            self.model_config.provider.default_key_env()
+        ))
+    }
+
     fn push_resume_message(&mut self, snapshot: &TuiSessionSnapshot) {
         self.push_system_message(
             "resume",
@@ -3489,6 +3530,27 @@ fn submit_tui_command(state: &mut TuiState) {
         "" => {
             state.command_status = "ready: ? shortcuts · / command menu".into();
         }
+        "init" | "setup" => {
+            if from_setup {
+                match state.session.write_setup_model_config() {
+                    Ok(notice) => {
+                        state.setup_notice = Some(notice);
+                        state.command_status =
+                            "setup init wrote env-only config; set API key env then run /doctor"
+                                .into();
+                    }
+                    Err(notice) => {
+                        state.setup_notice = Some(notice);
+                        state.command_status =
+                            "setup init blocked; existing config was not overwritten".into();
+                    }
+                }
+            } else {
+                state.command_status =
+                    "open First-run Setup before using /init; top-level moxi init is also available"
+                        .into();
+            }
+        }
         "help" | "keys" => {
             state.active_pane = TuiPane::Keys;
             state.show_command_palette = true;
@@ -3703,8 +3765,9 @@ fn submit_tui_command(state: &mut TuiState) {
         }
         _ => {
             if from_setup {
-                state.setup_notice =
-                    Some("setup: supported checks are /config, /doctor, and /models".to_owned());
+                state.setup_notice = Some(
+                    "setup: supported actions are /init, /config, /doctor, and /models".to_owned(),
+                );
             }
             state.command_status =
                 "blocked: safe shell only; open / command menu for supported actions".into();
@@ -5164,6 +5227,10 @@ fn render_tui_setup(frame: &mut ratatui::Frame<'_>, area: Rect, state: &TuiState
         Line::from(""),
         Line::from(vec![Span::styled("Setup checks", style_warning())]),
         Line::from(vec![
+            Span::styled("/init", style_focus()),
+            Span::raw(" write env-only .moxi/config.toml"),
+        ]),
+        Line::from(vec![
             Span::styled("/config", style_focus()),
             Span::raw(" redacted state  "),
             Span::styled("/doctor", style_focus()),
@@ -5180,7 +5247,7 @@ fn render_tui_setup(frame: &mut ratatui::Frame<'_>, area: Rect, state: &TuiState
         )]),
         Line::from(""),
         Line::from(vec![Span::styled("Next Alpha steps", style_warning())]),
-        Line::from("* Run /config, /doctor, or /models here without leaving setup"),
+        Line::from("* Run /init, /config, /doctor, or /models here without leaving setup"),
         Line::from("o /doctor tests endpoint, key, model, quota, and response shape"),
         Line::from("o /models lists provider model ids when the endpoint supports it"),
         Line::from("o configured sessions use read-only model chat after setup"),
@@ -5490,6 +5557,10 @@ const COMMAND_PALETTE_ENTRIES: &[CommandPaletteEntry] = &[
     CommandPaletteEntry {
         command: "/context",
         description: "show context meter sources",
+    },
+    CommandPaletteEntry {
+        command: "/init",
+        description: "setup only: create env-only model file",
     },
     CommandPaletteEntry {
         command: "/config",
@@ -9016,10 +9087,86 @@ reasoning = "low"
         assert!(text.contains("OPENAI_API_KEY"));
         assert!(text.contains("Environment alternative"));
         assert!(text.contains("Setup checks"));
+        assert!(text.contains("/init"));
         assert!(text.contains("/doctor"));
         assert!(text.contains("/models"));
         assert!(text.contains("No setup check has run"));
         assert!(!text.contains("sk-visible-never"));
+    }
+
+    #[test]
+    fn tui_setup_init_writes_env_only_config_without_secret() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = WorkspaceFacts::detect_at(temp.path());
+        let config_path = temp.path().join(".moxi").join("config.toml");
+        let mut state = TuiState {
+            screen: TuiScreen::Setup,
+            session: TuiAgentSession {
+                model_config: TuiModelConfig::load_for_workspace(&workspace),
+                workspace,
+                ..TuiAgentSession::default()
+            },
+            command_input: "/init".to_owned(),
+            ..TuiState::default()
+        };
+
+        submit_tui_command(&mut state);
+
+        assert_eq!(state.screen, TuiScreen::Setup);
+        assert!(state.command_status.contains("wrote env-only config"));
+        assert!(config_path.is_file());
+        let written = fs::read_to_string(&config_path).unwrap();
+        assert!(written.contains("provider = \"openai\""));
+        assert!(written.contains("model = \"gpt-4o-mini\""));
+        assert!(written.contains("api_key_env = \"OPENAI_API_KEY\""));
+        assert!(!written.contains("api_key ="));
+        assert!(state
+            .setup_notice
+            .as_deref()
+            .unwrap()
+            .contains("set the environment variable"));
+        assert_eq!(
+            state.session.model_config.config_state,
+            "present-incomplete"
+        );
+    }
+
+    #[test]
+    fn tui_setup_init_refuses_to_overwrite_existing_config() {
+        let temp = tempfile::tempdir().unwrap();
+        let moxi_dir = temp.path().join(".moxi");
+        fs::create_dir_all(&moxi_dir).unwrap();
+        let config_path = moxi_dir.join("config.toml");
+        fs::write(
+            &config_path,
+            "provider = \"openai\"\nmodel = \"already-set\"\napi_key_env = \"EXISTING_KEY\"\n",
+        )
+        .unwrap();
+        let workspace = WorkspaceFacts::detect_at(temp.path());
+        let mut state = TuiState {
+            screen: TuiScreen::Setup,
+            session: TuiAgentSession {
+                model_config: TuiModelConfig::load_for_workspace(&workspace),
+                workspace,
+                ..TuiAgentSession::default()
+            },
+            command_input: "/init".to_owned(),
+            ..TuiState::default()
+        };
+
+        submit_tui_command(&mut state);
+
+        assert_eq!(state.screen, TuiScreen::Setup);
+        assert!(state.command_status.contains("not overwritten"));
+        assert!(state
+            .setup_notice
+            .as_deref()
+            .unwrap()
+            .contains("config already exists"));
+        let written = fs::read_to_string(&config_path).unwrap();
+        assert!(written.contains("already-set"));
+        assert!(written.contains("EXISTING_KEY"));
+        assert!(!written.contains("gpt-4o-mini"));
     }
 
     #[test]
@@ -9373,7 +9520,7 @@ reasoning = "low"
 
         assert_eq!(code, 0);
         assert!(text.contains("earlier commands"));
-        assert!(text.contains("/deny"));
+        assert!(text.contains(COMMAND_PALETTE_ENTRIES[10].command));
         assert!(text.contains("more commands"));
         assert!(!text.contains("/status  current session"));
     }

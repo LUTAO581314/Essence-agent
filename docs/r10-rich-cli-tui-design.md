@@ -173,9 +173,11 @@ to a display-only shell when model/API config is missing.
 This page shows the detected provider, endpoint, model, config path/state, and
 redacted API-key source. It should offer a copyable `.moxi/config.toml` shape
 and environment variable alternatives without ever printing a full key. It also
-acts as a small setup check panel: `/config`, `/doctor`, and `/models` should
-run in place and update a setup result line instead of moving the user into the
-main workbench.
+acts as a small setup check panel: `/init` may explicitly write the env-only
+`.moxi/config.toml` template when config is missing, while `/config`, `/doctor`,
+and `/models` should run in place and update a setup result line instead of
+moving the user into the main workbench. `/init` must refuse to overwrite an
+existing config inside the TUI.
 
 ```text
 MOXI CLI Alpha setup                  read-only model chat
@@ -204,6 +206,7 @@ MOXI_PROVIDER / MOXI_ENDPOINT / MOXI_MODEL
 MOXI_API_KEY / OPENAI_API_KEY / OPENROUTER_API_KEY
 
 Setup checks
+/init write env-only .moxi/config.toml
 /config redacted state    /doctor readiness    /models provider catalog
 No setup check has run on this page yet.
 

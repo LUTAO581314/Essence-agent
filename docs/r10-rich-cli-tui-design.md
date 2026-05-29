@@ -20,12 +20,18 @@ The default `moxi` / `moxi-agent` entry should follow this order:
 
 1. Logo impact page.
 2. Workspace Trust risk page, only when needed.
-3. Agent Core information page.
-4. Main working conversation surface.
+3. First-run Setup page, only when model/API config is missing or incomplete.
+4. Agent Core information page.
+5. Main working conversation surface.
 
 The risk page should not appear on every launch. It appears when the workspace
 is new, the disk/location changes, trust is unknown, core or agent config
 changes, permissions are elevated, or the user clears trust state.
+
+The setup page should not appear after configuration is complete. It appears
+when `.moxi/config.toml` and supported environment variables do not provide a
+provider, endpoint, model, and API-key source. It is guidance-only until the
+explicit save/setup flow and `/doctor` connectivity check are implemented.
 
 ## Page 1: Logo Impact
 
@@ -58,7 +64,7 @@ workspace.
   - Checking trust boundary
   - Waiting for owner handoff
 
-  Enter continue startup flow    4 workspace    q quit
+  Enter continue startup flow    5 workspace    q quit
 
   graph demo_graph    context workspace facts ready
 ```
@@ -154,7 +160,49 @@ Available Skills
 tui.design | risk.review | docs.prepare | github.prepare
 ```
 
-## Page 4: Main Working Surface
+## Page 3: First-Run Setup
+
+Purpose: make the API-backed Alpha feel usable instead of silently falling back
+to a display-only shell when model/API config is missing.
+
+This page shows the detected provider, endpoint, model, config path/state, and
+redacted API-key source. It should offer a copyable `.moxi/config.toml` shape
+and environment variable alternatives without ever printing a full key.
+
+```text
+MOXI CLI Alpha setup                  read-only model chat preparation
+
+Model/API configuration is required before real chat is connected.
+This page is a guide only: it does not write files, print full keys, or call the network.
+
+Detected configuration
+provider: openai        model: not-configured
+endpoint: https://api.openai.com/v1
+config: C:\...\MOXI-Essence-agent\.moxi\config.toml (missing)
+api key: missing
+
+Create .moxi/config.toml
+[model]
+  provider = "openai"
+  endpoint = "https://api.openai.com/v1"
+  model = "gpt-4o-mini"
+  api_key_env = "OPENAI_API_KEY"
+
+Supported providers
+openai | openrouter | custom | local
+
+Environment alternative
+MOXI_PROVIDER / MOXI_ENDPOINT / MOXI_MODEL
+MOXI_API_KEY / OPENAI_API_KEY / OPENROUTER_API_KEY
+
+Enter continue to Agent Core    /config show redacted state    5 workspace
+```
+
+## Page 4: Agent Core Information
+
+Purpose: advanced product feel, configuration transparency, and trust.
+
+## Page 5: Main Working Surface
 
 Purpose: daily usability.
 

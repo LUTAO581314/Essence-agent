@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("interactive", "boot", "core", "flow", "status")]
+    [ValidateSet("interactive", "boot", "setup", "core", "flow", "status")]
     [string]$Mode = "interactive"
 )
 
@@ -20,6 +20,9 @@ switch ($Mode) {
     "boot" {
         Invoke-Moxi @("tui", "--width", "120", "--height", "32", "--keys", "boot,q")
     }
+    "setup" {
+        Invoke-Moxi @("tui", "--width", "120", "--height", "32", "--keys", "setup,q")
+    }
     "core" {
         Invoke-Moxi @("tui", "--width", "132", "--height", "34", "--keys", "core,q")
     }
@@ -31,7 +34,7 @@ switch ($Mode) {
             "--height",
             "38",
             "--keys",
-            "boot,enter,enter,enter,type:i,type:n,type:s,type:p,type:e,type:c,type:t,enter,r,r,r,type:/,type:c,type:o,type:n,enter,type:/,type:s,type:a,type:v,type:e,enter,type:/,type:r,type:e,type:s,type:u,type:m,type:e,enter,q"
+            "boot,enter,enter,enter,enter,type:i,type:n,type:s,type:p,type:e,type:c,type:t,enter,r,r,r,type:/,type:c,type:o,type:n,enter,type:/,type:s,type:a,type:v,type:e,enter,type:/,type:r,type:e,type:s,type:u,type:m,type:e,enter,q"
         )
     }
     "status" {

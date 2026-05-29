@@ -1364,6 +1364,25 @@ impl TuiModelConfig {
             && !matches!(self.api_key_source, TuiApiKeySource::Missing)
             && self.config_state != "missing"
     }
+
+    fn needs_setup(&self) -> bool {
+        !self.is_configured()
+    }
+
+    fn setup_sample(&self) -> String {
+        let model = if self.model == "not-configured" {
+            "gpt-4o-mini"
+        } else {
+            &self.model
+        };
+        format!(
+            "provider = \"{}\"\nendpoint = \"{}\"\nmodel = \"{}\"\napi_key_env = \"{}\"",
+            self.provider.label(),
+            self.endpoint,
+            model,
+            self.provider.default_key_env()
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1810,6 +1829,7 @@ enum TuiStepState {
 enum TuiScreen {
     Boot,
     Trust,
+    Setup,
     Core,
     Workspace,
 }
@@ -2117,8 +2137,9 @@ fn tui_key_from_event(event: KeyEvent) -> Option<TuiKey> {
         KeyCode::Char('b') | KeyCode::Char('B') => Some(TuiKey::Focus(TuiPane::Boundary)),
         KeyCode::Char('1') => Some(TuiKey::Screen(TuiScreen::Boot)),
         KeyCode::Char('2') => Some(TuiKey::Screen(TuiScreen::Trust)),
-        KeyCode::Char('3') => Some(TuiKey::Screen(TuiScreen::Core)),
-        KeyCode::Char('4') => Some(TuiKey::Screen(TuiScreen::Workspace)),
+        KeyCode::Char('3') => Some(TuiKey::Screen(TuiScreen::Setup)),
+        KeyCode::Char('4') => Some(TuiKey::Screen(TuiScreen::Core)),
+        KeyCode::Char('5') => Some(TuiKey::Screen(TuiScreen::Workspace)),
         KeyCode::Char('f') | KeyCode::Char('F') => Some(TuiKey::Focus(TuiPane::Tasks)),
         KeyCode::Char('j') | KeyCode::Char('J') => Some(TuiKey::MoveTaskDown),
         KeyCode::Char('k') | KeyCode::Char('K') => Some(TuiKey::MoveTaskUp),
@@ -2281,14 +2302,26 @@ fn advance_tui_startup_screen(state: &mut TuiState) {
                 state.screen = TuiScreen::Trust;
                 state.command_status =
                     "trust gate: Enter read-only · /approve accept · /deny block".into();
+            } else if state.session.model_config.needs_setup() {
+                state.screen = TuiScreen::Setup;
+                state.command_status = "first-run setup: model/API config is missing".into();
             } else {
                 state.screen = TuiScreen::Core;
                 state.command_status = "trusted read-only workspace; Agent Core ready".into();
             }
         }
         TuiScreen::Trust => {
+            if state.session.model_config.needs_setup() {
+                state.screen = TuiScreen::Setup;
+                state.command_status = "first-run setup: model/API config is missing".into();
+            } else {
+                state.screen = TuiScreen::Core;
+                state.command_status = "Agent Core ready: Enter opens workspace".into();
+            }
+        }
+        TuiScreen::Setup => {
             state.screen = TuiScreen::Core;
-            state.command_status = "Agent Core ready: Enter opens workspace".into();
+            state.command_status = "setup guide acknowledged; Agent Core ready".into();
         }
         TuiScreen::Core => {
             state.screen = TuiScreen::Workspace;
@@ -3155,8 +3188,9 @@ fn parse_tui_key(value: &str) -> CliResult<TuiKey> {
         "?" | "help" | "keys" | "menu" => Ok(TuiKey::ToggleCommandPalette),
         "boot" | "logo" | "1" => Ok(TuiKey::Screen(TuiScreen::Boot)),
         "trust" | "risk" | "2" => Ok(TuiKey::Screen(TuiScreen::Trust)),
-        "core" | "agents" | "3" => Ok(TuiKey::Screen(TuiScreen::Core)),
-        "workspace" | "chat" | "4" => Ok(TuiKey::Screen(TuiScreen::Workspace)),
+        "setup" | "config" | "3" => Ok(TuiKey::Screen(TuiScreen::Setup)),
+        "core" | "agents" | "4" => Ok(TuiKey::Screen(TuiScreen::Core)),
+        "workspace" | "chat" | "5" => Ok(TuiKey::Screen(TuiScreen::Workspace)),
         "chat_down" | "pagedown" | "page_down" => Ok(TuiKey::MoveConversationDown),
         "chat_up" | "pageup" | "page_up" => Ok(TuiKey::MoveConversationUp),
         "j" | "down" => Ok(TuiKey::MoveTaskDown),
@@ -3533,6 +3567,7 @@ fn render_tui_snapshot(
     match state.screen {
         TuiScreen::Boot => render_tui_boot(frame, area, projection),
         TuiScreen::Trust => render_tui_trust(frame, area, projection, state),
+        TuiScreen::Setup => render_tui_setup(frame, area, state),
         TuiScreen::Core => render_tui_core(frame, area, projection, state),
         TuiScreen::Workspace => render_tui_workspace(frame, area, projection, state),
     }
@@ -3794,6 +3829,97 @@ fn render_tui_trust(
             ))
             .wrap(Wrap { trim: true }),
         centered_rect(area, 84, 21),
+    );
+}
+
+fn render_tui_setup(frame: &mut ratatui::Frame<'_>, area: Rect, state: &TuiState) {
+    let config = &state.session.model_config;
+    let key_style = if matches!(config.api_key_source, TuiApiKeySource::Missing) {
+        style_warning()
+    } else {
+        style_success()
+    };
+    let sample = config.setup_sample();
+    let sample_lines = sample
+        .lines()
+        .map(|line| Line::from(vec![Span::styled(format!("  {line}"), style_value())]));
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("MOXI CLI Alpha setup", style_brand()),
+            Span::styled("  read-only model chat preparation", style_dim()),
+        ]),
+        Line::from(""),
+        Line::from(vec![Span::styled(
+            "Model/API configuration is required before real chat is connected.",
+            style_warning(),
+        )]),
+        Line::from(vec![Span::styled(
+            "This page is a guide only: it does not write files, print full keys, or call the network.",
+            style_value(),
+        )]),
+        Line::from(""),
+        Line::from(vec![Span::styled("Detected configuration", style_warning())]),
+        Line::from(vec![
+            Span::styled("provider: ", style_label()),
+            Span::styled(config.provider.label(), style_value()),
+            Span::styled("    model: ", style_label()),
+            Span::styled(config.model.clone(), style_value()),
+        ]),
+        Line::from(vec![
+            Span::styled("endpoint: ", style_label()),
+            Span::styled(config.endpoint.clone(), style_value()),
+        ]),
+        Line::from(vec![
+            Span::styled("config: ", style_label()),
+            Span::styled(config.config_path.clone(), style_value()),
+            Span::styled(" (", style_dim()),
+            Span::styled(config.config_state.clone(), style_dim()),
+            Span::styled(")", style_dim()),
+        ]),
+        Line::from(vec![
+            Span::styled("api key: ", style_label()),
+            Span::styled(config.api_key_source.summary(), key_style),
+        ]),
+        Line::from(""),
+        Line::from(vec![Span::styled("Create .moxi/config.toml", style_warning())]),
+        Line::from(vec![Span::styled("[model]", style_dim())]),
+    ];
+    lines.extend(sample_lines);
+    lines.extend([
+        Line::from(""),
+        Line::from(vec![Span::styled("Supported providers", style_warning())]),
+        Line::from("openai | openrouter | custom | local"),
+        Line::from(""),
+        Line::from(vec![Span::styled(
+            "Environment alternative",
+            style_warning(),
+        )]),
+        Line::from("MOXI_PROVIDER / MOXI_ENDPOINT / MOXI_MODEL"),
+        Line::from("MOXI_API_KEY / OPENAI_API_KEY / OPENROUTER_API_KEY"),
+        Line::from(""),
+        Line::from(vec![Span::styled("Next Alpha steps", style_warning())]),
+        Line::from("* /config shows redacted config state"),
+        Line::from("o /doctor will test endpoint, key, model, quota, and response shape"),
+        Line::from("o model-backed read-only chat will connect after doctor passes"),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Enter", style_focus()),
+            Span::raw(" continue to Agent Core    "),
+            Span::styled("/config", style_focus()),
+            Span::raw(" show redacted state    "),
+            Span::styled("5", style_focus()),
+            Span::raw(" workspace"),
+        ]),
+    ]);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(tui_panel_block(
+                "First-run Setup",
+                Color::Cyan,
+                BorderType::Rounded,
+            ))
+            .wrap(Wrap { trim: true }),
+        centered_rect(area, 96, 28),
     );
 }
 
@@ -4923,7 +5049,7 @@ fn percent(value: f32) -> String {
 }
 
 fn help_text() -> &'static str {
-    "moxi\n\nDefault:\n  moxi\n    Opens the resident branded read-only TUI workbench. Startup pages wait for owner input instead of flashing through onboarding.\n\nCommands:\n  admit --goal <text> [--tenant <id>] [--user <id>] [--workspace <path>] [--capability <id>] [--risk low|medium|high|critical]\n  manifest [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human]\n  boundary [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--text]\n  status [--feed|--query] [--input <snapshot.json>] [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--text|--panel] [--limit <n>]\n  watch [--feed|--query] --input <snapshot.json> [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--text|--panel] [--limit <n>] [--ticks <n>] [--interval-ms <n>]\n  tui [--feed|--query] [--input <snapshot.json>] [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--width <n>] [--height <n>] [--keys tab,o,g,t,a,b,?,j,k,/filter,r,q] [--interactive] [--poll-ms <n>]\n  repl\n\nTUI startup: Enter advances Boot -> Trust -> Agent Core -> Workspace; 4 jumps to the workbench.\nTUI commands: /help, /status, /tasks, /agents, /skills, /context, /config, /boundary, /trust, /approve, /deny, /details, /save, /resume, /clear, /quit.\n\nModel/API config: /config reads .moxi/config.toml or MOXI_/OPENAI_/OPENROUTER_ environment variables and always redacts API keys. It is detection-only in this Alpha step; model chat is still not connected here.\n\nBoundary: this CLI submits requests and renders shell contracts only; it can watch snapshot files and render a read-only TUI preview, but it cannot execute, authorize, issue tickets, verify, or commit ledger events."
+    "moxi\n\nDefault:\n  moxi\n    Opens the resident branded read-only TUI workbench. Startup pages wait for owner input instead of flashing through onboarding.\n\nCommands:\n  admit --goal <text> [--tenant <id>] [--user <id>] [--workspace <path>] [--capability <id>] [--risk low|medium|high|critical]\n  manifest [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human]\n  boundary [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--text]\n  status [--feed|--query] [--input <snapshot.json>] [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--text|--panel] [--limit <n>]\n  watch [--feed|--query] --input <snapshot.json> [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--text|--panel] [--limit <n>] [--ticks <n>] [--interval-ms <n>]\n  tui [--feed|--query] [--input <snapshot.json>] [--surface cli|mcp|api|ide|desktop|web|mobile|digital-human] [--profile <id>] [--width <n>] [--height <n>] [--keys tab,o,g,t,a,b,?,j,k,/filter,r,q] [--interactive] [--poll-ms <n>]\n  repl\n\nTUI startup: Enter advances Boot -> Trust -> First-run Setup when model/API config is missing -> Agent Core -> Workspace; 5 jumps to the workbench.\nTUI commands: /help, /status, /tasks, /agents, /skills, /context, /config, /boundary, /trust, /approve, /deny, /details, /save, /resume, /clear, /quit.\n\nModel/API config: /config reads .moxi/config.toml or MOXI_/OPENAI_/OPENROUTER_ environment variables and always redacts API keys. The first-run setup page shows provider, endpoint, model, and api_key_env guidance. It is detection-only in this Alpha step; model chat is still not connected here.\n\nBoundary: this CLI submits requests and renders shell contracts only; it can watch snapshot files and render a read-only TUI preview, but it cannot execute, authorize, issue tickets, verify, or commit ledger events."
 }
 
 #[cfg(test)]
@@ -5838,6 +5964,17 @@ mod tests {
 
         state.screen = TuiScreen::Boot;
         state.session.trust.status = TuiTrustStatus::KnownReadOnly;
+        state.session.model_config = TuiModelConfig {
+            provider: TuiModelProvider::OpenAi,
+            endpoint: "https://api.openai.com/v1".to_owned(),
+            model: "gpt-demo".to_owned(),
+            api_key_source: TuiApiKeySource::Env {
+                name: "OPENAI_API_KEY".to_owned(),
+                redacted: "sk-d...demo".to_owned(),
+            },
+            config_path: ".moxi\\config.toml".to_owned(),
+            config_state: "present".to_owned(),
+        };
         apply_tui_key(&mut state, &TuiKey::SubmitCommand);
         assert_eq!(state.screen, TuiScreen::Core);
     }
@@ -5908,6 +6045,8 @@ mod tests {
         assert_eq!(config.config_state, "missing");
         assert_eq!(config.api_key_source, TuiApiKeySource::Missing);
         assert!(!config.is_configured());
+        assert!(config.needs_setup());
+        assert!(config.setup_sample().contains("api_key_env"));
     }
 
     #[test]
@@ -6516,6 +6655,7 @@ reasoning = "low"
             TuiKey::SubmitCommand,
             TuiKey::SubmitCommand,
             TuiKey::SubmitCommand,
+            TuiKey::SubmitCommand,
         ] {
             apply_tui_key(&mut state, &key);
         }
@@ -6856,10 +6996,17 @@ reasoning = "low"
         );
 
         apply_tui_key(&mut state, &TuiKey::SubmitCommand);
+        assert_eq!(state.screen, TuiScreen::Setup);
+        assert_eq!(
+            state.command_status,
+            "first-run setup: model/API config is missing"
+        );
+
+        apply_tui_key(&mut state, &TuiKey::SubmitCommand);
         assert_eq!(state.screen, TuiScreen::Core);
         assert_eq!(
             state.command_status,
-            "Agent Core ready: Enter opens workspace"
+            "setup guide acknowledged; Agent Core ready"
         );
 
         apply_tui_key(&mut state, &TuiKey::SubmitCommand);
@@ -6881,7 +7028,7 @@ reasoning = "low"
                 "--height",
                 "30",
                 "--keys",
-                "boot,enter,enter,enter,q",
+                "boot,enter,enter,enter,enter,q",
             ],
             &mut output,
         )
@@ -6894,6 +7041,34 @@ reasoning = "low"
         assert!(text.contains("Task Tracking"));
         assert!(text.contains("Input Task"));
         assert!(text.contains("quit=true"));
+    }
+
+    #[test]
+    fn tui_configured_startup_skips_first_run_setup() {
+        let mut state = TuiState {
+            screen: TuiScreen::Boot,
+            ..TuiState::default()
+        };
+        state.session.trust.status = TuiTrustStatus::KnownReadOnly;
+        state.session.model_config = TuiModelConfig {
+            provider: TuiModelProvider::OpenAi,
+            endpoint: "https://api.openai.com/v1".to_owned(),
+            model: "gpt-demo".to_owned(),
+            api_key_source: TuiApiKeySource::Env {
+                name: "OPENAI_API_KEY".to_owned(),
+                redacted: "sk-d...demo".to_owned(),
+            },
+            config_path: ".moxi\\config.toml".to_owned(),
+            config_state: "present".to_owned(),
+        };
+
+        apply_tui_key(&mut state, &TuiKey::SubmitCommand);
+
+        assert_eq!(state.screen, TuiScreen::Core);
+        assert_eq!(
+            state.command_status,
+            "trusted read-only workspace; Agent Core ready"
+        );
     }
 
     #[test]
@@ -6915,6 +7090,29 @@ reasoning = "low"
         assert!(text.contains("Initialization waterfall"));
         assert!(text.contains("Waiting for owner handoff"));
         assert!(text.contains("continue startup flow"));
+    }
+
+    #[test]
+    fn tui_setup_page_guides_model_api_configuration() {
+        let mut output = Vec::new();
+
+        let code = run(
+            [
+                "moxi-cli", "tui", "--width", "120", "--height", "32", "--keys", "setup,q",
+            ],
+            &mut output,
+        )
+        .unwrap();
+        let text = String::from_utf8(output).unwrap();
+
+        assert_eq!(code, 0);
+        assert!(text.contains("First-run Setup"));
+        assert!(text.contains("MOXI CLI Alpha setup"));
+        assert!(text.contains(".moxi/config.toml"));
+        assert!(text.contains("api_key_env"));
+        assert!(text.contains("OPENAI_API_KEY"));
+        assert!(text.contains("Environment alternative"));
+        assert!(!text.contains("sk-visible-never"));
     }
 
     #[test]
@@ -7009,7 +7207,7 @@ reasoning = "low"
         assert!(text.contains("moxi"));
         assert!(text.contains("Opens the resident branded read-only TUI workbench."));
         assert!(text.contains("Startup pages wait for owner input"));
-        assert!(text.contains("Enter advances Boot -> Trust -> Agent Core -> Workspace"));
+        assert!(text.contains("Enter advances Boot -> Trust -> First-run Setup"));
         assert!(text.contains("tui [--feed|--query] [--input <snapshot.json>]"));
     }
 

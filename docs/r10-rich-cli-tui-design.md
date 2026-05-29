@@ -183,7 +183,7 @@ existing config inside the TUI.
 MOXI CLI Alpha setup                  read-only model chat
 
 Model/API configuration is required before read-only model chat is available.
-This page is a guide only: it does not write files, print full keys, or call the network.
+This page writes only on explicit /init, never prints full keys, and keeps setup checks owner-triggered.
 
 Detected configuration
 provider: openai        model: not-configured
@@ -210,7 +210,7 @@ Setup checks
 /config redacted state    /doctor readiness    /models provider catalog
 No setup check has run on this page yet.
 
-Enter continue to Agent Core    /config show redacted state    5 workspace
+Enter continues after setup is complete    /config show redacted state    5 workspace
 ```
 
 CLI setup command:

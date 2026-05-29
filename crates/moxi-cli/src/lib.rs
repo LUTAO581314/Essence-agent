@@ -496,6 +496,17 @@ impl TuiAgentSession {
         )
     }
 
+    fn setup_incomplete_notice(&mut self) -> String {
+        self.model_config = TuiModelConfig::load_for_workspace(&self.workspace);
+        format!(
+            "setup incomplete: provider={} endpoint={} model={} key={}; run /init if config is missing, set the API key environment variable, then run /doctor",
+            self.model_config.provider.label(),
+            self.model_config.endpoint,
+            self.model_config.model,
+            self.model_config.api_key_source.summary()
+        )
+    }
+
     fn write_setup_model_config(&mut self) -> Result<String, String> {
         self.model_config = TuiModelConfig::load_for_workspace(&self.workspace);
         let path = PathBuf::from(&self.model_config.config_path);
@@ -3313,6 +3324,9 @@ fn apply_tui_key(state: &mut TuiState, key: &TuiKey) {
         TuiKey::Focus(pane) => state.active_pane = *pane,
         TuiKey::Screen(screen) => {
             state.screen = *screen;
+            if state.screen == TuiScreen::Workspace {
+                state.active_pane = TuiPane::Keys;
+            }
             if state.screen != TuiScreen::Setup {
                 state.setup_notice = None;
             }
@@ -3488,9 +3502,17 @@ fn advance_tui_startup_screen(state: &mut TuiState) {
             }
         }
         TuiScreen::Setup => {
-            state.screen = TuiScreen::Core;
-            state.setup_notice = None;
-            state.command_status = "setup guide acknowledged; Agent Core ready".into();
+            if state.session.model_config.needs_setup() {
+                state.setup_notice = Some(state.session.setup_incomplete_notice());
+                state.command_status =
+                    "first-run setup is incomplete; run /init, set API key env, then /doctor"
+                        .into();
+            } else {
+                state.screen = TuiScreen::Core;
+                state.setup_notice = None;
+                state.command_status =
+                    "setup ready: Agent Core ready for read-only model chat".into();
+            }
         }
         TuiScreen::Core => {
             state.screen = TuiScreen::Workspace;
@@ -5171,6 +5193,7 @@ fn render_tui_setup(frame: &mut ratatui::Frame<'_>, area: Rect, state: &TuiState
     let sample_lines = sample
         .lines()
         .map(|line| Line::from(vec![Span::styled(format!("  {line}"), style_value())]));
+    let config_path = compact_terminal_path(&config.config_path, 76);
     let mut lines = vec![
         Line::from(vec![
             Span::styled("MOXI CLI Alpha setup", style_brand()),
@@ -5182,11 +5205,14 @@ fn render_tui_setup(frame: &mut ratatui::Frame<'_>, area: Rect, state: &TuiState
             style_warning(),
         )]),
         Line::from(vec![Span::styled(
-            "This page is a guide only: it does not write files, print full keys, or call the network.",
+            "Writes only on /init; keys stay redacted; checks run only when owner-triggered.",
             style_value(),
         )]),
         Line::from(""),
-        Line::from(vec![Span::styled("Detected configuration", style_warning())]),
+        Line::from(vec![Span::styled(
+            "Detected configuration",
+            style_warning(),
+        )]),
         Line::from(vec![
             Span::styled("provider: ", style_label()),
             Span::styled(config.provider.label(), style_value()),
@@ -5199,7 +5225,7 @@ fn render_tui_setup(frame: &mut ratatui::Frame<'_>, area: Rect, state: &TuiState
         ]),
         Line::from(vec![
             Span::styled("config: ", style_label()),
-            Span::styled(config.config_path.clone(), style_value()),
+            Span::styled(config_path, style_value()),
             Span::styled(" (", style_dim()),
             Span::styled(config.config_state.clone(), style_dim()),
             Span::styled(")", style_dim()),
@@ -5209,7 +5235,10 @@ fn render_tui_setup(frame: &mut ratatui::Frame<'_>, area: Rect, state: &TuiState
             Span::styled(config.api_key_source.summary(), key_style),
         ]),
         Line::from(""),
-        Line::from(vec![Span::styled("Create .moxi/config.toml", style_warning())]),
+        Line::from(vec![Span::styled(
+            "Create .moxi/config.toml",
+            style_warning(),
+        )]),
         Line::from(vec![Span::styled("[model]", style_dim())]),
     ];
     lines.extend(sample_lines);
@@ -5238,6 +5267,7 @@ fn render_tui_setup(frame: &mut ratatui::Frame<'_>, area: Rect, state: &TuiState
             Span::styled("/models", style_focus()),
             Span::raw(" provider catalog"),
         ]),
+        Line::from("Enter continues only after model and key source are configured"),
         Line::from(vec![Span::styled(
             state
                 .setup_notice
@@ -5269,7 +5299,7 @@ fn render_tui_setup(frame: &mut ratatui::Frame<'_>, area: Rect, state: &TuiState
                 BorderType::Rounded,
             ))
             .wrap(Wrap { trim: true }),
-        centered_rect(area, 100, 31),
+        centered_rect(area, 100, 35),
     );
 }
 
@@ -5643,6 +5673,23 @@ fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
         width,
         height,
     }
+}
+
+fn compact_terminal_path(path: &str, max_chars: usize) -> String {
+    let char_count = path.chars().count();
+    if char_count <= max_chars {
+        return path.to_owned();
+    }
+    let tail_len = max_chars.saturating_sub(3).max(1);
+    let tail = path
+        .chars()
+        .rev()
+        .take(tail_len)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>();
+    format!("...{tail}")
 }
 
 fn workspace_display_path() -> String {
@@ -8629,8 +8676,7 @@ reasoning = "low"
         for key in [
             TuiKey::SubmitCommand,
             TuiKey::SubmitCommand,
-            TuiKey::SubmitCommand,
-            TuiKey::SubmitCommand,
+            TuiKey::Screen(TuiScreen::Workspace),
         ] {
             apply_tui_key(&mut state, &key);
         }
@@ -8977,10 +9023,34 @@ reasoning = "low"
         );
 
         apply_tui_key(&mut state, &TuiKey::SubmitCommand);
+        assert_eq!(state.screen, TuiScreen::Setup);
+        assert_eq!(
+            state.command_status,
+            "first-run setup is incomplete; run /init, set API key env, then /doctor"
+        );
+        assert!(state
+            .setup_notice
+            .as_deref()
+            .unwrap()
+            .contains("setup incomplete"));
+
+        state.session.model_config = TuiModelConfig {
+            provider: TuiModelProvider::OpenAi,
+            endpoint: "https://api.openai.com/v1".to_owned(),
+            model: "gpt-demo".to_owned(),
+            api_key_source: TuiApiKeySource::Env {
+                name: "OPENAI_API_KEY".to_owned(),
+                redacted: "sk-d...demo".to_owned(),
+            },
+            config_path: ".moxi\\config.toml".to_owned(),
+            config_state: "present".to_owned(),
+        };
+
+        apply_tui_key(&mut state, &TuiKey::SubmitCommand);
         assert_eq!(state.screen, TuiScreen::Core);
         assert_eq!(
             state.command_status,
-            "setup guide acknowledged; Agent Core ready"
+            "setup ready: Agent Core ready for read-only model chat"
         );
 
         apply_tui_key(&mut state, &TuiKey::SubmitCommand);
@@ -9002,7 +9072,7 @@ reasoning = "low"
                 "--height",
                 "30",
                 "--keys",
-                "boot,enter,enter,enter,enter,q",
+                "boot,enter,enter,5,q",
             ],
             &mut output,
         )
@@ -9072,7 +9142,7 @@ reasoning = "low"
 
         let code = run(
             [
-                "moxi-cli", "tui", "--width", "120", "--height", "32", "--keys", "setup,q",
+                "moxi-cli", "tui", "--width", "120", "--height", "36", "--keys", "setup,q",
             ],
             &mut output,
         )
@@ -9090,7 +9160,7 @@ reasoning = "low"
         assert!(text.contains("/init"));
         assert!(text.contains("/doctor"));
         assert!(text.contains("/models"));
-        assert!(text.contains("No setup check has run"));
+        assert!(text.contains("Enter continues only after model"));
         assert!(!text.contains("sk-visible-never"));
     }
 

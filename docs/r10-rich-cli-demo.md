@@ -105,8 +105,9 @@ The default entry opens the resident workbench. Use `q` to quit.
   command previews the same env-only config by default, and writes it only when
   `--write` is explicit. While on the setup page, `/init` explicitly writes the
   same env-only `.moxi/config.toml` template without raw API keys and refuses to
-  overwrite an existing config. `/config`, `/doctor`, and `/models` run in place
-  and update the setup summary instead of forcing the user into the main
+  overwrite an existing config. Empty Enter stays on setup until model and
+  API-key source are configured. `/config`, `/doctor`, and `/models` run in
+  place and update the setup summary instead of forcing the user into the main
   workbench.
 - `moxi config` and `/config` inspect the same model/API config state with
   redacted key display. `moxi doctor` and `/doctor` classify model/API readiness

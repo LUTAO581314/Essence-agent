@@ -560,7 +560,10 @@ up to 20 ids and redacting errors. The First-run Setup page now also runs
 line without printing secrets or forcing the user into the main workbench.
 `/init` writes the same env-only `.moxi/config.toml` template as `moxi init
 --write`, refuses to overwrite an existing config inside the TUI, and never
-stores raw API keys. Configured TUI task submissions now prefer a read-only
+stores raw API keys. Empty Enter on the setup page now stays in setup until the
+model and API-key source are configured, so first-run onboarding no longer
+pretends API-backed chat is ready before configuration is complete. Configured
+TUI task submissions now prefer a read-only
 OpenAI-compatible `/chat/completions` adapter that packages workspace facts,
 trust state, active agents, skills, and the owner task; provider/config errors
 fall back to local read-only analysis with redacted previews. The TUI now stages

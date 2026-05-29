@@ -1885,14 +1885,22 @@ fn apply_tui_key(state: &mut TuiState, key: &TuiKey) {
         TuiKey::Focus(pane) => state.active_pane = *pane,
         TuiKey::Screen(screen) => state.screen = *screen,
         TuiKey::MoveConversationDown => {
-            state.active_pane = TuiPane::Overview;
-            state.follow_latest_message = false;
-            state.conversation_scroll = state.conversation_scroll.saturating_add(1);
+            if state.show_command_palette {
+                move_command_palette_selection(state, 5);
+            } else {
+                state.active_pane = TuiPane::Overview;
+                state.follow_latest_message = false;
+                state.conversation_scroll = state.conversation_scroll.saturating_add(1);
+            }
         }
         TuiKey::MoveConversationUp => {
-            state.active_pane = TuiPane::Overview;
-            state.follow_latest_message = false;
-            state.conversation_scroll = state.conversation_scroll.saturating_sub(1);
+            if state.show_command_palette {
+                move_command_palette_selection(state, -5);
+            } else {
+                state.active_pane = TuiPane::Overview;
+                state.follow_latest_message = false;
+                state.conversation_scroll = state.conversation_scroll.saturating_sub(1);
+            }
         }
         TuiKey::MoveTaskDown => {
             if state.show_command_palette {
@@ -1940,7 +1948,8 @@ fn apply_tui_key(state: &mut TuiState, key: &TuiKey) {
             if state.show_command_palette {
                 state.active_pane = TuiPane::Keys;
                 state.command_palette_index = 0;
-                state.command_status = "command palette open: Up/Down select, Enter run".into();
+                state.command_status =
+                    "command palette open: Up/Down select, PgUp/PgDn scroll, Enter run".into();
             } else {
                 state.command_status = "ready: ? shortcuts · / command menu".into();
             }
@@ -1984,10 +1993,14 @@ fn move_command_palette_selection(state: &mut TuiState, delta: isize) {
         return;
     }
     let max_index = commands.len() - 1;
-    if delta < 0 {
-        state.command_palette_index = state.command_palette_index.saturating_sub(1);
+    let step = delta.unsigned_abs();
+    if delta.is_negative() {
+        state.command_palette_index = state.command_palette_index.saturating_sub(step);
     } else {
-        state.command_palette_index = state.command_palette_index.saturating_add(1).min(max_index);
+        state.command_palette_index = state
+            .command_palette_index
+            .saturating_add(step)
+            .min(max_index);
     }
     state.command_status = format!(
         "command palette selected {}",
@@ -3672,6 +3685,8 @@ fn render_tui_core(
 fn render_command_palette(frame: &mut ratatui::Frame<'_>, area: Rect, state: &TuiState) {
     let area = centered_rect(area, 58, 13);
     let entries = filtered_command_palette_entries(state.command_input.trim());
+    let entry_window =
+        command_palette_visible_window(entries.len(), state.command_palette_index, 5);
     let mut lines = vec![
         Line::from(vec![
             Span::styled("filter ", style_label()),
@@ -3683,7 +3698,10 @@ fn render_command_palette(frame: &mut ratatui::Frame<'_>, area: Rect, state: &Tu
                 },
                 style_value(),
             ),
-            Span::styled("  Up/Down select · Enter run · Esc quit", style_dim()),
+            Span::styled(
+                "  Up/Down select · PgUp/PgDn scroll · Enter run · Esc quit",
+                style_dim(),
+            ),
         ]),
         Line::from(""),
     ];
@@ -3694,7 +3712,18 @@ fn render_command_palette(frame: &mut ratatui::Frame<'_>, area: Rect, state: &Tu
         )]));
     } else {
         let selected = state.command_palette_index.min(entries.len() - 1);
-        for (index, entry) in entries.iter().enumerate() {
+        if entry_window.start > 0 {
+            lines.push(Line::from(vec![Span::styled(
+                format!("... {} earlier commands", entry_window.start),
+                style_dim(),
+            )]));
+        }
+        for (index, entry) in entries
+            .iter()
+            .enumerate()
+            .skip(entry_window.start)
+            .take(entry_window.end.saturating_sub(entry_window.start))
+        {
             let is_selected = index == selected;
             lines.push(Line::from(vec![
                 Span::styled(
@@ -3717,6 +3746,12 @@ fn render_command_palette(frame: &mut ratatui::Frame<'_>, area: Rect, state: &Tu
                 Span::styled(entry.description, style_dim()),
             ]));
         }
+        if entry_window.end < entries.len() {
+            lines.push(Line::from(vec![Span::styled(
+                format!("... {} more commands", entries.len() - entry_window.end),
+                style_dim(),
+            )]));
+        }
     }
     lines.push(Line::from(""));
     lines.push(Line::from(vec![Span::styled(
@@ -3733,6 +3768,29 @@ fn render_command_palette(frame: &mut ratatui::Frame<'_>, area: Rect, state: &Tu
             .wrap(Wrap { trim: true }),
         area,
     );
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CommandPaletteWindow {
+    start: usize,
+    end: usize,
+}
+
+fn command_palette_visible_window(
+    total_entries: usize,
+    selected_index: usize,
+    visible_entries: usize,
+) -> CommandPaletteWindow {
+    if total_entries == 0 || visible_entries == 0 {
+        return CommandPaletteWindow { start: 0, end: 0 };
+    }
+    let selected_index = selected_index.min(total_entries - 1);
+    let half_window = visible_entries / 2;
+    let mut start = selected_index.saturating_sub(half_window);
+    let max_start = total_entries.saturating_sub(visible_entries);
+    start = start.min(max_start);
+    let end = start.saturating_add(visible_entries).min(total_entries);
+    CommandPaletteWindow { start, end }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -6746,6 +6804,37 @@ reasoning = "low"
             .messages
             .iter()
             .any(|message| message.role == "agents"));
+    }
+
+    #[test]
+    fn tui_command_palette_scrolls_to_selected_entry() {
+        let window = command_palette_visible_window(COMMAND_PALETTE_ENTRIES.len(), 10, 5);
+        assert!(window.start > 0);
+        assert!(window.end < COMMAND_PALETTE_ENTRIES.len());
+        assert!((window.start..window.end).contains(&10));
+
+        let mut output = Vec::new();
+        let code = run(
+            [
+                "moxi-cli",
+                "tui",
+                "--width",
+                "132",
+                "--height",
+                "34",
+                "--keys",
+                "menu,down,down,down,down,down,down,down,down,down,down",
+            ],
+            &mut output,
+        )
+        .unwrap();
+        let text = String::from_utf8(output).unwrap();
+
+        assert_eq!(code, 0);
+        assert!(text.contains("earlier commands"));
+        assert!(text.contains("/boundary"));
+        assert!(text.contains("more commands"));
+        assert!(!text.contains("/status  current session"));
     }
 
     #[test]
